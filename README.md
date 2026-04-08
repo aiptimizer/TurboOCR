@@ -198,7 +198,7 @@ Latin script languages (English, German, French, Italian, Polish, Czech, Slovak,
 
 ## License
 
-Proprietary.
+MIT. See [LICENSE](LICENSE).
 
 ---
 

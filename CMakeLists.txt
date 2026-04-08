@@ -6,7 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Per-target optimization flags (applied below instead of global CMAKE_CXX_FLAGS)
-set(TURBO_OCR_CXX_FLAGS -O3 -march=native -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+option(NATIVE_ARCH "Use -march=native (faster but not portable)" ON)
+if(NATIVE_ARCH)
+  set(TURBO_OCR_CXX_FLAGS -O3 -march=native -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+else()
+  set(TURBO_OCR_CXX_FLAGS -O3 -Wall -Wextra -Wpedantic -Wno-unused-parameter)
+endif()
 
 option(USE_CPU_ONLY "Build CPU-only mode with ONNX Runtime" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)

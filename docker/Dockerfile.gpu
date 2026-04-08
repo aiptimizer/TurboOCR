@@ -66,7 +66,11 @@ RUN mkdir -p build && cd build && \
 
 EXPOSE 8000 50051
 
+# Run as non-root user
+RUN useradd -m -s /bin/bash ocr && chown -R ocr:ocr /app
+USER ocr
+
 # Entrypoint builds TRT engines on first run (needs GPU)
-COPY scripts/entrypoint.sh /app/scripts/
+COPY --chown=ocr:ocr scripts/entrypoint.sh /app/scripts/
 ENTRYPOINT ["/app/scripts/entrypoint.sh"]
 CMD ["./build/paddle_highspeed_cpp"]
