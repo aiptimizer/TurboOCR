@@ -49,7 +49,7 @@ Or pull the prebuilt image:
 ```bash
 docker run --gpus all -p 8000:8000 -p 50051:50051 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr \
-  ghcr.io/aiptimizer/turbo-ocr:v1.0.0
+  ghcr.io/aiptimizer/turbo-ocr:v1.1.0
 ```
 
 TensorRT engines are auto-built from ONNX on first startup (~90s). The `-v trt-cache:...` volume persists them so subsequent starts are instant. Without the volume, engines are rebuilt every time the container starts.
