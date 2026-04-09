@@ -2,10 +2,10 @@
 # turbo-ocr GPU Dockerfile
 # ============================================================
 # Build:  docker build -f docker/Dockerfile.gpu -t turbo-ocr .
-# Run:    docker run --gpus all -p 8000:8000 turbo-ocr
+# Run:    docker run --gpus all -p 8000:8000 -v trt-cache:/home/ocr/.cache/turbo-ocr turbo-ocr
 #
-# Models are auto-downloaded and converted during build.
-# To use your own models, mount: -v ./my_models:/app/models
+# TRT engines are auto-built from ONNX on first startup (~90s).
+# The -v mount persists them so subsequent starts are instant.
 # ============================================================
 
 FROM nvcr.io/nvidia/tensorrt:26.01-py3
@@ -59,8 +59,8 @@ RUN mkdir -p build && cd build && \
 #     make -j$(nproc)
 
 # ONNX models + keys.txt are included in the repo.
-# TRT engines are auto-built from ONNX on first startup by the C++ binary.
-# Cached in ~/.cache/turbo-ocr/ (or TRT_ENGINE_CACHE env var).
+# TRT engines are auto-built from ONNX on first startup (~90s).
+# Mount a volume to persist them: -v trt-cache:/home/ocr/.cache/turbo-ocr
 
 EXPOSE 8000 50051
 

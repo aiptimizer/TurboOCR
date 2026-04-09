@@ -39,16 +39,20 @@ Requires [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-nat
 docker build -f docker/Dockerfile.gpu -t turbo-ocr .
 
 # Run — --gpus all passes your NVIDIA GPU into the container
-docker run --gpus all -p 8000:8000 -p 50051:50051 turbo-ocr
+docker run --gpus all -p 8000:8000 -p 50051:50051 \
+  -v trt-cache:/home/ocr/.cache/turbo-ocr \
+  turbo-ocr
 ```
 
 Or pull the prebuilt image:
 
 ```bash
-docker run --gpus all -p 8000:8000 -p 50051:50051 ghcr.io/aiptimizer/turbo-ocr:v1.0.0
+docker run --gpus all -p 8000:8000 -p 50051:50051 \
+  -v trt-cache:/home/ocr/.cache/turbo-ocr \
+  ghcr.io/aiptimizer/turbo-ocr:v1.0.0
 ```
 
-TensorRT engines are built on first startup (few minutes, cached after). Subsequent starts are instant.
+TensorRT engines are auto-built from ONNX on first startup (~90s). The `-v trt-cache:...` volume persists them so subsequent starts are instant. Without the volume, engines are rebuilt every time the container starts.
 
 ### Docker (CPU)
 
@@ -142,6 +146,7 @@ curl http://localhost:8000/health  # returns "ok"
 | `REC_DICT` | `models/keys.txt` | Character dictionary |
 | `DISABLE_ANGLE_CLS` | `0` | Skip angle classifier (~0.4 ms savings) |
 | `DET_MAX_SIDE` | `960` | Max detection input size |
+| `TRT_ENGINE_CACHE` | `~/.cache/turbo-ocr` | Directory for cached TRT engines |
 | `PDF_DAEMONS` | `16` | Persistent PDF render processes |
 | `PDF_WORKERS` | `4` | Parallel pages per PDF request |
 | `PORT` / `GRPC_PORT` | `8000` / `50051` | Server ports |
@@ -150,6 +155,7 @@ Pass environment variables via Docker `-e` flags:
 
 ```bash
 docker run --gpus all -p 8000:8000 -p 50051:50051 \
+  -v trt-cache:/home/ocr/.cache/turbo-ocr \
   -e PIPELINE_POOL_SIZE=3 \
   -e HTTP_THREADS=16 \
   -e DISABLE_ANGLE_CLS=1 \
