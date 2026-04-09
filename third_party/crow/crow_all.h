@@ -1059,6 +1059,10 @@ namespace crow
 #endif
 #endif
 
+#ifdef __linux__
+#include <netinet/tcp.h>  // TCP_QUICKACK
+#endif
+
 #if (CROW_USE_BOOST && BOOST_VERSION >= 107000) || (ASIO_VERSION >= 101300)
 #define GET_IO_CONTEXT(s) ((asio::io_context&)(s).get_executor().context())
 #else
@@ -9915,6 +9919,12 @@ namespace crow
 
         void do_read()
         {
+#ifdef __linux__
+            // TCP_QUICKACK is a one-shot flag on Linux — must be re-enabled
+            // before every read to prevent 40ms delayed-ACK stalls on keep-alive.
+            int qack = 1;
+            setsockopt(adaptor_.socket().native_handle(), IPPROTO_TCP, TCP_QUICKACK, &qack, sizeof(qack));
+#endif
             auto self = this->shared_from_this();
             adaptor_.socket().async_read_some(
               asio::buffer(buffer_),
@@ -11163,6 +11173,7 @@ namespace crow // NOTE: Already documented in "crow/app.h"
                   [this, p, &ic, context_idx](error_code ec) {
                       if (!ec)
                       {
+                          p->socket().set_option(asio::ip::tcp::no_delay(true));
                           asio::post(ic,
                             [p] {
                                 p->start();
