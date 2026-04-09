@@ -12,6 +12,7 @@
 #include <opencv2/imgcodecs.hpp>
 
 #include "turbo_ocr/decode/nvjpeg_decoder.h"
+#include "turbo_ocr/engine/onnx_to_trt.h"
 #include "turbo_ocr/pipeline/gpu_pipeline_pool.h"
 #include "turbo_ocr/render/pdf_renderer.h"
 #include "turbo_ocr/server/env_utils.h"
@@ -28,10 +29,15 @@ using turbo_ocr::render::PdfRenderer;
 using turbo_ocr::server::env_or;
 
 int main() {
-  auto det_model = env_or("DET_MODEL", "models/det.trt");
-  auto rec_model = env_or("REC_MODEL", "models/rec.trt");
   auto rec_dict = env_or("REC_DICT", "models/keys.txt");
-  auto cls_model = env_or("CLS_MODEL", "models/cls.trt");
+
+  // Auto-build TRT engines from ONNX (cached by TRT version + model hash)
+  auto det_model = turbo_ocr::engine::ensure_trt_engine(
+      env_or("DET_ONNX", "models/det.onnx"), "det");
+  auto rec_model = turbo_ocr::engine::ensure_trt_engine(
+      env_or("REC_ONNX", "models/rec.onnx"), "rec");
+  auto cls_model = turbo_ocr::engine::ensure_trt_engine(
+      env_or("CLS_ONNX", "models/cls.onnx"), "cls");
   if (turbo_ocr::server::env_enabled("DISABLE_ANGLE_CLS")) {
     cls_model.clear();
     std::cout << "Angle classification disabled via DISABLE_ANGLE_CLS=1" << '\n';

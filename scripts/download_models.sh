@@ -44,5 +44,5 @@ echo ""
 echo "Models:"
 ls -lh "$OUT"/{det,rec,cls}.onnx "$OUT"/keys.txt 2>/dev/null
 echo ""
-echo "GPU: python scripts/convert_onnx_to_trt.py --model $OUT/det.onnx --output $OUT/det.trt --type det"
-echo "CPU: use .onnx files directly"
+echo "TRT engines are auto-built from ONNX on first startup."
+echo "CPU mode: use .onnx files directly."

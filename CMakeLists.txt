@@ -26,7 +26,7 @@ if(ENABLE_TSAN)
     add_link_options(-fsanitize=thread)
 endif()
 
-find_package(OpenCV REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 
 # --- Shared library: turbo_ocr_common ---
 add_library(turbo_ocr_common STATIC
@@ -138,6 +138,7 @@ else()
     # --- GPU library ---
     add_library(turbo_ocr_gpu STATIC
         src/engine/trt_engine.cpp
+        src/engine/onnx_to_trt.cpp
         src/detection/paddle_det.cpp
         src/recognition/paddle_rec.cpp
         src/classification/paddle_cls.cpp
@@ -155,6 +156,7 @@ else()
         turbo_ocr_common
         nvinfer
         nvinfer_plugin
+        nvonnxparser
         nvjpeg
         cudart
     )

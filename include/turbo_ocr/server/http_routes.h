@@ -64,7 +64,8 @@ inline void register_ocr_base64_route(crow::SimpleApp &app,
     if (!x)
       return crow::response(400, "Invalid JSON");
 
-    if (!x.has("image") || x["image"].s().size() == 0)
+    if (!x.has("image") || x["image"].t() != crow::json::type::String
+        || x["image"].s().size() == 0)
       return crow::response(400, "Empty or missing image field");
 
     std::string decoded = base64_decode(x["image"].s());

@@ -1,9 +1,8 @@
 # High-throughput OCR with MPS multi-instance scaling.
 # Requires NVIDIA MPS: sudo nvidia-cuda-mps-control -d
 #
-# TRT engines are built once by the first container (via flock) and shared
-# via a named volume. All other containers wait for the lock, find engines
-# already built, and start immediately.
+# TRT engines are auto-built from ONNX on first startup by the C++ binary.
+# Cached in the shared volume — built once, used by all instances.
 #
 # Usage:
 #   docker compose up -d                # Start 7 instances
@@ -11,7 +10,7 @@
 #   docker compose down                 # Stop all
 
 volumes:
-  trt-cache:  # Shared TRT engine cache — build once, used by all instances
+  trt-cache:  # Shared TRT engine cache
 
 services:
   ocr:
@@ -28,26 +27,11 @@ services:
       replicas: 7
     environment:
       - PIPELINE_POOL_SIZE=3
+      - TRT_ENGINE_CACHE=/app/trt_cache
     ports:
       - "8001-8007:8000"
     volumes:
       - trt-cache:/app/trt_cache
-    command: >
-      bash -c "
-        mkdir -p /app/trt_cache &&
-        flock /app/trt_cache/.lock bash -c '
-          if [ ! -f /app/trt_cache/det.trt ]; then
-            echo \"[$$HOSTNAME] Building TRT engines (first instance)...\" &&
-            python3 /app/scripts/convert_onnx_to_trt.py --model /app/models/det.onnx --output /app/trt_cache/det.trt --type det &&
-            python3 /app/scripts/convert_onnx_to_trt.py --model /app/models/rec.onnx --output /app/trt_cache/rec.trt --type rec &&
-            python3 /app/scripts/convert_onnx_to_trt.py --model /app/models/cls.onnx --output /app/trt_cache/cls.trt --type cls &&
-            echo \"TRT engines built.\"
-          else
-            echo \"[$$HOSTNAME] Using cached TRT engines.\"
-          fi
-        ' &&
-        exec env DET_MODEL=/app/trt_cache/det.trt REC_MODEL=/app/trt_cache/rec.trt CLS_MODEL=/app/trt_cache/cls.trt ./build/paddle_highspeed_cpp
-      "
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
@@ -70,22 +54,12 @@ services:
               capabilities: [gpu]
     environment:
       - PIPELINE_POOL_SIZE=5
+      - TRT_ENGINE_CACHE=/app/trt_cache
     ports:
       - "50051:50051"
     volumes:
       - trt-cache:/app/trt_cache
-    command: >
-      bash -c "
-        mkdir -p /app/trt_cache &&
-        flock /app/trt_cache/.lock bash -c '
-          if [ ! -f /app/trt_cache/det.trt ]; then
-            python3 /app/scripts/convert_onnx_to_trt.py --model /app/models/det.onnx --output /app/trt_cache/det.trt --type det &&
-            python3 /app/scripts/convert_onnx_to_trt.py --model /app/models/rec.onnx --output /app/trt_cache/rec.trt --type rec &&
-            python3 /app/scripts/convert_onnx_to_trt.py --model /app/models/cls.onnx --output /app/trt_cache/cls.trt --type cls
-          fi
-        ' &&
-        exec env DET_MODEL=/app/trt_cache/det.trt REC_MODEL=/app/trt_cache/rec.trt CLS_MODEL=/app/trt_cache/cls.trt /app/build/paddle_grpc_server
-      "
+    command: ["./build/paddle_grpc_server"]
     restart: unless-stopped
     profiles:
       - grpc

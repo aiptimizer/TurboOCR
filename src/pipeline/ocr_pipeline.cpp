@@ -427,16 +427,13 @@ std::vector<std::vector<OCRResultItem>> OcrPipeline::run_batch(
     CUDA_CHECK(cudaStreamSynchronize(stream));
   }
 
-  // Batched detection: single TRT inference call for all images
-  std::vector<GpuImage> gpu_imgs_vec(batch_n);
-  std::vector<std::pair<int,int>> orig_dims_vec(batch_n);
+  // Per-image detection (det engine uses batch=1 for optimal single-image speed)
+  std::vector<std::vector<Box>> all_det_boxes(batch_n);
   for (int i = 0; i < batch_n; i++) {
-    gpu_imgs_vec[i] = GpuImage{per_img[i].d_buf, per_img[i].pitch,
-                                per_img[i].rows, per_img[i].cols};
-    orig_dims_vec[i] = {per_img[i].rows, per_img[i].cols};
+    GpuImage gi{per_img[i].d_buf, per_img[i].pitch,
+                per_img[i].rows, per_img[i].cols};
+    all_det_boxes[i] = det_->run(gi, per_img[i].rows, per_img[i].cols, stream);
   }
-
-  auto all_det_boxes = det_->run_batch(gpu_imgs_vec, orig_dims_vec, stream);
 
   // Assign detection results and run angle classification per-image
   for (int i = 0; i < batch_n; i++) {
