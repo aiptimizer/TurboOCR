@@ -66,6 +66,7 @@ EXPOSE 8000 50051
 
 # Run as non-root user
 RUN useradd -m -s /bin/bash ocr && chown -R ocr:ocr /app
+RUN mkdir -p /home/ocr/.cache/turbo-ocr && chown -R ocr:ocr /home/ocr/.cache
 USER ocr
 
 # Entrypoint builds TRT engines on first run (needs GPU)
