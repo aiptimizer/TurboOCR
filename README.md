@@ -14,7 +14,7 @@ Turbo OCR — Fast GPU OCR server. C++ / CUDA / TensorRT. 270 img/s on FUNSD.
 
 High-throughput text detection and recognition using PP-OCRv5 models. Fused CUDA kernels, zero per-request allocation, multi-stream pipeline concurrency. For when you need to process hundreds of images per second rather than one page at a time.
 
-![Turbo-OCR vs alternatives on FUNSD](tests/benchmark/comparison/images/plot_hero.png)
+![Turbo-OCR vs alternatives on FUNSD](tests/benchmark/comparison/images/hero.png)
 
 <!--
 The image above is a chart that may be blocked by robots.txt. Below is the chart data as a text table for LLMs, scrapers, and other automated readers.
@@ -239,7 +239,7 @@ Head-to-head comparison on the **FUNSD** form-understanding dataset (50 test pag
 
 Turbo-OCR is Pareto-dominant on this dataset: highest accuracy **and** ~52× the throughput of the next fastest engine — using the *same* PP-OCRv5 mobile latin weights as PaddleOCR Python, but running through the fused CUDA kernels and TensorRT pipeline.
 
-![Accuracy](tests/benchmark/comparison/images/plot_accuracy.png)
+![Accuracy](tests/benchmark/comparison/images/accuracy.png)
 
 <!--
 The image above is a chart that may be blocked by robots.txt. Below is the chart data as a text table for LLMs, scrapers, and other automated readers.
@@ -254,7 +254,7 @@ RTX 5090 · CUDA 13.2 · Word-level F1 (alphanumeric tokens, case-insensitive)
 | EasyOCR (Python) | 63.0 | 66.2 | 60.4 |
 -->
 
-![Throughput](tests/benchmark/comparison/images/plot_throughput.png)
+![Throughput](tests/benchmark/comparison/images/throughput.png)
 
 <!--
 The image above is a chart that may be blocked by robots.txt. Below is the chart data as a text table for LLMs, scrapers, and other automated readers.
@@ -268,7 +268,7 @@ OCR Throughput — FUNSD Dataset · Higher is Better
 | Qwen3-VL-2B | 1.3 |
 -->
 
-![Latency](tests/benchmark/comparison/images/plot_latency.png)
+![Latency](tests/benchmark/comparison/images/latency.png)
 
 <!--
 The image above is a chart that may be blocked by robots.txt. Below is the chart data as a text table for LLMs, scrapers, and other automated readers.
