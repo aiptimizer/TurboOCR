@@ -61,16 +61,16 @@ void fused_resize_normalize_chw_kernel(
   float w01 = (1.0f - fx) * fy;
   float w11 = fx * fy;
 
-  // Interpolate BGR then normalize to CHW (RGB order)
+  // Interpolate BGR and keep BGR order (PaddleOCR uses img_mode: BGR)
   float b = w00 * p00.x + w10 * p10.x + w01 * p01.x + w11 * p11.x;
   float g = w00 * p00.y + w10 * p10.y + w01 * p01.y + w11 * p11.y;
   float r = w00 * p00.z + w10 * p10.z + w01 * p01.z + w11 * p11.z;
 
   int idx = dy * dst_w + dx;
   int plane = dst_h * dst_w;
-  dst_chw[0 * plane + idx] = (r * inv_255 - mean0) * inv_std0;
+  dst_chw[0 * plane + idx] = (b * inv_255 - mean0) * inv_std0;
   dst_chw[1 * plane + idx] = (g * inv_255 - mean1) * inv_std1;
-  dst_chw[2 * plane + idx] = (b * inv_255 - mean2) * inv_std2;
+  dst_chw[2 * plane + idx] = (r * inv_255 - mean2) * inv_std2;
 }
 
 void cuda_fused_resize_normalize_det(const GpuImage &src, float *dst_chw,
@@ -152,7 +152,7 @@ void batch_fused_resize_normalize_chw_kernel(
   float w01 = (1.0f - fx) * fy;
   float w11 = fx * fy;
 
-  // Interpolate BGR then normalize to CHW (RGB order)
+  // Interpolate BGR and keep BGR order (PaddleOCR uses img_mode: BGR)
   float bb = w00 * p00.x + w10 * p10.x + w01 * p01.x + w11 * p11.x;
   float g = w00 * p00.y + w10 * p10.y + w01 * p01.y + w11 * p11.y;
   float r = w00 * p00.z + w10 * p10.z + w01 * p01.z + w11 * p11.z;
@@ -160,9 +160,9 @@ void batch_fused_resize_normalize_chw_kernel(
   int plane = dst_h * dst_w;
   int batch_offset = b * 3 * plane;
   int idx = dy * dst_w + dx;
-  dst_chw[batch_offset + 0 * plane + idx] = (r * inv_255 - mean0) * inv_std0;
+  dst_chw[batch_offset + 0 * plane + idx] = (bb * inv_255 - mean0) * inv_std0;
   dst_chw[batch_offset + 1 * plane + idx] = (g * inv_255 - mean1) * inv_std1;
-  dst_chw[batch_offset + 2 * plane + idx] = (bb * inv_255 - mean2) * inv_std2;
+  dst_chw[batch_offset + 2 * plane + idx] = (r * inv_255 - mean2) * inv_std2;
 }
 
 void cuda_batch_fused_resize_normalize_det(

@@ -6,7 +6,9 @@
 
 High-throughput text detection and recognition using PP-OCRv5 models. Fused CUDA kernels, zero per-request allocation, multi-stream pipeline concurrency. For when you need to process hundreds of images per second rather than one page at a time.
 
-Not a replacement for dedicated OCR VLMs (PaddleOCR-VL, GLM-OCR, olmOCR, SmolDocling) which handle complex layouts, handwriting, and tables better. This is the fast lane — hundreds of images per second vs ~1-2 pages/s with VLM-based OCR. Use VLMs when accuracy on difficult documents matters more than speed.
+![Turbo-OCR vs alternatives on FUNSD](tests/benchmark/comparison/images/plot_hero.png)
+
+Not a replacement for dedicated OCR VLMs (PaddleOCR-VL, GLM-OCR, olmOCR, SmolDocling) on genuinely hard documents — complex layouts, handwriting, tables, structured extraction. This is the fast lane: hundreds of images per second vs ~1–2 pages/s with VLM-based OCR. Reach for a VLM when the document is difficult enough that accuracy matters more than speed.
 
 Accepts PDFs directly — pages are rendered and OCR'd in parallel across the pipeline pool, often matching image throughput.
 
@@ -17,14 +19,14 @@ Accepts PDFs directly — pages are rendered and OCR'd in parallel across the pi
 
 | Metric | Value | Conditions |
 |:------:|:-----:|:----------:|
-| **246 img/s** | throughput | A4 docs, ~35 text regions, c=16 |
+| **270 img/s** | throughput | FUNSD forms, ~35 text regions, c=16 |
 | **1200+ img/s** | throughput | sparse docs, ~10 text regions, c=8 |
-| **9.5 ms** | p50 latency | A4 docs, c=8 |
-| **F1 = 88.0%** | accuracy | FUNSD dataset, 100 A4 docs |
+| **11 ms** | p50 latency | FUNSD forms, single request |
+| **F1 = 90.2%** | accuracy | FUNSD dataset, 50 pages |
 
 Throughput scales with text density — fewer text regions per page means faster processing since recognition is the dominant stage.
 
-*Benchmarked on RTX 5090, PP-OCRv5 mobile, TensorRT FP16, pool=5.*
+*Benchmarked on RTX 5090, PP-OCRv5 mobile latin, TensorRT FP16, pool=3.*
 
 ---
 
@@ -201,6 +203,25 @@ Download the TensorRT tar matching your CUDA **major** version from [NVIDIA](htt
 ## Supported Languages
 
 Latin script languages (English, German, French, Italian, Polish, Czech, Slovak, Croatian, and more), plus Greek. 836 characters total. No Cyrillic support.
+
+---
+
+## Benchmark vs other OCR engines
+
+Head-to-head comparison on the **FUNSD** form-understanding dataset (50 test pages, ~170 words/page) against the reference PaddleOCR Python implementation, EasyOCR, and two modern VLM-based OCR systems. Same word-level F1 metric for every engine (alphanumeric regex tokenization, ≥2 chars, case-insensitive). Single RTX 5090, TensorRT FP16 for Turbo-OCR, vLLM for VLMs.
+
+**Caveats — treat these numbers as a directional baseline, not a verdict:**
+
+- **Crude accuracy metric.** Bag-of-words F1 (lowercased, tokens ≥ 2 chars) ignores order and duplicate counts, so it can't credit VLMs for cleaner phrasing. A CER or reading-order metric would likely help the VLM systems.
+- **VLMs could run faster.** They are served by an off-the-shelf vLLM configuration in fp16 with default batching. Quantization (AWQ/FP8), speculative decoding, a larger `max-num-seqs`, or a dedicated inference stack would push their throughput meaningfully higher.
+- **VLM prompts are untuned.** Qwen3-VL-2B is queried with the literal prompt `"OCR:"`; PaddleOCR-VL uses its default. With prompt engineering and a larger decoding budget both VLMs would likely land **above** every CTC engine here, Turbo-OCR included. This is "out-of-the-box VLM", not "VLM at its best".
+- **Single domain.** FUNSD is English business forms; receipts, menus, scene text, handwriting, or non-Latin scripts would look different.
+
+Turbo-OCR is Pareto-dominant on this dataset: highest accuracy **and** ~52× the throughput of the next fastest engine — using the *same* PP-OCRv5 mobile latin weights as PaddleOCR Python, but running through the fused CUDA kernels and TensorRT pipeline.
+
+![Accuracy](tests/benchmark/comparison/images/plot_accuracy.png)
+![Throughput](tests/benchmark/comparison/images/plot_throughput.png)
+![Latency](tests/benchmark/comparison/images/plot_latency.png)
 
 ## License
 
