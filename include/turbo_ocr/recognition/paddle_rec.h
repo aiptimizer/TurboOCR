@@ -54,7 +54,7 @@ private:
   std::unique_ptr<engine::TrtEngine> engine_;
 
   static constexpr int kMaxRecWidth = 4000;
-  static constexpr std::array kWidthBuckets = {160, 320, 480, 800, 1200, 1600, 2000, 2500, 3200, 4000};
+  static constexpr std::array kWidthBuckets = {320, 480, 800, 1200, 1600, 2000, 2500, 3200, 4000};
 
   // Actual model dims (probed after load)
   int actual_seq_len_ = 600;
