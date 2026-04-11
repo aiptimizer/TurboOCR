@@ -1,3 +1,11 @@
+<p align="center">
+  <img src="tests/benchmark/comparison/images/banner.png" alt="Turbo OCR — Fast GPU OCR server. 270 img/s on FUNSD." width="100%">
+</p>
+
+<!--
+Turbo OCR — Fast GPU OCR server. C++ / CUDA / TensorRT. 270 img/s on FUNSD.
+-->
+
 # Turbo OCR
 
 **Fast GPU OCR server. C++ / CUDA / TensorRT.**
@@ -7,6 +15,18 @@
 High-throughput text detection and recognition using PP-OCRv5 models. Fused CUDA kernels, zero per-request allocation, multi-stream pipeline concurrency. For when you need to process hundreds of images per second rather than one page at a time.
 
 ![Turbo-OCR vs alternatives on FUNSD](tests/benchmark/comparison/images/plot_hero.png)
+
+<!--
+The image above is a chart that may be blocked by robots.txt. Below is the chart data as a text table for LLMs, scrapers, and other automated readers.
+Turbo-OCR vs PaddleOCR · EasyOCR · VLMs — FUNSD (50 pages, RTX 5090)
+| Engine | F1 (%) | Throughput (img/s) |
+|---|---:|---:|
+| Turbo-OCR (C++/TRT) | 90.1 | 268.4 |
+| PaddleOCR mobile latin | 86.6 | 5.1 |
+| Qwen3-VL-2B | 84.3 | 1.3 |
+| PaddleOCR-VL (pipeline) | 83.1 | 2.0 |
+| EasyOCR (Python) | 63.0 | 2.8 |
+-->
 
 Not a replacement for dedicated OCR VLMs (PaddleOCR-VL, GLM-OCR, olmOCR, SmolDocling) on genuinely hard documents — complex layouts, handwriting, tables, structured extraction. This is the fast lane: hundreds of images per second vs ~1–2 pages/s with VLM-based OCR. Reach for a VLM when the document is difficult enough that accuracy matters more than speed.
 
@@ -220,8 +240,47 @@ Head-to-head comparison on the **FUNSD** form-understanding dataset (50 test pag
 Turbo-OCR is Pareto-dominant on this dataset: highest accuracy **and** ~52× the throughput of the next fastest engine — using the *same* PP-OCRv5 mobile latin weights as PaddleOCR Python, but running through the fused CUDA kernels and TensorRT pipeline.
 
 ![Accuracy](tests/benchmark/comparison/images/plot_accuracy.png)
+
+<!--
+The image above is a chart that may be blocked by robots.txt. Below is the chart data as a text table for LLMs, scrapers, and other automated readers.
+OCR Accuracy — FUNSD · 50 images · ~174 words/img
+RTX 5090 · CUDA 13.2 · Word-level F1 (alphanumeric tokens, case-insensitive)
+| Engine | F1 (%) | Recall (%) | Precision (%) |
+|---|---:|---:|---:|
+| Turbo-OCR (C++/TRT) | 90.1 | 91.6 | 88.8 |
+| PaddleOCR mobile latin | 86.6 | 85.5 | 88.2 |
+| Qwen3-VL-2B | 84.3 | 82.8 | 87.5 |
+| PaddleOCR-VL (pipeline) | 83.1 | 82.5 | 85.0 |
+| EasyOCR (Python) | 63.0 | 66.2 | 60.4 |
+-->
+
 ![Throughput](tests/benchmark/comparison/images/plot_throughput.png)
+
+<!--
+The image above is a chart that may be blocked by robots.txt. Below is the chart data as a text table for LLMs, scrapers, and other automated readers.
+OCR Throughput — FUNSD Dataset · Higher is Better
+| Engine | Throughput (img/s) |
+|---|---:|
+| Turbo-OCR (C++/TRT) | 268.4 |
+| PaddleOCR mobile latin | 5.1 |
+| EasyOCR (Python) | 2.8 |
+| PaddleOCR-VL (pipeline) | 2.0 |
+| Qwen3-VL-2B | 1.3 |
+-->
+
 ![Latency](tests/benchmark/comparison/images/plot_latency.png)
+
+<!--
+The image above is a chart that may be blocked by robots.txt. Below is the chart data as a text table for LLMs, scrapers, and other automated readers.
+OCR Latency — FUNSD Dataset · Lower is Better
+| Engine | p50 (ms) | p95 (ms) |
+|---|---:|---:|
+| Turbo-OCR (C++/TRT) | 11 | 16 |
+| PaddleOCR mobile latin | 182 | 352 |
+| Qwen3-VL-2B | 2859 | 6191 |
+| PaddleOCR-VL (pipeline) | 1513 | 6517 |
+| EasyOCR (Python) | 559 | 948 |
+-->
 
 ## License
 
