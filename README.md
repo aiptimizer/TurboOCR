@@ -30,8 +30,10 @@ Turbo OCR — Fast GPU OCR server. C++ / CUDA / TensorRT. 270 img/s on FUNSD.
   <a href="#quick-start">Quick Start</a> &middot;
   <a href="#api">API</a> &middot;
   <a href="#benchmarks">Benchmarks</a> &middot;
+  <a href="#monitoring">Monitoring</a> &middot;
   <a href="#configuration">Configuration</a> &middot;
-  <a href="#building-from-source">Build</a>
+  <a href="#building-from-source">Build</a> &middot;
+  <a href="#roadmap">Roadmap</a>
 </p>
 
 ---
@@ -52,15 +54,25 @@ Turbo-OCR vs PaddleOCR · EasyOCR · VLMs — FUNSD (50 pages, RTX 5090)
 
 ### Highlights
 
-- **270 img/s** on FUNSD A4 forms (c=16) &mdash; **1,200+ img/s** on sparse documents
-- **11 ms p50 latency**, single request
-- **F1 = 90.2%** on FUNSD &mdash; higher accuracy than PaddleOCR Python with the same weights
-- **PDF native** &mdash; pages rendered and OCR'd in parallel, 580+ pages/s
-- **4 PDF modes** &mdash; pure OCR, native text layer, auto-dispatch, detection-verified hybrid
-- **Layout detection** &mdash; PP-DocLayoutV3 with 25 region classes, enabled by default, per-request `?layout=1` toggle (~20% throughput cost)
-- **HTTP + gRPC** from a single binary, sharing the same GPU pipeline pool
+- 🚀 **270 img/s** on FUNSD A4 forms (c=16) &mdash; **1,200+ img/s** on sparse documents
+- ⚡ **11 ms p50 latency**, single request
+- 🎯 **F1 = 90.2%** on FUNSD &mdash; higher accuracy than PaddleOCR Python with the same weights
+- 🖨️ **Prints & handwriting** &mdash; PP-OCRv5 handles both out of the box
+- 📄 **PDF native** &mdash; pages rendered and OCR'd in parallel
+- 🔒 **4 PDF modes** &mdash; pure OCR, native text layer, auto-dispatch, detection-verified hybrid
+- 🧩 **Layout detection** &mdash; PP-DocLayoutV3 with 25 region classes, per-request `?layout=1` toggle
+- 🌐 **HTTP + gRPC** from a single binary, sharing the same GPU pipeline pool
+- 🐳 **One-line Docker deploy** &mdash; `docker run` with auto TRT engine build on first start
+- 📊 **Prometheus metrics** &mdash; request counters, latency histograms, VRAM usage on `/metrics`
 
-*RTX 5090, PP-OCRv5 mobile latin, TensorRT FP16, pool=5. Not a replacement for VLM-based OCR on hard documents (handwriting, complex tables, structured extraction) &mdash; this is the fast lane.*
+*RTX 5090, PP-OCRv5 mobile latin, TensorRT FP16, pool=5. Prints, handwriting, layout detection. This is the fast lane.*
+
+### 🗺️ Roadmap
+
+- 🌍 Configurable languages
+- 🔍 Structured extraction
+- 📝 Markdown output
+- 📊 Table parsing
 
 ---
 
