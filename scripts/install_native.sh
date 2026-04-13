@@ -41,8 +41,29 @@ info "GPU: $GPU_NAME"
 
 # ─── Step 1: System packages ────────────────────────────────────────────────
 
-info "Installing system packages (cmake, opencv, protobuf, grpc)..."
-sudo pacman -S --needed --noconfirm cmake opencv protobuf grpc
+info "Installing system packages (cmake, opencv, protobuf, grpc, nginx, drogon deps)..."
+sudo pacman -S --needed --noconfirm cmake opencv protobuf grpc jsoncpp openssl c-ares nginx
+
+# ─── Step 1b: Drogon HTTP framework ────────────────────────────────────────
+
+DROGON_VERSION="v1.9.12"
+if pkg-config --exists drogon 2>/dev/null; then
+    info "Drogon already installed"
+else
+    info "Building Drogon ${DROGON_VERSION} from source..."
+    DROGON_TMP=$(mktemp -d)
+    git clone --depth 1 --branch "$DROGON_VERSION" https://github.com/drogonframework/drogon.git "$DROGON_TMP"
+    cd "$DROGON_TMP"
+    git submodule update --init
+    cmake -B build -DBUILD_EXAMPLES=OFF -DBUILD_CTL=OFF -DBUILD_ORM=OFF \
+          -DBUILD_POSTGRESQL=OFF -DBUILD_MYSQL=OFF -DBUILD_SQLITE=OFF \
+          -DBUILD_REDIS=OFF -DBUILD_TESTING=OFF
+    cmake --build build -j"$(nproc)"
+    sudo cmake --install build
+    rm -rf "$DROGON_TMP"
+    cd "$PROJECT_DIR"
+    info "Drogon installed"
+fi
 
 # ─── Step 2: TensorRT ───────────────────────────────────────────────────────
 

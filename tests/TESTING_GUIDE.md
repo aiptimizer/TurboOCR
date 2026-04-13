@@ -204,7 +204,7 @@ pytest tests/benchmark/bench_concurrent.py -v -s --server-url http://localhost:8
 
 **Critical areas to test for races:**
 - `PipelinePool<T>` acquire/release (mutex + condition variable)
-- Crow HTTP handler thread pool (multiple requests hitting the pool concurrently)
+- Drogon HTTP handler work pool (multiple requests hitting the pool concurrently)
 - `NvJpegDecoder` thread-local instances
 - `PdfRenderer` daemon pool management
 - gRPC server concurrent request handling
@@ -507,7 +507,7 @@ Ranked by attack surface and complexity:
 
 1. **base64_decode()** -- directly processes user input, pointer arithmetic
 2. **FastPngDecoder** -- parses complex binary format (Wuffs is hardened, but the wrapper code matters)
-3. **JSON request parsing** -- Crow JSON body parsing
+3. **JSON request parsing** -- Drogon/jsoncpp JSON body parsing
 4. **det_postprocess** -- processes model output into polygons; malformed tensors could trigger issues
 5. **ctc_decode** -- index math on recognition output
 

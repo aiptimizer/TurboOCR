@@ -36,7 +36,7 @@ class TestErrorHandling:
     def test_ocr_null_image(self, server_url):
         """POST /ocr with null image field should return 400 or 500.
 
-        The server's Crow JSON parser may throw on null values. Either
+        The server's Drogon/jsoncpp JSON parser may throw on null values. Either
         a 400 (graceful) or 500 (uncaught) is acceptable -- not a crash.
         """
         r = requests.post(

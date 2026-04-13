@@ -29,8 +29,7 @@ namespace turbo_ocr {
   return base64_decode(in.data(), in.size());
 }
 
-// Convenience overload for types convertible to data()+size() but not to string_view
-// (e.g. crow::json::detail::r_string)
+// Convenience overload for std::string (avoids ambiguity with string_view)
 [[nodiscard]] inline std::string base64_decode(const std::string &in) {
   return base64_decode(in.data(), in.size());
 }
