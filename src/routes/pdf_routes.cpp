@@ -2,7 +2,8 @@
 
 #include <format>
 #include <future>
-#include <iostream>
+
+#include "turbo_ocr/common/logger.h"
 
 #ifndef USE_CPU_ONLY
 #include "turbo_ocr/pipeline/pipeline_dispatcher.h"
@@ -159,8 +160,7 @@ void register_pdf_route(server::WorkPool &pool,
       if (mode != pdf::PdfMode::Ocr) {
         pdf_doc = std::make_unique<pdf::PdfDocument>(pdf_data, pdf_len_local);
         if (!pdf_doc->ok()) {
-          std::cerr << "[/ocr/pdf] failed to open PDF for text-layer lookup; "
-                       "falling back to mode=ocr\n";
+          LOG_WARN("Failed to open PDF for text-layer lookup; falling back to mode=ocr", "route", "/ocr/pdf");
           mode = pdf::PdfMode::Ocr;
           pdf_doc.reset();
         } else {
@@ -299,7 +299,7 @@ void register_pdf_route(server::WorkPool &pool,
                     [&, page_idx, path = std::move(ppm_path)](auto &e) {
                   cv::Mat img = render::PdfRenderer::decode_ppm(path);
                   if (img.empty()) {
-                    std::cerr << std::format("[/ocr/pdf] Failed to decode PPM for page {}\n", page_idx);
+                    LOG_ERROR("Failed to decode PPM for page", "route", "/ocr/pdf", "page", page_idx);
                     return;
                   }
                   int pw = img.cols, ph = img.rows;
@@ -369,7 +369,7 @@ void register_pdf_route(server::WorkPool &pool,
                 });
 
                 } catch (const turbo_ocr::PoolExhaustedError &) {
-                  std::cerr << std::format("[/ocr/pdf] GPU queue full, skipping page {}\n", page_idx);
+                  LOG_WARN("GPU queue full, skipping page", "route", "/ocr/pdf", "page", page_idx);
                   return;
                 }
                 std::lock_guard lock(futures_mutex);
@@ -378,7 +378,7 @@ void register_pdf_route(server::WorkPool &pool,
           num_pages = stream_handle.num_pages;
         } catch (const std::exception &e) {
           for (auto &f : page_futures) { try { f.get(); } catch (...) {} }
-          std::cerr << std::format("[/ocr/pdf] PDF render failed: {}\n", e.what());
+          LOG_ERROR("PDF render failed", "route", "/ocr/pdf", "error", std::string_view(e.what()));
           cb(server::error_response(drogon::k400BadRequest, "PDF_RENDER_FAILED", "PDF render failed"));
           return;
         }
@@ -394,7 +394,7 @@ void register_pdf_route(server::WorkPool &pool,
 
       for (auto &f : page_futures) {
         try { f.get(); } catch (const std::exception &e) {
-          std::cerr << std::format("[PDF] page error: {}\n", e.what());
+          LOG_ERROR("PDF page error", "route", "/ocr/pdf", "error", std::string_view(e.what()));
         }
       }
 

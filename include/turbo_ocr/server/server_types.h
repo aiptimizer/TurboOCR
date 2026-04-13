@@ -5,11 +5,12 @@
 #include <cstring>
 #include <format>
 #include <functional>
-#include <iostream>
 #include <memory>
 #include <random>
 #include <string>
 #include <vector>
+
+#include "turbo_ocr/common/logger.h"
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -126,10 +127,10 @@ void run_with_error_handling(DrogonCallback &cb, const char *route, F &&fn) {
   } catch (const turbo_ocr::ImageDecodeError &e) {
     cb(error_response(drogon::k400BadRequest, "IMAGE_DECODE_FAILED", e.what()));
   } catch (const std::exception &e) {
-    std::cerr << std::format("[{}] Inference error: {}\n", route, e.what());
+    LOG_ERROR("Inference error", "route", std::string_view(route), "error", std::string_view(e.what()));
     cb(error_response(drogon::k500InternalServerError, "INFERENCE_ERROR", "Inference error"));
   } catch (...) {
-    std::cerr << std::format("[{}] Inference error: unknown exception\n", route);
+    LOG_ERROR("Inference error: unknown exception", "route", std::string_view(route));
     cb(error_response(drogon::k500InternalServerError, "INFERENCE_ERROR", "Inference error"));
   }
 }
