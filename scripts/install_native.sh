@@ -83,6 +83,7 @@ if [[ "${SKIP_TRT:-}" != "1" ]]; then
     # Determine correct TensorRT version for this CUDA
     # TensorRT tar must match CUDA major version — CUDA 12 builds won't work on CUDA 13
     case "$CUDA_VERSION" in
+        13.2) TRT_VERSION="10.16.0.72"; TRT_CUDA="13.2" ;;
         13.1) TRT_VERSION="10.15.1.29"; TRT_CUDA="13.1" ;;
         13.0) TRT_VERSION="10.14.1.16"; TRT_CUDA="13.0" ;;
         *)
