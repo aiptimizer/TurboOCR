@@ -54,7 +54,7 @@ Turbo-OCR vs PaddleOCR · EasyOCR · VLMs — FUNSD (50 pages, RTX 5090)
 
 ### Highlights
 
-- 🚀 **270 img/s** on FUNSD A4 forms (c=16) &mdash; **1,200+ img/s** on sparse documents
+- 🚀 **270 img/s** on FUNSD A4 forms (c=16) &mdash; **1,200+ img/s** on sparse images
 - ⚡ **11 ms p50 latency**, single request
 - 🎯 **F1 = 90.2%** on FUNSD &mdash; higher accuracy than PaddleOCR Python with the same weights
 - 🖨️ **Prints & handwriting** &mdash; PP-OCRv5 handles both out of the box
