@@ -86,40 +86,28 @@ RUN mkdir -p build && cd build && \
 COPY docker/ docker/
 COPY scripts/entrypoint.sh scripts/download_models.sh scripts/fetch_release_models.sh scripts/
 
-# Fetch every supported PP-OCRv5 bundle from the pinned GitHub Release, with
-# SHA256 verification. Populates /app/models/{det,cls,rec,keys.txt} (Latin
-# default) and /app/models/rec/<lang>/{rec.onnx,dict.txt} for every other
-# supported language. One layer keeps the image content auditable.
-ARG OCR_INCLUDE_SERVER=1
-ENV OCR_INCLUDE_SERVER=${OCR_INCLUDE_SERVER}
-RUN bash scripts/fetch_release_models.sh
-
-# Build CPU mode (HTTP only, ONNX Runtime) -- skip for now, has build issues
-# RUN mkdir -p build_cpu && cd build_cpu && \
-#     cmake .. -DUSE_CPU_ONLY=ON && \
-#     make -j$(nproc)
-
-# Latin ONNX models (det/rec/cls + keys.txt) ship in the image under /app/models/.
-# Non-Latin languages (chinese, greek, korean, thai, …) are fetched at container
-# start by scripts/entrypoint.sh when OCR_LANG=<lang> is set, using the
-# pre-converted PaddleOCR ONNX weights mirrored by RapidOCR on ModelScope.
-# The bundle lands in /app/models/rec/<lang>/ and is cached in the volume.
-#
-# TRT engines are auto-built from ONNX on first startup (~90s).
-# Mount a volume to persist both:  -v trt-cache:/home/ocr/.cache/turbo-ocr
-
 EXPOSE 8000 50051
 
-# Non-root user for the OCR process (nginx runs as root, app drops to ocr via gosu).
-# /app/models/rec/ is a symlink into the persisted cache volume so
-# runtime-downloaded language bundles survive container restarts via the
-# existing trt-cache volume. Latin uses the flat models/{det,rec,cls}.onnx
-# layout, which is already in /app/models/ — never under /app/models/rec/.
+# Create the ocr user + redirect /app/models/rec into the persisted cache
+# volume BEFORE fetching models, so fetch_release_models.sh writes each
+# non-latin bundle straight into the volume path. The layout:
+#   /app/models/{det,cls,rec,keys.txt}           -- latin default (flat)
+#   /app/models/rec/<lang>/{rec.onnx, dict.txt}  -- every other language,
+#       via the symlink, into /home/ocr/.cache/turbo-ocr/models/rec/<lang>/.
+# Named-volume mounting the cache dir persists both TRT engines and the
+# language bundles from a single -v flag.
 RUN useradd -m -s /bin/bash ocr \
     && chmod +x /app/scripts/entrypoint.sh \
-    && mkdir -p /home/ocr/.cache/turbo-ocr/models/rec \
-    && rm -rf /app/models/rec \
-    && ln -s /home/ocr/.cache/turbo-ocr/models/rec /app/models/rec \
+    && mkdir -p /home/ocr/.cache/turbo-ocr/models/rec /app/models \
+    && ln -s /home/ocr/.cache/turbo-ocr/models/rec /app/models/rec
+
+# Fetch every supported PP-OCRv5 bundle from the pinned GitHub Release, with
+# SHA256 verification. The symlink above means /app/models/rec/<lang>/ writes
+# land in the cache dir; anything the image user's named volume seeds from
+# the image will include the baked bundles.
+ARG OCR_INCLUDE_SERVER=1
+ENV OCR_INCLUDE_SERVER=${OCR_INCLUDE_SERVER}
+RUN bash scripts/fetch_release_models.sh \
     && chown -R ocr:ocr /app /home/ocr/.cache
 
 ENTRYPOINT ["/app/scripts/entrypoint.sh"]
