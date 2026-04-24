@@ -83,7 +83,7 @@ Turbo-OCR vs PaddleOCR · EasyOCR · VLMs — FUNSD (50 pages, RTX 5090)
 ```bash
 docker run --gpus all -p 8000:8000 -p 50051:50051 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr \
-  ghcr.io/aiptimizer/turbo-ocr:v2.1.0
+  ghcr.io/aiptimizer/turboocr:v2.1.0
 ```
 
 First startup builds TensorRT engines from ONNX (~90s). The volume caches them for instant restarts. nginx (port 8000) reverse-proxies to Drogon (port 8080) for connection buffering — both start automatically.
@@ -406,7 +406,7 @@ Set via the `OCR_LANG` environment variable. Latin is the default and ships in t
 docker run --gpus all -p 8000:8000 -p 50051:50051 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr \
   -e OCR_LANG=chinese \
-  ghcr.io/aiptimizer/turbo-ocr:v2.1.0
+  ghcr.io/aiptimizer/turboocr:v2.1.0
 ```
 
 > **Volume tip:** use a **named** volume (`trt-cache:`) as shown above, not a
