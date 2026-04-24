@@ -63,24 +63,51 @@ RUN cd /tmp && \
     ldconfig && \
     rm -rf /tmp/onnxruntime*
 
-# Copy project source
 WORKDIR /app
-COPY . .
 
-# Install PDFium (vendored) and fastpdf2png for PDF rendering
+# Layered COPY so runtime edits (entrypoint.sh, docker/ configs, models/)
+# don't bust the C++ build layer.
+COPY CMakeLists.txt ./
+COPY proto/ proto/
+COPY include/ include/
+COPY src/ src/
+COPY tools/ tools/
+COPY third_party/ third_party/
+COPY tests/ tests/
+COPY scripts/install_fastpdf2png.sh scripts/install_fastpdf2png.sh
+
+# Install PDFium (vendored) and fastpdf2png for PDF rendering. install_fastpdf2png.sh
+# pre-seeds its PDFium from third_party/ so the build doesn't need network access
+# for PDFium; if the install fails, fail the Docker build — the PDF-renderer
+# liveness probe would only surface this at container start, which is much worse.
 RUN cp third_party/pdfium/lib/libpdfium.so /usr/lib/ && ldconfig && \
-    bash scripts/install_fastpdf2png.sh || true
+    bash scripts/install_fastpdf2png.sh && \
+    { cp bin/libpdfium.so /usr/lib/ 2>/dev/null || true; } && \
+    ldconfig
 
 # Build CPU-only mode
 RUN mkdir -p build_cpu && cd build_cpu && \
-    cmake .. -DUSE_CPU_ONLY=ON && \
+    cmake .. -DUSE_CPU_ONLY=ON -DFETCH_MODELS=OFF && \
     make -j$(nproc)
 
-# Non-root user for the OCR process (nginx runs as root, app drops to ocr via gosu)
-RUN useradd -m -s /bin/bash ocr && chown -R ocr:ocr /app
+# Runtime-only layers — edits here do not trigger a rebuild.
+COPY docker/ docker/
+COPY scripts/entrypoint.sh scripts/download_models.sh scripts/fetch_release_models.sh scripts/
 
-COPY scripts/entrypoint.sh /app/scripts/
-RUN chmod +x /app/scripts/entrypoint.sh
+# Create the ocr user + redirect /app/models/rec into the persisted cache
+# volume BEFORE fetching models, so fetch_release_models.sh writes each
+# non-latin bundle straight into the volume path.
+RUN useradd -m -s /bin/bash ocr \
+    && chmod +x /app/scripts/entrypoint.sh \
+    && mkdir -p /home/ocr/.cache/turbo-ocr/models/rec /app/models \
+    && ln -s /home/ocr/.cache/turbo-ocr/models/rec /app/models/rec
+
+# Fetch every supported PP-OCRv5 bundle from the pinned GitHub Release, with
+# SHA256 verification. Same layout as the GPU image.
+ARG OCR_INCLUDE_SERVER=1
+ENV OCR_INCLUDE_SERVER=${OCR_INCLUDE_SERVER}
+RUN bash scripts/fetch_release_models.sh \
+    && chown -R ocr:ocr /app /home/ocr/.cache
 
 EXPOSE 8000 50051
 

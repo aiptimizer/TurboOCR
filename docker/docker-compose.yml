@@ -27,11 +27,12 @@ services:
       replicas: 7
     environment:
       - PIPELINE_POOL_SIZE=3
-      - TRT_ENGINE_CACHE=/app/trt_cache
+      # OCR_LANG=<name> to switch language (latin default, chinese baked in,
+      # others downloaded on first start into the trt-cache volume).
     ports:
       - "8001-8007:8000"
     volumes:
-      - trt-cache:/app/trt_cache
+      - trt-cache:/home/ocr/.cache/turbo-ocr
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
@@ -54,11 +55,10 @@ services:
               capabilities: [gpu]
     environment:
       - PIPELINE_POOL_SIZE=5
-      - TRT_ENGINE_CACHE=/app/trt_cache
     ports:
       - "50051:50051"
     volumes:
-      - trt-cache:/app/trt_cache
+      - trt-cache:/home/ocr/.cache/turbo-ocr
     command: ["./build/paddle_grpc_server"]
     restart: unless-stopped
     profiles:

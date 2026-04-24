@@ -1,48 +1,101 @@
 #!/bin/bash
-# Download PP-OCR Latin models (ONNX format)
+# Fetch a PP-OCRv5 language bundle from the TurboOCR GitHub Release
+# (https://github.com/aiptimizer/TurboOCR/releases/tag/models-v2.1.0) and
+# verify the bytes against SHA256SUMS before use.
 #
-# Default: PP-OCRv4 det (mobile, 4.7MB) + PP-OCRv3 Latin rec (8MB)
-# These give the best speed/accuracy tradeoff (F1=90.9%, 500+ img/s on GPU)
+# The release is authored by us from PaddlePaddle's official Baidu mirror
+# (paddle-model-ecology.bj.bcebos.com) via `paddle2onnx`; dicts are verbatim
+# from PaddleOCR/main:ppocr/utils/dict/ppocrv5_*.txt. Re-running the process
+# end-to-end is reproducible with scripts/fetch_and_convert.sh.
 #
-# Optional: --v5 flag downloads PP-OCRv5 models (slower det but newer rec)
+# Usage:
+#   ./scripts/download_models.sh --lang greek
+#   ./scripts/download_models.sh --lang chinese
+#   ./scripts/download_models.sh --lang chinese --server   # 84 MB server rec
 #
-# Usage: ./scripts/download_models.sh [--v5] [output_dir]
+# Env:
+#   MODELS_RELEASE_URL — override the base URL (default: aiptimizer/TurboOCR
+#                        release models-v2.1.0). Lets downstream forks pin
+#                        their own release.
 
-set -e
+set -euo pipefail
 
-V5=false
+SERVER=false
+LANG_BUNDLE=""
 OUT="models"
-for arg in "$@"; do
-  case $arg in
-    --v5) V5=true ;;
-    *) OUT="$arg" ;;
+while (($#)); do
+  case "$1" in
+    --server) SERVER=true; shift ;;
+    --lang)   LANG_BUNDLE="$2"; shift 2 ;;
+    --lang=*) LANG_BUNDLE="${1#--lang=}"; shift ;;
+    *)        OUT="$1"; shift ;;
   esac
 done
 
-mkdir -p "$OUT"
-dl() { [ -f "$OUT/$2" ] && echo "  $2 exists" || { echo "  Downloading $2..." && wget -q "$1" -O "$OUT/$2"; }; }
+if [[ -z "${LANG_BUNDLE}" ]]; then
+  echo "Usage: $0 --lang <name> [--server] [out-dir]" >&2
+  exit 2
+fi
 
-if [ "$V5" = true ]; then
-  echo "Downloading PP-OCRv5 models to $OUT/"
-  BASE="https://huggingface.co/monkt/paddleocr-onnx/resolve/main"
-  dl "$BASE/detection/v5/det.onnx" "det.onnx"
-  dl "$BASE/languages/latin/rec.onnx" "rec.onnx"
-  dl "$BASE/languages/latin/dict.txt" "keys.txt"
-  # No v5-specific cls, use v2
-  dl "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.7.0/onnx/PP-OCRv4/cls/ch_ppocr_mobile_v2.0_cls_infer.onnx" "cls.onnx"
-  echo "WARNING: v5 det is 84MB (server model) — much slower than v4 mobile (4.7MB)"
+MODELS_RELEASE_URL="${MODELS_RELEASE_URL:-https://github.com/aiptimizer/TurboOCR/releases/download/models-v2.1.0}"
+
+REC_DIR="${OUT}/rec/${LANG_BUNDLE}"
+mkdir -p "${REC_DIR}"
+
+# Atomic download + SHA256 verification against the release's SHA256SUMS.
+fetch_verified() {
+  local asset=$1 target=$2
+  if [[ -f "$target" ]]; then
+    echo "  $(basename "$target") exists, skipping"
+    return 0
+  fi
+  local url="${MODELS_RELEASE_URL}/${asset}"
+  echo "  fetch ${asset}"
+  wget --tries=3 --timeout=30 --retry-connrefused -nv "$url" -O "${target}.part"
+
+  # Grab the expected hash from SHA256SUMS (download once, cache alongside)
+  local sums="${OUT}/SHA256SUMS.release.txt"
+  if [[ ! -f "$sums" ]]; then
+    wget --tries=3 --timeout=15 -nv "${MODELS_RELEASE_URL}/SHA256SUMS.txt" -O "$sums"
+  fi
+  local expected
+  expected=$(awk -v a="$asset" '$2 == a {print $1}' "$sums")
+  if [[ -z "$expected" ]]; then
+    echo "  ERROR: no SHA256 entry for $asset in SHA256SUMS.txt" >&2
+    rm -f "${target}.part"
+    exit 1
+  fi
+  local actual
+  actual=$(sha256sum "${target}.part" | awk '{print $1}')
+  if [[ "$actual" != "$expected" ]]; then
+    echo "  ERROR: sha256 mismatch for $asset" >&2
+    echo "    expected: $expected" >&2
+    echo "    actual:   $actual" >&2
+    rm -f "${target}.part"
+    exit 1
+  fi
+  mv "${target}.part" "$target"
+}
+
+# Chinese: rec asset name depends on mobile vs server; dict is the same file.
+if [[ "${LANG_BUNDLE}" == "chinese" ]]; then
+  if [[ "${SERVER}" == true ]]; then
+    echo "PP-OCRv5 chinese SERVER rec (84 MB) -> ${REC_DIR}/"
+    fetch_verified "rec-chinese-server.onnx" "${REC_DIR}/rec.onnx"
+  else
+    echo "PP-OCRv5 chinese MOBILE rec (16 MB) -> ${REC_DIR}/"
+    fetch_verified "rec-chinese.onnx" "${REC_DIR}/rec.onnx"
+  fi
+  fetch_verified "dict-chinese.txt" "${REC_DIR}/dict.txt"
 else
-  echo "Downloading PP-OCRv4/v3 Latin models to $OUT/ (recommended for speed)"
-  BASE="https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.7.0/onnx/PP-OCRv4"
-  dl "$BASE/det/ch_PP-OCRv4_det_infer.onnx" "det.onnx"
-  dl "$BASE/rec/latin_PP-OCRv3_rec_infer.onnx" "rec.onnx"
-  dl "$BASE/cls/ch_ppocr_mobile_v2.0_cls_infer.onnx" "cls.onnx"
-  dl "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/release/2.7/ppocr/utils/dict/latin_dict.txt" "keys.txt"
+  if [[ "${SERVER}" == true ]]; then
+    echo "  NOTE: --server ignored (only chinese has a server variant)"
+  fi
+  echo "PP-OCRv5 ${LANG_BUNDLE} rec -> ${REC_DIR}/"
+  fetch_verified "rec-${LANG_BUNDLE}.onnx" "${REC_DIR}/rec.onnx"
+  fetch_verified "dict-${LANG_BUNDLE}.txt" "${REC_DIR}/dict.txt"
 fi
 
 echo ""
-echo "Models:"
-ls -lh "$OUT"/{det,rec,cls}.onnx "$OUT"/keys.txt 2>/dev/null
-echo ""
-echo "TRT engines are auto-built from ONNX on first startup."
-echo "CPU mode: use .onnx files directly."
+echo "Done. Run the server with:  OCR_LANG=${LANG_BUNDLE}"
+ls -lh "${REC_DIR}"/{rec.onnx,dict.txt}

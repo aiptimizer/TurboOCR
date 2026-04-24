@@ -16,6 +16,11 @@ endif()
 option(USE_CPU_ONLY "Build CPU-only mode with ONNX Runtime" OFF)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+# Native builds have nothing in models/ (repo excludes the binaries), so
+# fetch the PP-OCRv5 bundle from the pinned GitHub Release after build.
+# Off-by-default for Docker, where fetch_release_models.sh runs as its own
+# RUN layer; the container Dockerfiles set -DFETCH_MODELS=OFF explicitly.
+option(FETCH_MODELS "After build, fetch OCR model bundles into ./models/" ON)
 
 if(ENABLE_ASAN)
     add_compile_options(-fsanitize=address -fno-omit-frame-pointer)
@@ -75,9 +80,12 @@ add_executable(turbo_ocr_tests
     tests/cpp/test_box.cpp
     tests/cpp/test_encoding.cpp
     tests/cpp/test_serialization.cpp
+    tests/cpp/test_language_paths.cpp
+    tests/cpp/test_pdf_renderer_liveness.cpp
     tests/cpp/test_ctc_decode.cpp
     tests/cpp/test_perspective.cpp
     tests/cpp/test_det_postprocess.cpp
+    src/render/pdf_renderer.cpp
     third_party/catch2/catch_amalgamated.cpp
 )
 target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_common)
@@ -293,4 +301,25 @@ else()
         ${GRPC_LIBRARIES}
         protobuf::libprotobuf
     )
+endif()
+
+# --- Fetch OCR model bundles for native builds ----------------------------
+# Uses det.onnx as a sentinel — ninja/make skip the step once it exists.
+# Docker builds explicitly pass -DFETCH_MODELS=OFF because the Dockerfile
+# runs fetch_release_models.sh as its own cacheable RUN layer.
+if(FETCH_MODELS)
+    set(MODELS_SENTINEL "${CMAKE_SOURCE_DIR}/models/det.onnx")
+    add_custom_command(
+        OUTPUT ${MODELS_SENTINEL}
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/fetch_release_models.sh
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Fetching PP-OCRv5 models from pinned GitHub Release"
+        VERBATIM
+    )
+    add_custom_target(fetch_models ALL DEPENDS ${MODELS_SENTINEL})
+    if(USE_CPU_ONLY)
+        add_dependencies(paddle_cpu_server fetch_models)
+    else()
+        add_dependencies(paddle_highspeed_cpp fetch_models)
+    endif()
 endif()

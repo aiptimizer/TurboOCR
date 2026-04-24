@@ -69,7 +69,7 @@ std::string get_cached_engine_path(const std::string &onnx_path,
   // Bump kProfileVersion when optimization profiles change for det/rec/cls.
   // Adding a NEW model type (e.g. "layout") does NOT require a bump because
   // the cache key includes `type` — new types live in their own hash space.
-  static constexpr int kProfileVersion = 20250411;
+  static constexpr int kProfileVersion = 20260424;
 
   auto key = "v" + std::to_string(kProfileVersion) + ":" + type + ":" +
       onnx_path + ":" + std::to_string(onnx_size) + ":" +
@@ -157,12 +157,14 @@ static bool build_engine(const std::string &onnx_path,
       }
     }
   } else {
+    // cls: PP-OCRv5 textline orientation classifier (PP-LCNet_x0_25), input
+    // 80x160. Must match kClsImageH/kClsImageW in classification/paddle_cls.h.
     profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMIN,
-        nvinfer1::Dims4{1, 3, 48, 192});
+        nvinfer1::Dims4{1, 3, 80, 160});
     profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kOPT,
-        nvinfer1::Dims4{32, 3, 48, 192});
+        nvinfer1::Dims4{32, 3, 80, 160});
     profile->setDimensions(input->getName(), nvinfer1::OptProfileSelector::kMAX,
-        nvinfer1::Dims4{128, 3, 48, 192});
+        nvinfer1::Dims4{128, 3, 80, 160});
   }
   config->addOptimizationProfile(profile);
 

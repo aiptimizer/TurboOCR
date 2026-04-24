@@ -17,6 +17,7 @@
 #include "turbo_ocr/render/pdf_renderer.h"
 #include "turbo_ocr/server/env_utils.h"
 #include "turbo_ocr/server/grpc_service.h"
+#include "turbo_ocr/server/language_paths.h"
 #include "turbo_ocr/server/metrics.h"
 #include "turbo_ocr/server/server_types.h"
 #include "turbo_ocr/server/work_pool.h"
@@ -41,9 +42,15 @@ void shutdown_handler(int) {
 int main() {
   TOCR_LOG_INFO("PaddleOCR CPU-Only Mode (ONNX Runtime)");
 
+  auto rec_paths = turbo_ocr::server::resolve_rec_paths("REC_MODEL");
+  if (auto lang = turbo_ocr::server::ocr_lang(); !lang.empty())
+    TOCR_LOG_INFO("Language selected via OCR_LANG",
+                  "lang",  std::string_view(lang),
+                  "rec",   std::string_view(rec_paths.rec),
+                  "dict",  std::string_view(rec_paths.dict));
   auto det_model = env_or("DET_MODEL", "models/det.onnx");
-  auto rec_model = env_or("REC_MODEL", "models/rec.onnx");
-  auto rec_dict = env_or("REC_DICT", "models/keys.txt");
+  auto rec_model = rec_paths.rec;
+  auto rec_dict = rec_paths.dict;
   auto cls_model = env_or("CLS_MODEL", "models/cls.onnx");
   if (turbo_ocr::server::env_enabled("DISABLE_ANGLE_CLS")) {
     cls_model.clear();

@@ -39,6 +39,10 @@ inline void append_ocr_item(std::string &j, const OCRResultItem &item) {
   }
   j += "\"text\":\"";
   for (char c : item.text) {
+    // Compare against unsigned so UTF-8 continuation bytes (0x80+) don't
+    // sign-extend to negative and get mis-escaped as \u00xx. JSON allows
+    // raw UTF-8 in strings; only control chars (< 0x20) need \u escaping.
+    auto uc = static_cast<unsigned char>(c);
     switch (c) {
       case '"':  j += "\\\""; break;
       case '\\': j += "\\\\"; break;
@@ -46,10 +50,9 @@ inline void append_ocr_item(std::string &j, const OCRResultItem &item) {
       case '\r': j += "\\r"; break;
       case '\t': j += "\\t"; break;
       default:
-        if (c < 0x20) {
+        if (uc < 0x20) {
           char buf[7];
-          snprintf(buf, sizeof(buf), "\\u%04x",
-                   static_cast<unsigned>(static_cast<unsigned char>(c)));
+          snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(uc));
           j += buf;
         } else {
           j += c;
@@ -63,6 +66,10 @@ inline void append_ocr_item(std::string &j, const OCRResultItem &item) {
   j += ",\"bounding_box\":";
   append_box(j, item.box);
   if (!item.source.empty() && item.source != "ocr") {
+    // INVARIANT: item.source is only ever set from internal string literals
+    // (e.g. "ocr", "pdf", "geometric", "auto", "auto_verified") — never from
+    // user input. Minimal escaping suffices. If that ever changes, route it
+    // through the text-escape loop above.
     j += ",\"source\":\"";
     for (char c : item.source) {
       if (c == '"' || c == '\\') j += '\\';

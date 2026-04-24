@@ -24,8 +24,11 @@ public:
   void run(const cv::Mat &img, std::vector<Box> &boxes);
 
 private:
-  static constexpr int kClsImageH = 48;
-  static constexpr int kClsImageW = 192;
+  // PP-OCRv5 textline orientation classifier (PP-LCNet_x0_25) expects
+  // 80x160 input. The v4 shape (48x192) trips an ONNX Runtime shape check
+  // on the crops produced by tall/narrow text lines.
+  static constexpr int kClsImageH = 80;
+  static constexpr int kClsImageW = 160;
   static constexpr float kClsThresh = 0.9f;
 
   std::unique_ptr<engine::CpuEngine> engine_;

@@ -31,8 +31,12 @@ public:
 
 private:
   static constexpr int kClsBatchNum = 128;
-  static constexpr int kClsImageH = 48;
-  static constexpr int kClsImageW = 192;
+  // PP-OCRv5 textline orientation classifier (PP-LCNet_x0_25) expects
+  // 80x160 input. The v4 shape (48x192) worked on GPU only because the
+  // TRT engine is built with a dynamic shape profile; CPU ONNX Runtime
+  // rejects it outright.
+  static constexpr int kClsImageH = 80;
+  static constexpr int kClsImageW = 160;
   static constexpr float kClsThresh = 0.9f;
 
   std::unique_ptr<engine::TrtEngine> engine_;

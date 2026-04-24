@@ -18,9 +18,10 @@ models/calibration_data/
 # .trt and .onnx files are included (models needed at runtime)
 *.log
 *.trt
-models/v3_original/
-models/ch_PP-OCRv4_det_server_infer/
-models/PP-OCRv5_server_det_infer/
+
+# Language bundles are fetched at container start — never baked in.
+# Latin ships as flat-layout models/{det,rec,cls}.onnx + keys.txt.
+models/rec/
 LICENSE
 README.md
 .clang-format

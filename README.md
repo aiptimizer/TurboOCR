@@ -69,7 +69,7 @@ Turbo-OCR vs PaddleOCR · EasyOCR · VLMs — FUNSD (50 pages, RTX 5090)
 
 ### 🗺️ Roadmap
 
-- 🌍 Configurable languages
+- ✅ Configurable languages — all 7 bundles (Latin, Chinese, Greek, Russian, Arabic, Korean, Thai) baked into the image
 - 🔍 Structured extraction
 - 📝 Markdown output
 - 📊 Table parsing
@@ -83,7 +83,7 @@ Turbo-OCR vs PaddleOCR · EasyOCR · VLMs — FUNSD (50 pages, RTX 5090)
 ```bash
 docker run --gpus all -p 8000:8000 -p 50051:50051 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr \
-  ghcr.io/aiptimizer/turboocr:v2.0.0
+  ghcr.io/aiptimizer/turboocr:v2.1.0
 ```
 
 First startup builds TensorRT engines from ONNX (~90s). The volume caches them for instant restarts. nginx (port 8000) reverse-proxies to Drogon (port 8080) for connection buffering — both start automatically.
@@ -284,6 +284,8 @@ Reproduce: `python tests/benchmark/comparison/bench_turbo_ocr.py` (requires runn
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `OCR_LANG` | *(unset = latin)* | Language bundle: `latin`, `chinese`, `greek`, `eslav`, `arabic`, `korean`, `thai`. All bundles are baked into the image at build time — no runtime download. |
+| `OCR_SERVER` | *(unset)* | With `OCR_LANG=chinese`, set to `1` to use the 84 MB PP-OCRv5 server rec instead of the 16 MB mobile rec. Ignored for other languages. |
 | `PIPELINE_POOL_SIZE` | auto | Concurrent GPU pipelines (~1.4 GB each) |
 | `DISABLE_LAYOUT` | `0` | Set to `1` to disable PP-DocLayoutV3 layout detection and save ~300-500 MB VRAM |
 | `ENABLE_PDF_MODE` | `ocr` | Default PDF mode: `ocr` / `geometric` / `auto` / `auto_verified` |
@@ -302,7 +304,7 @@ Layout detection is **enabled by default**. The model is loaded at startup but o
 docker run --gpus all -p 8000:8000 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr \
   -e PIPELINE_POOL_SIZE=3 \
-  turboocr
+  ghcr.io/aiptimizer/turboocr:v2.1.0
 ```
 
 Add `MAX_PDF_PAGES` (default `2000`) to limit the number of pages processed per PDF request. `LOG_LEVEL` (`debug`/`info`/`warn`/`error`) and `LOG_FORMAT` (`json`/`text`) control structured logging output.
@@ -381,15 +383,52 @@ docker run --gpus all -p 8000:8000 -p 50051:50051 \
 docker build -f docker/Dockerfile.cpu -t turboocr-cpu .
 docker run -p 8000:8000 turboocr-cpu
 
-# Native build
-cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt && cmake --build build -j$(nproc)
+# Native build — PP-OCRv5 models auto-fetched into ./models/ on first build
+cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt
+cmake --build build -j$(nproc)
+LD_LIBRARY_PATH=/usr/local/tensorrt/lib ./build/paddle_highspeed_cpp
+
+# CPU-only native
+cmake -B build_cpu -DUSE_CPU_ONLY=ON
+cmake --build build_cpu -j$(nproc)
+./build_cpu/paddle_cpu_server
+
+# If your distro's gRPC CMake config conflicts with system protobuf,
+# add -DCMAKE_DISABLE_FIND_PACKAGE_gRPC=ON to fall back to pkg-config.
+# To skip the model auto-fetch (e.g. in CI), add -DFETCH_MODELS=OFF.
 ```
 
 ---
 
 ## Supported Languages
 
-Latin script (English, German, French, Italian, Polish, Czech, and more) plus Greek. 836 characters total.
+Set via the `OCR_LANG` environment variable. Every supported language bundle is baked into the image at build time from the pinned PP-OCRv5 GitHub Release (SHA256-verified). No runtime downloads, no network dependency at container start.
+
+| `OCR_LANG` | Script / family | Notes |
+|---|---|---|
+| *(unset)* / `latin` | Latin + basic Greek (English, German, French, Italian, Polish, Czech, …) | 836-char dict; what powers the benchmarks above |
+| `chinese` | Simplified + Traditional Chinese | 18,385-class mobile rec (16 MB); set `OCR_SERVER=1` for the 84 MB server variant |
+| `greek` | dedicated Greek rec | 356-class Greek-specialized rec (7.8 MB) — higher accuracy than Latin's combined dict |
+| `korean` | Hangul + basic Latin | 11,947-class rec (13 MB) |
+| `arabic`, `eslav`, `thai` | per-script PP-OCRv5 | 7-8 MB each |
+
+```bash
+# Chinese
+docker run --gpus all -p 8000:8000 -p 50051:50051 \
+  -v trt-cache:/home/ocr/.cache/turbo-ocr \
+  -e OCR_LANG=chinese \
+  ghcr.io/aiptimizer/turboocr:v2.1.0
+```
+
+> **Volume tip:** use a **named** volume (`trt-cache:`) as shown above, not a
+> host bind-mount. Named volumes auto-populate from the image on first use,
+> so the baked language bundles survive. A bind-mount of an empty host
+> directory would shadow `/home/ocr/.cache/turbo-ocr` and leave the server
+> with nothing to load.
+
+Run `tests/language_smoketest.py` to verify any language end-to-end on your
+hardware (renders a short phrase, OCRs it, checks char-recall against a
+per-language threshold).
 
 ---
 

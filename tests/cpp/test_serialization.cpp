@@ -59,6 +59,23 @@ TEST_CASE("results_to_json escapes low control chars as unicode", "[serializatio
   CHECK(json.find(R"(a\u0001b)") != std::string::npos);
 }
 
+TEST_CASE("results_to_json preserves raw UTF-8 multi-byte text", "[serialization]") {
+  // Regression: sign-extension bug previously escaped UTF-8 continuation
+  // bytes (0x80+) as \u00xx via the control-char branch, producing mojibake
+  // on the wire. RFC 8259 permits raw UTF-8 in JSON strings; only control
+  // chars < 0x20 need escaping.
+  Box box{};
+  std::string text = "\xe4\xbd\xa0\xe5\xa5\xbd"; // "你好" (nǐ hǎo)
+  std::vector<OCRResultItem> results = {
+      {.text = text, .confidence = 0.9f, .box = box}};
+  auto json = results_to_json(results);
+
+  // Raw UTF-8 bytes must appear unmodified in the output.
+  CHECK(json.find(text) != std::string::npos);
+  // And no \u00XX escape sequence for any of those bytes.
+  CHECK(json.find("\\u00") == std::string::npos);
+}
+
 TEST_CASE("results_to_json multiple results separated by commas", "[serialization]") {
   Box box{};
   std::vector<OCRResultItem> results = {

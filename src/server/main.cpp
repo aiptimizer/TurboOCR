@@ -18,6 +18,7 @@
 #include "turbo_ocr/render/pdf_renderer.h"
 #include "turbo_ocr/server/env_utils.h"
 #include "turbo_ocr/server/grpc_service.h"
+#include "turbo_ocr/server/language_paths.h"
 #include "turbo_ocr/server/metrics.h"
 #include "turbo_ocr/server/server_types.h"
 #include "turbo_ocr/server/work_pool.h"
@@ -40,13 +41,18 @@ void shutdown_handler(int) {
 } // namespace
 
 int main() {
-  auto rec_dict = env_or("REC_DICT", "models/keys.txt");
+  auto rec_paths = turbo_ocr::server::resolve_rec_paths("REC_ONNX");
+  if (auto lang = turbo_ocr::server::ocr_lang(); !lang.empty())
+    TOCR_LOG_INFO("Language selected via OCR_LANG",
+                  "lang",  std::string_view(lang),
+                  "rec",   std::string_view(rec_paths.rec),
+                  "dict",  std::string_view(rec_paths.dict));
+  auto rec_dict = rec_paths.dict;
 
   // Auto-build TRT engines from ONNX (cached by TRT version + model hash)
   auto det_model = turbo_ocr::engine::ensure_trt_engine(
       env_or("DET_ONNX", "models/det.onnx"), "det");
-  auto rec_model = turbo_ocr::engine::ensure_trt_engine(
-      env_or("REC_ONNX", "models/rec.onnx"), "rec");
+  auto rec_model = turbo_ocr::engine::ensure_trt_engine(rec_paths.rec, "rec");
   auto cls_model = turbo_ocr::engine::ensure_trt_engine(
       env_or("CLS_ONNX", "models/cls.onnx"), "cls");
   if (turbo_ocr::server::env_enabled("DISABLE_ANGLE_CLS")) {

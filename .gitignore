@@ -10,12 +10,16 @@ __pycache__/
 *.log
 timing.cache
 .DS_Store
-models/ch_PP-OCRv4_det_server_infer/
-models/PP-OCRv5_server_det_infer/
 
 # Layout detection model (~124 MB) — fetched on demand via
 # scripts/export_pp_doclayoutv3.py
 models/layout/
+
+# Non-default language bundles — fetched at container start by
+# scripts/entrypoint.sh when OCR_LANG=<lang> is set. Only Latin ships in
+# the repo as flat-layout models/{det,rec,cls}.onnx + keys.txt; every
+# other language is pulled on demand from the pinned PP-OCRv5 ONNX mirror.
+models/rec/
 
 # fastpdf2png binaries — auto-installed by scripts/install_fastpdf2png.sh
 bin/fastpdf2png

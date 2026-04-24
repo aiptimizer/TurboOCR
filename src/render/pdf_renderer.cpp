@@ -23,6 +23,14 @@
 using namespace turbo_ocr::render;
 
 static std::string find_binary() {
+  // Explicit override — used by tests and by deployments that put the binary
+  // in a non-standard location. Fails fast if the configured path is missing
+  // rather than falling back to the default search (surprises hurt in prod).
+  if (const char *env = std::getenv("FASTPDF2PNG_PATH"); env && *env) {
+    if (std::filesystem::exists(env)) return env;
+    throw turbo_ocr::PdfRenderError(
+        std::format("FASTPDF2PNG_PATH does not exist: {}", env));
+  }
   static constexpr const char *paths[] = {
     "/app/bin/fastpdf2png",
     "/usr/local/bin/fastpdf2png",
@@ -212,6 +220,30 @@ PdfRenderer::PdfRenderer(int pool_size, int workers_per_render)
     daemons_[i].result_out = fdopen(out_pipe[0], "r");
     if (!daemons_[i].cmd_in || !daemons_[i].result_out)
       throw turbo_ocr::PdfRenderError("fdopen failed for PDF renderer daemon");
+  }
+
+  // Liveness probe: if the binary was missing a shared lib, wasn't executable,
+  // or crashed during its own startup, the child calls _exit(1) within ~micro-
+  // seconds of fork. Give every child 200ms to either exec successfully or
+  // die, then reap any corpses. Without this, the first render request would
+  // block on a pipe whose reader is dead.
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  for (int i = 0; i < pool_size_; ++i) {
+    int status = 0;
+    pid_t reaped = waitpid(daemons_[i].pid, &status, WNOHANG);
+    if (reaped != daemons_[i].pid) continue;  // 0 = still running, expected
+
+    // Child already exited — record details, then null out the handles so
+    // ~PdfRenderer() doesn't SIGPIPE writing QUIT to a dead pipe.
+    int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    fclose(daemons_[i].cmd_in);     daemons_[i].cmd_in = nullptr;
+    fclose(daemons_[i].result_out); daemons_[i].result_out = nullptr;
+    daemons_[i].pid = 0;
+    throw turbo_ocr::PdfRenderError(std::format(
+        "PDF renderer daemon {}/{} exited immediately after fork "
+        "(binary={}, exit={}) — likely missing shared library, "
+        "non-executable binary, or crash during startup.",
+        i, pool_size_, binary_path_, exit_code));
   }
 }
 

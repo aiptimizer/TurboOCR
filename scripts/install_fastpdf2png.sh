@@ -25,6 +25,17 @@ mkdir -p "$BIN_DIR"
 echo "Cloning $REPO ($BRANCH)..."
 git clone --depth 1 --branch "$BRANCH" "$REPO" "$TMP_DIR"
 
+# Pre-seed PDFium from the vendored copy if we have one, so the build doesn't
+# need network access to github.com/bblanchon/pdfium-binaries (which has been
+# rate-limit-flaky from inside Docker builds).
+VENDORED_PDFIUM="$ROOT/third_party/pdfium"
+if [ -d "$VENDORED_PDFIUM/lib" ] && [ -d "$VENDORED_PDFIUM/include" ]; then
+  echo "Seeding vendored PDFium into fastpdf2png build…"
+  mkdir -p "$TMP_DIR/pdfium"
+  cp -a "$VENDORED_PDFIUM/lib" "$TMP_DIR/pdfium/"
+  cp -a "$VENDORED_PDFIUM/include" "$TMP_DIR/pdfium/"
+fi
+
 # Build
 echo "Building..."
 cd "$TMP_DIR"
