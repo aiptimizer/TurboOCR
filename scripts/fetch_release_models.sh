@@ -53,6 +53,10 @@ fetch_verified "cls.onnx"  "$OUT/cls.onnx"
 fetch_verified "rec.onnx"  "$OUT/rec.onnx"
 fetch_verified "keys.txt"  "$OUT/keys.txt"
 
+# PP-DocLayoutV3 (~124 MB) — required for ?layout=1 endpoints.
+mkdir -p "$OUT/layout"
+fetch_verified "layout.onnx" "$OUT/layout/layout.onnx"
+
 # Per-language (nested layout). Chinese server is opt-in via OCR_INCLUDE_SERVER=1.
 LANGS=(chinese greek eslav arabic korean thai)
 if [[ "${OCR_INCLUDE_SERVER:-0}" == "1" ]]; then

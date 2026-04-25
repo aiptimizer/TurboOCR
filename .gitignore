@@ -40,5 +40,8 @@ tests/benchmark/PER_DOCUMENT.json
 python/
 src/cli/
 
+# Layout-overlay debug images (rendered ad hoc by tests/draw_layout.py)
+layout_overlay*.png
+
 # Benchmark outputs
 vlm_result_*.json

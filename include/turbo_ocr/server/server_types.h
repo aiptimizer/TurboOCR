@@ -243,9 +243,9 @@ inline void register_observability_middleware() {
   else if (s == "0" || s == "false" || s == "off" || s == "no") on = false;
   else return std::format("Invalid layout param: '{}' (expected 0|1)", s);
   if (on && !layout_available) {
-    return std::string("Layout requested but server was not started with "
-                       "ENABLE_LAYOUT=1 — restart the server with that env var "
-                       "to enable layout detection.");
+    return std::string("Layout requested but the layout model is not loaded. "
+                       "Either models/layout/layout.onnx is missing from the "
+                       "image, or the server was started with DISABLE_LAYOUT=1.");
   }
   *out = on;
   return {};
