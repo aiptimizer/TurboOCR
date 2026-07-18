@@ -1,0 +1,164 @@
+# ============================================================
+# turbo-ocr GPU Dockerfile — CUDA 12 variant
+# ============================================================
+# For hosts whose NVIDIA driver predates R580 (the CUDA 13 floor
+# required by the standard image / Dockerfile.gpu). Runs on any
+# driver >= 525.60.13 via CUDA 12 minor-version compatibility.
+# See issue #26. Differences from Dockerfile.gpu: base image
+# (last CUDA-12 TensorRT container, TRT 10.11) and the ONNX
+# Runtime pin (1.26.0, the last release with a CUDA-12 GPU build).
+#
+# Build:  docker build -f docker/Dockerfile.gpu.cuda12 -t turbo-ocr .
+# Run:    docker run --gpus all -p 8000:8000 -v trt-cache:/home/ocr/.cache/turbo-ocr turbo-ocr
+#
+# TRT engines are auto-built from ONNX on first startup (~90s on a
+# GPU this stack targets natively, i.e. Turing through Ada; on newer
+# architectures the first start additionally JIT-compiles PTX, which
+# can take much longer — one-time, persisted by the -v mount).
+# ============================================================
+FROM nvcr.io/nvidia/tensorrt:25.06-py3
+
+# Target architecture, set automatically by `docker buildx` (amd64 | arm64).
+# The nvcr TensorRT base image is multi-arch, so the right CUDA/TRT stack is
+# pulled per platform; the steps below select matching ONNX Runtime / CMake /
+# PDFium / TensorRT-lib paths. Build aarch64 with:
+#   docker buildx build --platform linux/arm64 -f docker/Dockerfile.gpu.cuda12 -t turbo-ocr .
+ARG TARGETARCH
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    libopencv-dev \
+    nginx \
+    gosu \
+    libwebp-dev \
+    libturbojpeg0-dev \
+    libgrpc++-dev \
+    libprotobuf-dev \
+    protobuf-compiler-grpc \
+    libjsoncpp-dev \
+    uuid-dev \
+    zlib1g-dev \
+    libssl-dev \
+    libc-ares-dev \
+    git \
+    wget \
+    curl \
+    libcurl4-openssl-dev \
+    gettext-base \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Drogon HTTP framework (async, epoll-based — replaces Crow)
+RUN cd /tmp && \
+    git clone --depth 1 --branch v1.9.12 https://github.com/drogonframework/drogon.git && \
+    cd drogon && \
+    git submodule update --init && \
+    mkdir build && cd build && \
+    cmake .. -DBUILD_EXAMPLES=OFF -DBUILD_CTL=OFF -DBUILD_ORM=OFF \
+             -DBUILD_POSTGRESQL=OFF -DBUILD_MYSQL=OFF -DBUILD_SQLITE=OFF \
+             -DBUILD_REDIS=OFF -DBUILD_TESTING=OFF && \
+    make -j$(nproc) && make install && \
+    rm -rf /tmp/drogon
+
+# Upgrade cmake (base image has 3.24, need 3.17+ for CUDA C++20)
+ARG CMAKE_VERSION=3.31.6
+RUN cd /tmp && \
+    case "${TARGETARCH:-amd64}" in arm64) CM_ARCH=aarch64 ;; *) CM_ARCH=x86_64 ;; esac && \
+    wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-${CM_ARCH}.tar.gz" && \
+    tar xzf cmake-${CMAKE_VERSION}-linux-${CM_ARCH}.tar.gz && \
+    cp -r cmake-${CMAKE_VERSION}-linux-${CM_ARCH}/bin/* /usr/local/bin/ && \
+    cp -r cmake-${CMAKE_VERSION}-linux-${CM_ARCH}/share/* /usr/local/share/ && \
+    rm -rf /tmp/cmake*
+
+# Install the ONNX Runtime C++ SDK — the CUDA-12 GPU build (the plain
+# `-gpu-` asset; the `gpu_cuda13` asset used by Dockerfile.gpu needs CUDA 13).
+# 1.26.0 is the last ORT release that ships a CUDA-12 GPU build. The formula
+# backends (ort_session.cpp) create their sessions on ORT's CUDA execution
+# provider, so the image needs libonnxruntime.so PLUS
+# libonnxruntime_providers_cuda.so / _shared.so; the plain (CPU-only)
+# onnxruntime-linux-<arch>-<ver>.tgz asset would configure and link fine and
+# then fail at runtime. The base image already carries the runtime deps
+# (libcudart/cublas.so.12). CMake's GPU ORT discovery finds
+# this /usr/local install and hard-requires the CUDA EP at configure time.
+# Pinned tarball SHA256 — must match ORT_VERSION below. To refresh after a
+# version bump, recompute via:
+#   curl -sL https://github.com/microsoft/onnxruntime/releases/download/v<NEW>/onnxruntime-linux-x64-gpu-<NEW>.tgz | sha256sum
+ARG ORT_VERSION=1.26.0
+ARG ORT_SHA256=cb7df7ee2ca0f962c7ce7c839aeae36223d146a91fb4646d62fb0046f297479f
+# aarch64: Microsoft publishes no GPU/CUDA aarch64 tarball, so arm64 gets the
+# CPU asset and the configure-time CUDA-EP gate fails LOUDLY — an arm64 GPU
+# image needs a custom CUDA-enabled ORT dropped into third_party/onnxruntime.
+ARG ORT_SHA256_ARM64=34ff1c2d0f12e2cf3d33a0c5f82e39792e1d581fbd6968fd7c30d173654be01a
+RUN cd /tmp && \
+    case "${TARGETARCH:-amd64}" in \
+      arm64) ORT_PKG=onnxruntime-linux-aarch64-${ORT_VERSION};            ORT_SHA=${ORT_SHA256_ARM64} ;; \
+      *)     ORT_PKG=onnxruntime-linux-x64-gpu-${ORT_VERSION};     ORT_SHA=${ORT_SHA256} ;; \
+    esac && \
+    wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_PKG}.tgz" -O ort.tgz && \
+    if [ -n "${ORT_SHA}" ]; then echo "${ORT_SHA}  ort.tgz" | sha256sum -c -; else echo "WARN: no SHA256 pinned for ONNX Runtime; skipping checksum"; fi && \
+    tar xzf ort.tgz && \
+    cp -r ${ORT_PKG}/include/* /usr/local/include/ && \
+    cp -P ${ORT_PKG}/lib/libonnxruntime*.so* /usr/local/lib/ && \
+    ldconfig && rm -rf /tmp/onnxruntime* /tmp/ort.tgz
+
+WORKDIR /app
+
+# Layered COPY so runtime edits (entrypoint.sh, download_models.sh, docker/
+# configs, models/, README) don't invalidate the expensive C++ build layers.
+COPY CMakeLists.txt ./
+COPY proto/ proto/
+COPY include/ include/
+COPY src/ src/
+COPY tools/ tools/
+COPY third_party/ third_party/
+COPY tests/ tests/
+COPY scripts/install_fastpdf2png.sh scripts/install_fastpdf2png.sh
+COPY scripts/install_pdfium.sh scripts/install_pdfium.sh
+
+# Install fastpdf2png v2.0 (PDF renderer — daemon pool, raw PPM, /dev/shm).
+# On arm64 this also swaps third_party/pdfium to the aarch64 PDFium build.
+RUN TARGETARCH=${TARGETARCH} bash scripts/install_fastpdf2png.sh && \
+    cp bin/libpdfium.so /usr/lib/ && ldconfig
+
+# Build GPU mode (HTTP + gRPC). TensorRT libs live under the Debian multiarch
+# triplet, which differs per architecture.
+RUN mkdir -p build && cd build && \
+    case "${TARGETARCH:-amd64}" in arm64) TRT_DIR=/usr/lib/aarch64-linux-gnu ;; *) TRT_DIR=/usr/lib/x86_64-linux-gnu ;; esac && \
+    cmake .. -DTENSORRT_DIR=${TRT_DIR} -DFETCH_MODELS=OFF -DCMAKE_CUDA_ARCHITECTURES=75 && \
+    make -j$(nproc)
+
+# Runtime-only layers — edits here do not trigger a rebuild.
+COPY docker/ docker/
+COPY scripts/entrypoint.sh scripts/download_models.sh scripts/fetch_release_models.sh scripts/
+
+EXPOSE 8000 50051
+
+# Create the ocr user + redirect /app/models/rec into the persisted cache
+# volume BEFORE fetching models, so fetch_release_models.sh writes each
+# retained-script bundle straight into the volume path. The layout:
+#   /app/models/{det,rec,cls}.onnx + keys.txt    -- v6 default tier (flat)
+#   /app/models/rec/<script>/{rec.onnx, dict.txt}  -- retained PP-OCRv5
+#       recognizers, via the symlink, into
+#       /home/ocr/.cache/turbo-ocr/models/rec/<script>/.
+# Named-volume mounting the cache dir persists both TRT engines and the
+# script bundles from a single -v flag.
+RUN useradd -m -s /bin/bash ocr \
+    && chmod +x /app/scripts/entrypoint.sh \
+    && mkdir -p /home/ocr/.cache/turbo-ocr/models/rec /app/models \
+    && ln -s /home/ocr/.cache/turbo-ocr/models/rec /app/models/rec
+
+# Fetch the PP-OCRv6 tiers + retained PP-OCRv5 script bundles from the pinned
+# GitHub Release, with SHA256 verification. The symlink above means
+# /app/models/rec/<script>/ writes land in the cache dir, so a named volume
+# seeded from the image includes the baked bundles.
+RUN bash scripts/fetch_release_models.sh \
+    && chown -R ocr:ocr /app /home/ocr/.cache
+
+# nginx fronts the app on 8000; /health is GPU-free liveness.
+# start-period covers cold-start TRT engine build from ONNX (~90s).
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
+    CMD curl -sf http://localhost:8000/health || exit 1
+
+ENTRYPOINT ["/app/scripts/entrypoint.sh"]
+CMD ["./build/turboocr-server"]
