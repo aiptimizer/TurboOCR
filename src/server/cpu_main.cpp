@@ -161,16 +161,15 @@ int main(int argc, char **argv) try {
     // Auto-resolve baked formula weights when only FORMULA_BACKEND is set
     // (parity with the GPU build): default to models/formula/ppformulanet_s
     // (CPU uses the fused inference_trt.onnx inside it via CpuFormulaRecognizer).
-    if (const char *fb = std::getenv("FORMULA_BACKEND");
-        fb && std::string(fb) == "ppformulanet_s" && formula_onnx.empty()) {
+    if (turbo_ocr::server::env_or("FORMULA_BACKEND", "") == "ppformulanet_s" &&
+        formula_onnx.empty()) {
       formula_onnx = "models/formula/ppformulanet_s";
       if (formula_tok.empty())
         formula_tok = "models/formula/ppformulanet_s/tokenizer.json";
     }
     // Auto-resolve the baked SLANeXt encoder when only TABLE_BACKEND=slanext is
     // set; load_table_backend() reads TABLE_SLANEXT_ENCODER_ONNX from the env.
-    if (const char *tb = std::getenv("TABLE_BACKEND");
-        tb && std::string(tb) == "slanext" &&
+    if (turbo_ocr::server::env_or("TABLE_BACKEND", "") == "slanext" &&
         turbo_ocr::server::env_or("TABLE_SLANEXT_ENCODER_ONNX", "").empty()) {
       setenv("TABLE_SLANEXT_ENCODER_ONNX",
              "models/table/slanext_encoder/SLANeXt_wired_encoder.onnx", 1);
@@ -255,15 +254,25 @@ int main(int argc, char **argv) try {
   turbo_ocr::server::register_observability_middleware();
   turbo_ocr::server::register_metrics_route(&work_pool);
 
-  // Single readiness probe shared by HTTP /health/ready and gRPC Health.
-  // Bounded try-acquire (the CPU pool's acquire() is unbounded, so a plain
-  // acquire could never return NOT-ready and would block the probe forever
-  // under saturation). 250ms is long enough to ride out a brief burst but
-  // short enough to answer the k8s probe before its timeout.
-  auto readiness = [&pool]() -> bool {
+  // Readiness probe for HTTP /health/ready: bounded try-acquire (the CPU
+  // pool's acquire() is unbounded, so a plain acquire could never return
+  // NOT-ready and would block the probe forever under saturation). 250ms is
+  // long enough to ride out a brief burst but short enough to answer the k8s
+  // probe before its timeout. The result is cached so the gRPC Health path
+  // below can answer WITHOUT blocking a CQ poller or stealing a pipeline
+  // lease — the same split the GPU server uses (readiness vs readiness_cached).
+  struct CpuProbeState {
+    std::atomic<bool> ok{true};  // seeded Ready: pool exists before traffic
+  };
+  auto probe = std::make_shared<CpuProbeState>();
+  auto readiness = [&pool, probe]() -> bool {
     try {
-      return pool->try_acquire_for(std::chrono::milliseconds(250)).has_value();
+      const bool ok =
+          pool->try_acquire_for(std::chrono::milliseconds(250)).has_value();
+      probe->ok.store(ok, std::memory_order_release);
+      return ok;
     } catch (...) {
+      probe->ok.store(false, std::memory_order_release);
       return false;
     }
   };
@@ -643,9 +652,17 @@ int main(int argc, char **argv) try {
       },
       {drogon::Post});
 
-  // gRPC server
+  // gRPC server. Cache-only readiness: Health() runs inline on a CQ poller
+  // thread, where the blocking 250ms lease-stealing probe would compete with
+  // real RPCs under saturation — exactly the flap the GPU path is hardened
+  // against. Reads the value the HTTP probe above refreshes.
+  auto readiness_cached = [probe]() -> bool {
+    if (bootstrap::g_shutdown_requested.load(std::memory_order_acquire))
+      return false;
+    return probe->ok.load(std::memory_order_acquire);
+  };
   auto grpc_handle = turbo_ocr::server::start_grpc_server(
-      infer, cfg, &pdf_renderer, layout_available, readiness,
+      infer, cfg, &pdf_renderer, layout_available, readiness_cached,
       table_available, formula_available);
   // Published for the signal-handler drain thread. Not dangling: grpc_handle
   // owns the server on main()'s stack and is destroyed only after run() returns

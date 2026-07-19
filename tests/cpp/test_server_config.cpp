@@ -469,11 +469,13 @@ TEST_CASE("BIND_HOST aliases the bind address; REQUEST_TIMEOUT_MS validates", "[
   ::setenv("BIND_HOST", "127.0.0.1", 1);
   CHECK(ServerConfig::from_env(Profile::Gpu).host == "127.0.0.1");
 
-  // TURBO_OCR_HOST wins when both are set (it predates BIND_HOST).
+  // TURBO_OCR_HOST wins when both are set (it predates BIND_HOST). A
+  // non-default value on BOTH sides, or "wins" would be indistinguishable
+  // from "everything ignored, default served".
   reset_env();
   ::setenv("BIND_HOST", "127.0.0.1", 1);
-  ::setenv("TURBO_OCR_HOST", "0.0.0.0", 1);
-  CHECK(ServerConfig::from_env(Profile::Gpu).host == "0.0.0.0");
+  ::setenv("TURBO_OCR_HOST", "10.1.2.3", 1);
+  CHECK(ServerConfig::from_env(Profile::Gpu).host == "10.1.2.3");
 
   // REQUEST_TIMEOUT_MS validates like the other strict ints (M3).
   reset_env();

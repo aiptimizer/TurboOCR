@@ -19,6 +19,36 @@ void put_be32(std::vector<uint8_t> &buf, std::size_t off, uint32_t v) {
   buf[off + 3] = static_cast<uint8_t>(v);
 }
 
+// CRC-32 (PNG polynomial). The IHDR chunk CRC covers the type + 13 data
+// bytes (offsets 12..24); recomputing it after forging the dimensions makes
+// the chunk VALID again, so the only thing left to reject the file is the
+// dimension guard under test — a stale CRC would let any decoder bail for
+// the wrong reason and mask a deleted guard.
+uint32_t crc32_png(const uint8_t *data, std::size_t len) {
+  static uint32_t table[256];
+  static bool init = [] {
+    for (uint32_t n = 0; n < 256; ++n) {
+      uint32_t c = n;
+      for (int k = 0; k < 8; ++k)
+        c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+      table[n] = c;
+    }
+    return true;
+  }();
+  (void)init;
+  uint32_t c = 0xFFFFFFFFu;
+  for (std::size_t i = 0; i < len; ++i)
+    c = table[(c ^ data[i]) & 0xFF] ^ (c >> 8);
+  return c ^ 0xFFFFFFFFu;
+}
+
+// Forge the IHDR dimensions and re-seal the chunk with a valid CRC.
+void forge_ihdr_dims(std::vector<uint8_t> &png, uint32_t w, uint32_t h) {
+  put_be32(png, 16, w);
+  put_be32(png, 20, h);
+  put_be32(png, 29, crc32_png(png.data() + 12, 17));
+}
+
 std::vector<uint8_t> encode_png(const cv::Mat &img) {
   std::vector<uint8_t> bytes;
   REQUIRE(cv::imencode(".png", img, bytes));
@@ -55,11 +85,9 @@ TEST_CASE("oversized 8-bit PNG dimensions are rejected before allocation",
           "[png_guards]") {
   cv::Mat img(8, 8, CV_8UC3, cv::Scalar(0, 0, 0));
   auto bytes = encode_png(img);
-  // Forge the IHDR to declare an absurd raster. The decode must refuse from
-  // the header alone (CRC/stream errors would also produce empty, but the
-  // point is that no multi-GB buffer is ever requested).
-  put_be32(bytes, 16, 0x40000000u); // width
-  put_be32(bytes, 20, 0x40000000u); // height
+  // Forge the IHDR to declare an absurd raster, CRC re-sealed so ONLY the
+  // dimension guard can reject it — no multi-GB buffer may ever be requested.
+  forge_ihdr_dims(bytes, 0x40000000u, 0x40000000u);
   CHECK(FastPngDecoder::decode(bytes.data(), bytes.size()).empty());
 }
 
@@ -68,21 +96,20 @@ TEST_CASE("oversized 16-bit PNG dimensions are rejected before OpenCV sees them"
   cv::Mat img(8, 8, CV_16UC1, cv::Scalar(1));
   auto bytes = encode_png(img);
   REQUIRE(bytes[24] == 16);
-  put_be32(bytes, 16, 0x40000000u);
-  put_be32(bytes, 20, 0x40000000u);
+  forge_ihdr_dims(bytes, 0x40000000u, 0x40000000u);
   CHECK(FastPngDecoder::decode(bytes.data(), bytes.size()).empty());
 }
 
 TEST_CASE("16-bit PNG with a huge single side is rejected", "[png_guards]") {
   cv::Mat img(8, 8, CV_16UC1, cv::Scalar(1));
   auto bytes = encode_png(img);
-  put_be32(bytes, 16, 1u << 20); // width far over MAX_IMAGE_DIM
+  forge_ihdr_dims(bytes, 1u << 20, 8); // width far over MAX_IMAGE_DIM
   CHECK(FastPngDecoder::decode(bytes.data(), bytes.size()).empty());
 }
 
 TEST_CASE("zero-dimension PNG is rejected", "[png_guards]") {
   cv::Mat img(8, 8, CV_16UC1, cv::Scalar(1));
   auto bytes = encode_png(img);
-  put_be32(bytes, 16, 0);
+  forge_ihdr_dims(bytes, 0, 8);
   CHECK(FastPngDecoder::decode(bytes.data(), bytes.size()).empty());
 }

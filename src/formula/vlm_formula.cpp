@@ -1,5 +1,7 @@
 #include "turbo_ocr/formula/vlm_formula.h"
 
+#include "turbo_ocr/formula/latex_extract.h"
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -54,8 +56,14 @@ CurlGlobalInit g_curl_init;
 
 size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
   auto *buf = static_cast<std::string *>(userdata);
-  buf->append(ptr, size * nmemb);
-  return size * nmemb;
+  // Abort (short count -> CURLE_WRITE_ERROR) past the cap: a wedged or
+  // hostile endpoint must not grow the buffer without bound for the whole
+  // timeout window.
+  constexpr size_t kMaxResponseBytes = 32u << 20;
+  const size_t n = size * nmemb;
+  if (buf->size() + n > kMaxResponseBytes) return 0;
+  buf->append(ptr, n);
+  return n;
 }
 
 // A stalled TCP/TLS handshake must not silently consume the whole request
@@ -136,34 +144,6 @@ HttpResp http_get(const std::string &url, int timeout_s) {
   return r;
 }
 
-// Pull LaTeX out of the assistant message.
-std::string extract_latex(const std::string &msg) {
-  static const std::regex re_fence(R"(```(?:latex|tex|math)?\s*\n?([\s\S]*?)```)",
-                                    std::regex::ECMAScript);
-  std::smatch m;
-  if (std::regex_search(msg, m, re_fence) && m.size() >= 2) {
-    std::string s = m[1].str();
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
-      s.pop_back();
-    return s;
-  }
-  static const std::regex re_disp(R"(\$\$([\s\S]*?)\$\$)");
-  if (std::regex_search(msg, m, re_disp) && m.size() >= 2) return m[1].str();
-  static const std::regex re_brk(R"(\\\[([\s\S]*?)\\\])");
-  if (std::regex_search(msg, m, re_brk) && m.size() >= 2) return m[1].str();
-  static const std::regex re_inline(R"(\$([^\$\n]+)\$)");
-  if (std::regex_search(msg, m, re_inline) && m.size() >= 2) return m[1].str();
-  std::string s = msg;
-  while (!s.empty() && (s.front() == ' ' || s.front() == '\n' || s.front() == '\r'))
-    s.erase(s.begin());
-  while (!s.empty() && (s.back() == ' ' || s.back() == '\n' || s.back() == '\r'))
-    s.pop_back();
-  for (auto pre : {"LaTeX:", "Latex:", "latex:", "Answer:", "answer:"}) {
-    if (s.rfind(pre, 0) == 0) { s.erase(0, std::strlen(pre)); break; }
-  }
-  while (!s.empty() && (s.front() == ' ' || s.front() == '\n')) s.erase(s.begin());
-  return s;
-}
 
 // PNG-encode a BGR crop. Compression 0 = fastest; crops are tiny, net is loopback.
 std::vector<uint8_t> encode_png_bgr(const uint8_t *data, int w, int h, int stride) {
@@ -457,7 +437,6 @@ VLMFormula::submit_async(const GpuImage &page, const std::vector<Box> &boxes,
   }
   if (cudaError_t serr = cudaStreamSynchronize(stream); serr != cudaSuccess) {
     TOCR_LOG_ERROR_RL("VLMFormula page D2H sync failed", "cuda", cudaGetErrorString(serr));
-    return futs;
     return futs;
   }
   return submit_async(host_page, page, boxes);

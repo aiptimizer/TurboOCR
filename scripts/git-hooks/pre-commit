@@ -17,7 +17,8 @@ mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACMR)
 [ ${#STAGED[@]} -eq 0 ] && exit 0
 
 cxx_files=() cmake_files=()
-for f in "${STAGED[@]}"; do
+for f in "${STAGED[@]:-}"; do
+  [ -n "$f" ] || continue
   case "$f" in
     third_party/*|build*/*) continue ;;
     *.cpp|*.h|*.cu|*.cuh) cxx_files+=("$f") ;;
@@ -31,7 +32,8 @@ staged() { git show ":$1" 2>/dev/null; }
 # ---- 1. Console logging bypasses the structured logger -----------------
 # src/ library code must log through logger.h (level control + rate limits).
 # tools/, tests/, benchmarks and the CLI keep plain streams.
-for f in "${cxx_files[@]}"; do
+for f in "${cxx_files[@]:-}"; do
+  [ -n "$f" ] || continue
   case "$f" in src/*) ;; *) continue ;; esac
   if staged "$f" | grep -nE 'std::(cerr|cout)' | grep -vq 'pre-commit-allow-stream'; then
     say "pre-commit: $f writes to std::cout/std::cerr — use TOCR_LOG_* (logger.h)."
@@ -43,7 +45,8 @@ done
 # ---- 2. Ad-hoc getenv outside the env_utils parsers --------------------
 # Every config knob goes through turbo_ocr::env (strict/lenient parse,
 # empty-as-unset, clamping) — no more hand-pasted to_int/get_env copies.
-for f in "${cxx_files[@]}"; do
+for f in "${cxx_files[@]:-}"; do
+  [ -n "$f" ] || continue
   case "$f" in
     src/*|include/*) ;;
     *) continue ;;
@@ -62,7 +65,8 @@ done
 # ---- 3. Unguarded std::stoi/stol family --------------------------------
 # They throw on garbage; parsing must go through std::from_chars or a
 # try-scoped helper (see parse_daemon_page_count for the pattern).
-for f in "${cxx_files[@]}"; do
+for f in "${cxx_files[@]:-}"; do
+  [ -n "$f" ] || continue
   if staged "$f" | grep -nE 'std::sto(i|l|ul|ll|ull|f|d)\(' \
       | grep -vqE 'pre-commit-allow-stoi'; then
     say "pre-commit: $f uses std::stoi/stol — prefer std::from_chars with explicit error handling."
@@ -71,35 +75,51 @@ for f in "${cxx_files[@]}"; do
 done
 
 # ---- 4. CMake hygiene ---------------------------------------------------
-for f in "${cmake_files[@]}"; do
+for f in "${cmake_files[@]:-}"; do
+  [ -n "$f" ] || continue
   if staged "$f" | grep -nqE 'file *\( *GLOB'; then
     say "pre-commit: $f uses file(GLOB) — list sources explicitly."
     fail=1
   fi
 done
-# A CMakeLists.txt that nothing includes misleads contributors.
-for f in "${cmake_files[@]}"; do
+# A CMakeLists.txt that nothing includes misleads contributors. Matched by
+# FULL repo-relative dir against the STAGED top-level CMakeLists (a rename
+# staged in the same commit must count), tolerating quotes.
+for f in "${cmake_files[@]:-}"; do
+  [ -n "$f" ] || continue
   case "$f" in
-    CMakeLists.txt|*/CMakeLists.txt) ;;
+    CMakeLists.txt) continue ;;
+    */CMakeLists.txt) ;;
     *) continue ;;
   esac
   dir=$(dirname "$f")
-  [ "$dir" = "." ] && continue
-  if ! grep -rqE "add_subdirectory *\( *${dir##*/}" "$(git rev-parse --show-toplevel)/CMakeLists.txt" 2>/dev/null; then
-    say "pre-commit: $f is not referenced by any add_subdirectory — orphaned CMakeLists are banned."
+  if ! { staged CMakeLists.txt 2>/dev/null || cat CMakeLists.txt; } \
+      | grep -qE "add_subdirectory *\( *\"?${dir}\"?" ; then
+    say "pre-commit: $f is not referenced by add_subdirectory(${dir}) in the top CMakeLists — orphaned CMakeLists are banned."
     fail=1
   fi
 done
 
-# ---- 5. cppcheck on staged sources (time-boxed) ------------------------
-# Runs only with whatever budget remains; skipped (with a notice) if the
-# cheap checks already consumed it or cppcheck is not installed.
+# ---- 5. cppcheck on STAGED content (time-boxed) ------------------------
+# The staged blob is what gets committed, so that is what gets checked —
+# a partially-staged file must be judged on its index version, not the
+# dirty worktree. Blobs are materialized into a temp tree preserving
+# relative paths (so file-relative includes still resolve).
 if command -v cppcheck >/dev/null 2>&1 && [ ${#cxx_files[@]} -gt 0 ]; then
   left=$(budget_left)
   if [ "$left" -ge 5 ]; then
+    tmpdir=$(mktemp -d) || tmpdir=""
+    trap '[ -n "$tmpdir" ] && rm -rf "$tmpdir"' EXIT
     cpp_only=()
     for f in "${cxx_files[@]}"; do
-      case "$f" in *.cpp) [ -f "$f" ] && cpp_only+=("$f") ;; esac
+      case "$f" in
+        *.cpp)
+          mkdir -p "$tmpdir/$(dirname "$f")"
+          if staged "$f" > "$tmpdir/$f" 2>/dev/null; then
+            cpp_only+=("$tmpdir/$f")
+          fi
+          ;;
+      esac
     done
     if [ ${#cpp_only[@]} -gt 0 ]; then
       cppcheck_out=$(timeout "$left" cppcheck --quiet --error-exitcode=1 \
@@ -110,7 +130,7 @@ if command -v cppcheck >/dev/null 2>&1 && [ ${#cxx_files[@]} -gt 0 ]; then
       if [ "$rc" = "124" ]; then
         say "pre-commit: cppcheck hit the time budget — treat as pass, run manually if needed."
       elif [ "$rc" != "0" ]; then
-        printf '%s\n' "$cppcheck_out" | head -30 >&2
+        printf '%s\n' "${cppcheck_out//$tmpdir\//}" | head -30 >&2
         say "pre-commit: cppcheck found issues (see above)."
         fail=1
       fi

@@ -235,16 +235,18 @@ std::future<std::string> VLMCropPool::submit(std::vector<uint8_t> png_bytes,
     req->deadline_ms = steady_now_ms() + 1000L * std::max(1, timeout_s);
     auto fut = req->result.get_future();
 
-    if (stop_.load()) {
-        // Pool is shutting down (incl. static-destruction teardown): no worker
-        // will ever drain this, so resolve NOW instead of hanging the caller's
-        // future forever (H1). Empty == degraded, surfaced upstream.
-        req->result.set_value(std::string());
-        return fut;
-    }
-
     {
+        // The stop_ check must happen under queue_mu_: shutdown() sets stop_
+        // and then drains queue_ under this same mutex, so a submit that wins
+        // the lock AFTER the drain would otherwise park a request nobody ever
+        // resolves — the caller's future would hang forever. Checking inside
+        // the lock makes "queued" and "will be drained or processed" one
+        // atomic decision. Empty resolve == degraded, surfaced upstream.
         std::lock_guard<std::mutex> lk(queue_mu_);
+        if (stop_.load()) {
+            req->result.set_value(std::string());
+            return fut;
+        }
         queue_.push(std::move(req));
     }
     // Wake worker.
@@ -275,14 +277,13 @@ VLMCropPool::submit_with_status(std::vector<uint8_t> png_bytes,
     req->status_result  = std::make_shared<std::promise<CropOutcome>>();
     auto fut = req->status_result->get_future();
 
-    if (stop_.load()) {
-        // Shutting down: resolve now (degraded) so the future never hangs (H1).
-        req->status_result->set_value(CropOutcome{std::string(), false});
-        return fut;
-    }
-
     {
+        // stop_ checked under queue_mu_ — same shutdown-drain race as submit().
         std::lock_guard<std::mutex> lk(queue_mu_);
+        if (stop_.load()) {
+            req->status_result->set_value(CropOutcome{std::string(), false});
+            return fut;
+        }
         queue_.push(std::move(req));
     }
     if (wake_wr_ >= 0) { char b = 0; (void)write(wake_wr_, &b, 1); }
@@ -312,8 +313,14 @@ void VLMCropPool::resolve_request(CropRequest &req, std::string text, bool ok) {
 
 size_t VLMCropPool::write_cb(char *ptr, size_t sz, size_t nmemb, void *ud) {
     auto *ctx = static_cast<HandleCtx *>(ud);
-    ctx->response.append(ptr, sz * nmemb);
-    return sz * nmemb;
+    // Abort (short count -> CURLE_WRITE_ERROR) past the cap: a wedged or
+    // hostile endpoint must not grow the buffer without bound for the whole
+    // timeout window.
+    constexpr size_t kMaxResponseBytes = 32u << 20;
+    const size_t n = sz * nmemb;
+    if (ctx->response.size() + n > kMaxResponseBytes) return 0;
+    ctx->response.append(ptr, n);
+    return n;
 }
 
 void VLMCropPool::complete_handle(CURL *easy, CURLcode rc) {

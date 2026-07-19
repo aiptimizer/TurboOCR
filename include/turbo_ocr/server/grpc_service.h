@@ -550,6 +550,11 @@ public:
     int64_t cumulative_pixels = 0;
     const int64_t batch_pixel_budget = decode::max_batch_pixels();
     std::vector<bool> too_large(n, false);
+    // Distinguish per-image oversize from aggregate-budget overflow: the
+    // latter means the images are individually fine and the client should
+    // split the batch — the HTTP routes emit distinct tags for exactly this
+    // reason, and the gRPC slot error mirrors them.
+    std::vector<bool> budget_exceeded(n, false);
     for (int i = 0; i < n; ++i) {
       auto *p = reinterpret_cast<const unsigned char *>(request->images(i).data());
       if (auto d = decode::peek_image_dimensions(p, request->images(i).size())) {
@@ -558,10 +563,12 @@ public:
           too_large[i] = true;
         } else {
           const int64_t pix = static_cast<int64_t>(d->width) * d->height;
-          if (cumulative_pixels + pix > batch_pixel_budget)
+          if (cumulative_pixels + pix > batch_pixel_budget) {
             too_large[i] = true;
-          else
+            budget_exceeded[i] = true;
+          } else {
             cumulative_pixels += pix;
+          }
         }
       }
     }
@@ -620,7 +627,9 @@ public:
     for (int i = 0; i < n; ++i) {
       auto *e = response->add_batch_results();
       if (!is_jpeg[i] && imgs[i].empty())
-        mark_empty_slot(e, too_large[i] ? "IMAGE_TOO_LARGE" : "IMAGE_DECODE_FAILED");
+        mark_empty_slot(e, budget_exceeded[i] ? "BATCH_PIXELS_EXCEEDED"
+                           : too_large[i]     ? "IMAGE_TOO_LARGE"
+                                              : "IMAGE_DECODE_FAILED");
       entries.push_back(e);
     }
 
@@ -702,11 +711,11 @@ public:
     // concurrent RPCs would spawn N*grpc_batch_workers_ threads (resource-
     // exhaustion vector, unlike the HTTP WorkPool which is globally bounded).
     // Every RPC keeps one guaranteed worker (progress under contention);
-    // extra workers need a permit from the shared pool.
-    // GRPC_BATCH_GLOBAL_WORKERS caps the process-wide total of extra workers.
+    // EXTRA workers beyond that first one draw a permit from this shared
+    // pool of exactly GRPC_BATCH_GLOBAL_WORKERS permits.
     static std::counting_semaphore<1024> extra_worker_permits{
         static_cast<std::ptrdiff_t>(
-            env::env_int("GRPC_BATCH_GLOBAL_WORKERS", 16, 1, 1024) - 1)};
+            env::env_int("GRPC_BATCH_GLOBAL_WORKERS", 16, 1, 1024))};
     const int num_workers = std::min(n, grpc_batch_workers_);
     std::atomic<int> next_idx{0};
     {
@@ -727,17 +736,23 @@ public:
           }
         }
       };
+      // RAII permit: acquired before the jthread is constructed, released on
+      // scope exit even when jthread construction throws — an OS thread-
+      // creation failure must not leak the permit and erode the pool.
+      struct Permit {
+        bool held = extra_worker_permits.try_acquire();
+        ~Permit() {
+          if (held) extra_worker_permits.release();
+        }
+      };
       std::vector<std::jthread> workers;
+      std::vector<Permit> permits(static_cast<size_t>(
+          std::max(0, num_workers - 1)));
       workers.reserve(static_cast<size_t>(num_workers));
       workers.emplace_back(worker_fn);  // guaranteed worker, no permit
       for (int w = 1; w < num_workers; ++w) {
-        if (!extra_worker_permits.try_acquire()) break;
-        workers.emplace_back([&worker_fn]() {
-          struct Release {
-            ~Release() { extra_worker_permits.release(); }
-          } release_on_exit;
-          worker_fn();
-        });
+        if (!permits[static_cast<size_t>(w - 1)].held) break;
+        workers.emplace_back(worker_fn);
       }
     }
     return grpc::Status::OK;
@@ -959,6 +974,13 @@ private:
           static_cast<int>(out.reading_order.size()));
       for (int idx : out.reading_order) response->add_reading_order(idx);
     }
+    // Structured mode has no json envelope to carry the degraded flags, but a
+    // degraded page must never look clean (json_bytes mode and every HTTP
+    // route surface it). The per-slot `error` field is additive: empty on
+    // healthy responses, so existing clients are unaffected.
+    if (mode_ != GrpcResponseMode::json_bytes && out.text_degraded)
+      response->set_error(out.text_warning.empty() ? "text_degraded"
+                                                   : out.text_warning);
   }
 
   void fill_page_results(ocr::OCRPageResult *page,

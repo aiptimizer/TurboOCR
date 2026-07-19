@@ -1,5 +1,8 @@
 #include "turbo_ocr/routing/routing_config.h"
 
+#include "turbo_ocr/common/env_utils.h"
+#include "turbo_ocr/common/logger.h"
+
 #include <cstdlib>
 #include <fstream>
 #include <array>
@@ -13,10 +16,7 @@ namespace {
 
 using nlohmann::json;
 
-std::string env_or(const char *k, const std::string &dflt) {
-  const char *v = std::getenv(k);
-  return (v && v[0]) ? std::string(v) : dflt;
-}
+using turbo_ocr::env::env_or;
 
 // Valid local engine keys per modality (mirrors the factories; kept as a
 // static list so this module stays free of the GPU recognizer libs).
@@ -56,11 +56,13 @@ std::string resolve_api_key(const std::string &name, const std::string &raw) {
                              "' api_key must use env-indirection ('env:NAME'), "
                              "not a literal secret");
   const std::string var = raw.substr(4);
-  const char *v = std::getenv(var.c_str());
-  if (!v || !v[0])
+  // Secret indirection reads the NAMED variable's raw value — env_or's
+  // default-substitution semantics would mask an unset secret.
+  const std::string v = env_or(var.c_str(), "");
+  if (v.empty())
     throw RoutingConfigError("ROUTING_MISSING_SECRET: backend '" + name +
                              "' api_key env '" + var + "' is unset");
-  return std::string(v);
+  return v;
 }
 
 // Zero-config: synthesize the table from env so behavior == today.
@@ -84,9 +86,9 @@ RoutingTable synth_from_env() {
   if (!engine_valid_for("formula", fb))
     // A typo'd FORMULA_BACKEND must not silently disable formula (the env path
     // previously skipped this validation the config-file path enforces).
-    std::cerr << "[routing] FORMULA_BACKEND='" << fb
-              << "' is not a recognized formula engine — formula will be "
-                 "DISABLED (expected ppformulanet_s|ppformulanet_plus_m|auto|vlm)\n";
+    TOCR_LOG_ERROR("FORMULA_BACKEND is not a recognized formula engine, formula DISABLED",
+                   "value", fb,
+                   "expected", "ppformulanet_s|ppformulanet_plus_m|auto|vlm");
   {
     BackendSpec b; b.name = "formula-env"; b.kind = Kind::Local; b.engine = fb;
     t.backends["formula-env"] = b;
@@ -107,9 +109,8 @@ RoutingTable synth_from_env() {
   // env-only `vlm` → kind:Local engine="vlm" (tested VLMTable via the string
   // factory); OpenAIEndpoint only via explicit kind:openai config (see formula).
   if (!tb.empty() && !engine_valid_for("table", tb))
-    std::cerr << "[routing] TABLE_BACKEND='" << tb
-              << "' is not a recognized table engine — tables fall back to the "
-                 "geometric default (expected slanext|vlm)\n";
+    TOCR_LOG_ERROR("TABLE_BACKEND is not a recognized table engine, geometric fallback",
+                   "value", tb, "expected", "slanext|vlm");
   if (!tb.empty()) {
     BackendSpec b; b.name = "table-env"; b.kind = Kind::Local; b.engine = tb;
     t.backends["table-env"] = b;
@@ -294,8 +295,8 @@ bool parse_parser(const std::string &s, Parser &out) noexcept {
 }
 
 RoutingTable load_routing_config() {
-  const char *cfg = std::getenv("TURBO_ROUTING_CONFIG");
-  if (cfg && cfg[0]) return parse_file(cfg);
+  const std::string cfg = env_or("TURBO_ROUTING_CONFIG", "");
+  if (!cfg.empty()) return parse_file(cfg);
   return synth_from_env();
 }
 

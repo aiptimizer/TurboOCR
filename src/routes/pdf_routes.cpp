@@ -1099,6 +1099,7 @@ void register_pdf_route(server::WorkPool &pool,
     const bool want_blocks = p.opts.want_blocks;
     const bool want_tables = p.opts.want_tables;
     const bool want_formulas = p.opts.want_formulas;
+    const bool want_text = p.opts.want_text;
     const bool want_markdown = p.want_markdown;
     const bool md_as_pages = p.md_as_pages;
     const bool autorotate = p.autorotate;
@@ -1111,8 +1112,8 @@ void register_pdf_route(server::WorkPool &pool,
 
     server::submit_work(pool, std::move(callback),
         [pdf_buf, &infer, &pdf_renderer, want_layout,
-         want_reading_order, want_blocks, want_tables, want_formulas, dpi,
-         want_markdown, md_as_pages,
+         want_reading_order, want_blocks, want_tables, want_formulas, want_text,
+         dpi, want_markdown, md_as_pages,
          req_mode, image_mode, encode_opts, max_pdf_pages,
          autorotate, orient_fn](server::DrogonCallback &cb) {
      // See GPU route: wrap the body so a post-render bad_alloc returns 500
@@ -1142,6 +1143,10 @@ void register_pdf_route(server::WorkPool &pool,
       job_opts.want_blocks = want_blocks;
       job_opts.want_tables = want_tables;
       job_opts.want_formulas = want_formulas;
+      // Parity with the GPU handler: CPU run_pdf_job ignores want_text today
+      // (text=0 is rejected at parse time on this build), but the option must
+      // not silently drift the moment that changes.
+      job_opts.want_text = want_text;
       job_opts.autorotate = autorotate;
       job_opts.image_mode = image_mode;
       job_opts.encode_opts = encode_opts;

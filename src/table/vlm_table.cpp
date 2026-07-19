@@ -46,8 +46,14 @@ std::string to_base64(const std::vector<uint8_t> &bin) {
 
 size_t curl_write_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
   auto *buf = static_cast<std::string *>(userdata);
-  buf->append(ptr, size * nmemb);
-  return size * nmemb;
+  // Abort (short count -> CURLE_WRITE_ERROR) past the cap: a wedged or
+  // hostile endpoint must not grow the buffer without bound for the whole
+  // timeout window.
+  constexpr size_t kMaxResponseBytes = 32u << 20;
+  const size_t n = size * nmemb;
+  if (buf->size() + n > kMaxResponseBytes) return 0;
+  buf->append(ptr, n);
+  return n;
 }
 
 // A stalled TCP/TLS handshake must not silently consume the whole request

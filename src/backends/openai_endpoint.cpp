@@ -1,4 +1,6 @@
 #include "turbo_ocr/backends/openai_endpoint.h"
+#include "turbo_ocr/common/logger.h"
+#include "turbo_ocr/formula/latex_extract.h"
 
 #include <algorithm>
 #include <atomic>
@@ -71,32 +73,6 @@ std::string trim(const std::string &s) {
   return s.substr(a, b - a);
 }
 
-// LaTeX fence/delimiter extraction (mirrors vlm_formula.cpp::extract_latex).
-std::string extract_latex(const std::string &msg) {
-  static const std::regex re_fence(
-      R"(```(?:latex|tex|math)?\s*\n?([\s\S]*?)```)", std::regex::ECMAScript);
-  std::smatch m;
-  if (std::regex_search(msg, m, re_fence) && m.size() >= 2) {
-    std::string s = m[1].str();
-    while (!s.empty() &&
-           (s.back() == '\n' || s.back() == '\r' || s.back() == ' '))
-      s.pop_back();
-    return s;
-  }
-  static const std::regex re_disp(R"(\$\$([\s\S]*?)\$\$)");
-  if (std::regex_search(msg, m, re_disp) && m.size() >= 2) return m[1].str();
-  static const std::regex re_brk(R"(\\\[([\s\S]*?)\\\])");
-  if (std::regex_search(msg, m, re_brk) && m.size() >= 2) return m[1].str();
-  static const std::regex re_inline(R"(\$([^\$\n]+)\$)");
-  if (std::regex_search(msg, m, re_inline) && m.size() >= 2) return m[1].str();
-  // Fallback: strip a leading "LaTeX:"/"Answer:" prefix (mirrors
-  // vlm_formula.cpp::extract_latex) so an un-delimited prefixed answer is clean.
-  std::string s = trim(msg);
-  for (const std::string pre : {"LaTeX:", "Latex:", "latex:", "Answer:", "answer:"}) {
-    if (s.rfind(pre, 0) == 0) { s = trim(s.substr(pre.size())); break; }
-  }
-  return s;
-}
 
 // Mirror vlm_table.cpp::otsl_or_html: a model that already returns HTML
 // (`<table…`) is passed through untouched; only OTSL is converted. Without
@@ -114,7 +90,7 @@ std::string parse_with(routing::Parser parser, const std::string &raw) {
   case routing::Parser::Otsl:
     return otsl_or_html(raw);
   case routing::Parser::Latex:
-    return extract_latex(raw);
+    return formula::extract_latex(raw);
   case routing::Parser::Text:
     return trim(raw);
   case routing::Parser::Raw:
@@ -133,8 +109,8 @@ bool OpenAIEndpoint::health_check() {
     spec_.base_url.pop_back();
   std::string body;
   if (!http_get_ok(spec_.base_url + "/v1/models", 5, body, spec_.api_key)) {
-    std::cerr << "[OpenAIEndpoint] /v1/models unreachable at " << spec_.base_url
-              << " — backend '" << spec_.name << "' disabled\n";
+    TOCR_LOG_ERROR("OpenAIEndpoint /v1/models unreachable, backend disabled",
+                   "base_url", spec_.base_url, "backend", spec_.name);
     ready_ = false;
     return false;
   }
@@ -144,14 +120,13 @@ bool OpenAIEndpoint::health_check() {
       if (j.contains("data") && j["data"].is_array() && !j["data"].empty())
         spec_.model = j["data"][0].value("id", "");
     } catch (const std::exception &e) {
-      std::cerr << "[OpenAIEndpoint] /v1/models parse warning: " << e.what()
-                << '\n';
+      TOCR_LOG_WARN("OpenAIEndpoint /v1/models parse warning", "error", e.what());
     }
   }
   ready_ = !spec_.model.empty();
-  std::cout << "[OpenAIEndpoint] ready: " << spec_.base_url
-            << " model=" << spec_.model
-            << " parser=" << routing::parser_name(spec_.parser) << '\n';
+  TOCR_LOG_INFO("OpenAIEndpoint ready", "base_url", spec_.base_url,
+                "model", spec_.model,
+                "parser", routing::parser_name(spec_.parser));
   return ready_;
 }
 

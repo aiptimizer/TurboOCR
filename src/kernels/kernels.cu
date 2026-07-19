@@ -512,8 +512,14 @@ void cuda_threshold_to_u8(const float *src, uint8_t *dst, int w, int h,
 void cuda_batch_threshold_to_u8(const float *src, uint8_t *dst, int w, int h,
                                  int batch_size, float thresh,
                                  cudaStream_t stream) {
-  // Treat as flat 1D array: pass total as (w_flat, 1) so kernel sees total = w_flat * 1
-  int total_pixels = w * h * batch_size;
+  // Treat as flat 1D array: pass total as (w_flat, 1) so kernel sees total = w_flat * 1.
+  // Guard the size_t->int narrowing: w*h*batch as int would overflow once
+  // per-side limits approach 16384 at batch 8, silently misindexing the
+  // threshold writes. Fail loud instead if limits ever grow that far.
+  const size_t total = static_cast<size_t>(w) * h * batch_size;
+  if (total > static_cast<size_t>(INT_MAX))
+    CUDA_CHECK(cudaErrorInvalidValue);
+  const int total_pixels = static_cast<int>(total);
   int threads = 256;
   int elements_per_block = threads * 4;
   int blocks = (total_pixels + elements_per_block - 1) / elements_per_block;

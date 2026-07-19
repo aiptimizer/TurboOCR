@@ -727,6 +727,12 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
       cudaGetLastError();
       throw turbo_ocr::InferenceError(
           std::string("batched detection GPU fault: ") + e.what());
+    } catch (const turbo_ocr::InferenceError &e) {
+      // TRT enqueue failures surface as InferenceError (infer_dynamic already
+      // ran the sticky check internally); rewrap so the batch context isn't
+      // lost while keeping the same loud path as the CudaError branch.
+      throw turbo_ocr::InferenceError(
+          std::string("batched detection failed: ") + e.what());
     }
   }
 

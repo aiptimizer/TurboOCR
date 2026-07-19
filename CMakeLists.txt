@@ -237,6 +237,7 @@ endif()
 add_library(turbo_ocr_common STATIC
     src/detection/det_postprocess.cpp
     src/formula/cjk_stats.cpp
+    src/formula/latex_extract.cpp
     src/recognition/crop_utils.cpp
     src/recognition/ctc_decode.cpp
     src/decode/fast_png_decoder.cpp
@@ -715,7 +716,7 @@ else()
     # binary via start_grpc_server() in grpc_service.h.
 
     # Benchmark tools
-    add_executable(grpc_bench
+    add_executable(grpc_bench EXCLUDE_FROM_ALL
         tools/grpc_bench.cpp
         ${PROTO_GEN_CC}
         ${GRPC_GEN_CC}
@@ -726,7 +727,7 @@ else()
         protobuf::libprotobuf
     )
 
-    add_executable(grpc_burst
+    add_executable(grpc_burst EXCLUDE_FROM_ALL
         tools/grpc_burst.cpp
         ${PROTO_GEN_CC}
         ${GRPC_GEN_CC}
@@ -740,7 +741,7 @@ else()
     # diff_ccl: side-by-side comparator for CPU CCL=1 vs GPU CCL=2 outputs.
     # Loads an image, runs both detection paths, prints box counts, IoU stats,
     # and missed/extra boxes. Used to drive the GPU JFA pipeline accuracy.
-    add_executable(diff_ccl tools/diff_ccl.cpp)
+    add_executable(diff_ccl EXCLUDE_FROM_ALL tools/diff_ccl.cpp)
     target_include_directories(diff_ccl PRIVATE include)
     target_link_libraries(diff_ccl PRIVATE
         turbo_ocr_gpu
@@ -754,7 +755,7 @@ else()
 
     # Regression: nvJPEG handler-thread -> dispatcher-worker race
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tools/test_nvjpeg_race.cpp)
-        add_executable(test_nvjpeg_race tools/test_nvjpeg_race.cpp)
+        add_executable(test_nvjpeg_race EXCLUDE_FROM_ALL tools/test_nvjpeg_race.cpp)
         target_include_directories(test_nvjpeg_race PRIVATE include)
         target_link_libraries(test_nvjpeg_race PRIVATE
             CUDA::cudart

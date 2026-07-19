@@ -542,6 +542,12 @@ std::string escape_md_link_text(std::string_view s) {
   std::string out;
   out.reserve(s.size());
   for (char c : s) {
+    // A newline would terminate the ![...] link; captions are single-line by
+    // construction but OCR text is untrusted, so fold to spaces.
+    if (c == '\n' || c == '\r') {
+      if (!out.empty() && out.back() != ' ') out.push_back(' ');
+      continue;
+    }
     if (c == '[' || c == ']' || c == '(' || c == ')' || c == '\\')
       out.push_back('\\');
     out.push_back(c);
