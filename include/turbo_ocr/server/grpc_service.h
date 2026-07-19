@@ -565,11 +565,21 @@ public:
     std::vector<bool> budget_exceeded(n, false);
     for (int i = 0; i < n; ++i) {
       auto *p = reinterpret_cast<const unsigned char *>(request->images(i).data());
-      if (auto d = decode::peek_image_dimensions(p, request->images(i).size())) {
+      const size_t blen = request->images(i).size();
+      // A JPEG on the GPU path decodes on the DEVICE (grpc_jpeg_decode_and_infer)
+      // and never lands in the host `imgs` array, so it must not count against
+      // the host-OOM aggregate budget — that budget bounds only up-front
+      // host-decoded (PNG/BMP) slots. Its own per-image dim/area caps below
+      // still apply, so an individually oversized JPEG is still rejected.
+      bool device_jpeg = false;
+#ifndef USE_CPU_ONLY
+      device_jpeg = dispatcher_ && decode::NvJpegDecoder::is_jpeg(p, blen);
+#endif
+      if (auto d = decode::peek_image_dimensions(p, blen)) {
         if (d->width > dim_cap || d->height > dim_cap ||
             decode::exceeds_pixel_cap(d->width, d->height)) {
           too_large[i] = true;
-        } else {
+        } else if (!device_jpeg) {
           const int64_t pix = static_cast<int64_t>(d->width) * d->height;
           if (cumulative_pixels + pix > batch_pixel_budget) {
             too_large[i] = true;
@@ -702,6 +712,11 @@ public:
             out = futs[i].get();
           }
           fill_response(entries[i], out, want_blocks);
+        } catch (const turbo_ocr::ImageTooLargeError &) {
+          // An oversized JPEG that slipped past the pre-decode sniff surfaces
+          // here (the device decoder rejects it). Tag it like the single
+          // Recognize path does, not the generic INFERENCE_ERROR.
+          mark_empty_slot(entries[i], "IMAGE_TOO_LARGE");
         } catch (const std::exception &e) {
           TOCR_LOG_ERROR_RL("gRPC batch image error", "index", i, "error", e.what());
           mark_empty_slot(entries[i], "INFERENCE_ERROR");

@@ -2,35 +2,15 @@
 
 #include <string>
 
-// extract_latex is the ONE shared implementation (formula/latex_extract.h)
-// used by both the vLLM sidecar backend and the generic OpenAI endpoint;
-// otsl_or_html is a thin shell over the reusable table::otsl_to_html. Both
-// underlying transforms are tested directly here.
-#include "turbo_ocr/formula/latex_extract.h"
+// otsl_or_html is a thin shell over the reusable table::otsl_to_html, tested
+// directly here. (extract_latex, the other openai-endpoint parser, is tested
+// in the CPU-linkable test_latex_extract.cpp.)
 #include "turbo_ocr/table/vlm_table.h"
 
-using turbo_ocr::formula::extract_latex;
 using turbo_ocr::table::otsl_to_html;
 
-TEST_CASE("extract_latex prefers a latex fence", "[openai_parsers][latex]") {
-  CHECK(extract_latex("```latex\nx^2 + y^2\n```") == "x^2 + y^2");
-  CHECK(extract_latex("prose before ```tex\n\\frac{a}{b}``` prose after") ==
-        "\\frac{a}{b}");
-  CHECK(extract_latex("```\nbare fence\n```") == "bare fence");
-}
 
-TEST_CASE("extract_latex falls through the delimiter ladder", "[openai_parsers][latex]") {
-  CHECK(extract_latex("here: $$E=mc^2$$ done") == "E=mc^2");
-  CHECK(extract_latex("here: \\[a+b\\] done") == "a+b");
-  CHECK(extract_latex("inline $x_i$ math") == "x_i");
-}
 
-TEST_CASE("extract_latex strips answer prefixes on bare replies", "[openai_parsers][latex]") {
-  CHECK(extract_latex("LaTeX: x + y") == "x + y");
-  CHECK(extract_latex("Answer:  z ") == "z");
-  CHECK(extract_latex("  plain reply \n") == "plain reply");
-  CHECK(extract_latex("") == "");
-}
 
 TEST_CASE("otsl_to_html builds a simple grid", "[openai_parsers][table]") {
   // 2x2 full cells -> two rows of two <td>.

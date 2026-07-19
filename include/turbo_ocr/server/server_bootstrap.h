@@ -62,22 +62,35 @@ inline void begin_graceful_shutdown(const char *signal_name) {
                 "grace_seconds", shutdown_grace_seconds());
   std::thread([signal_name]() {
     const int grace = shutdown_grace_seconds();
-    // Kick off the gRPC drain first so HTTP and gRPC drain concurrently within
-    // the one grace window. Shutdown(deadline) stops admitting immediately and
-    // hard-cancels anything still running at the deadline.
+    // ONE wall-clock window shared by both drains. gRPC Shutdown(deadline)
+    // BLOCKS until its in-flight RPCs finish or the deadline hits, so running
+    // it inline before the HTTP drain would serialize the two (total up to
+    // 2*grace, overrunning the k8s termination window). Drain gRPC on its own
+    // thread and the WorkPool against the SAME absolute deadline, so both are
+    // bounded by one grace window and truly run concurrently.
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto deadline = t0 + std::chrono::seconds(grace);
+
+    std::thread grpc_thread;
     if (g_grpc_server_for_drain) {
-      auto grpc_deadline =
-          std::chrono::system_clock::now() + std::chrono::seconds(grace);
-      g_grpc_server_for_drain->Shutdown(grpc_deadline);
-      TOCR_LOG_INFO("gRPC graceful shutdown complete",
-                    "signal", std::string_view(signal_name));
+      grpc_thread = std::thread([signal_name, grace]() {
+        auto grpc_deadline =
+            std::chrono::system_clock::now() + std::chrono::seconds(grace);
+        g_grpc_server_for_drain->Shutdown(grpc_deadline);
+        TOCR_LOG_INFO("gRPC graceful shutdown complete",
+                      "signal", std::string_view(signal_name));
+      });
     }
     if (g_work_pool_for_drain) {
-      auto deadline = std::chrono::seconds(grace);
-      bool drained = g_work_pool_for_drain->wait_drain(deadline);
+      // Remaining budget against the shared deadline (>= 0).
+      auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+          deadline - std::chrono::steady_clock::now());
+      if (remaining.count() < 0) remaining = std::chrono::milliseconds(0);
+      bool drained = g_work_pool_for_drain->wait_drain(remaining);
       TOCR_LOG_INFO("Inflight work drain complete",
                     "drained", drained, "signal", std::string_view(signal_name));
     }
+    if (grpc_thread.joinable()) grpc_thread.join();
     drogon::app().quit();
   }).detach();
 }

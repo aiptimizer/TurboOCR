@@ -247,6 +247,7 @@ measured reason.
 |---|---|---|
 | `BIND_HOST` | `0.0.0.0` | Bind address override. |
 | `GRPC_BATCH_GLOBAL_WORKERS` | `16` | Process-wide ceiling on extra gRPC batch fanout threads (each RPC keeps one guaranteed worker). |
+| `BATCH_FANOUT_GLOBAL_WORKERS` | `64` | Process-wide ceiling on extra CPU `/ocr/batch` fanout threads (each request keeps one guaranteed worker). |
 | `FINALIZE_DEFERRED_TIMEOUT_MS` | request timeout | Await budget for deferred (async VLM) structure results. |
 | `PDF_RENDER_REPLY_TIMEOUT_MS` | `120000` | Cap on waiting for a PDF daemon reply. |
 | `FASTPDF2PNG_PATH` | bundled | Path to the fastpdf2png daemon binary. |

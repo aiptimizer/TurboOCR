@@ -35,7 +35,7 @@ staged() { git show ":$1" 2>/dev/null; }
 for f in "${cxx_files[@]:-}"; do
   [ -n "$f" ] || continue
   case "$f" in src/*) ;; *) continue ;; esac
-  if staged "$f" | grep -nE 'std::(cerr|cout)' | grep -vq 'pre-commit-allow-stream'; then
+  if staged "$f" | grep -nE '(std::)?(cerr|cout) *<<' | grep -vq 'pre-commit-allow-stream'; then
     say "pre-commit: $f writes to std::cout/std::cerr — use TOCR_LOG_* (logger.h)."
     say "           (append // pre-commit-allow-stream on the line for a deliberate exception)"
     fail=1
@@ -67,7 +67,7 @@ done
 # try-scoped helper (see parse_daemon_page_count for the pattern).
 for f in "${cxx_files[@]:-}"; do
   [ -n "$f" ] || continue
-  if staged "$f" | grep -nE 'std::sto(i|l|ul|ll|ull|f|d)\(' \
+  if staged "$f" | grep -nE '(std::)?\bsto(i|l|ul|ll|ull|f|d)\(' \
       | grep -vqE 'pre-commit-allow-stoi'; then
     say "pre-commit: $f uses std::stoi/stol — prefer std::from_chars with explicit error handling."
     fail=1

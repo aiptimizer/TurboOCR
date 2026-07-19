@@ -6,6 +6,7 @@
 #include <format>
 #include <iostream>
 #include <optional>
+#include <semaphore>
 #include <string>
 #include <thread>
 #include <vector>
@@ -574,10 +575,23 @@ int main(int argc, char **argv) try {
               ? 0
               : std::min(static_cast<int>(valid_indices.size()), pool_size);
           {
+            // Every request keeps ONE guaranteed worker (progress under
+            // contention); extra fan-out workers draw from a process-wide
+            // permit pool so N concurrent /ocr/batch requests can't create
+            // N*pool_size OS threads (most would only block on pool->acquire()
+            // anyway). Same bound the gRPC batch path applies.
+            static std::counting_semaphore<4096> extra_batch_permits{
+                static_cast<std::ptrdiff_t>(turbo_ocr::server::env_int(
+                    "BATCH_FANOUT_GLOBAL_WORKERS", 64, 1, 4096))};
+            struct Permit {
+              bool held = false;
+              ~Permit() { if (held) extra_batch_permits.release(); }
+            };
+            std::vector<Permit> permits(
+                static_cast<size_t>(std::max(0, num_workers - 1)));
             std::vector<std::jthread> threads;
             threads.reserve(num_workers);
-            for (int w = 0; w < num_workers; ++w) {
-              threads.emplace_back([&]() {
+            const auto worker_body = [&]() {
                 // Acquire the pool handle outside the per-image loop —
                 // pool exhaustion is a fatal worker-level error (no point
                 // trying again), so it tags every remaining slot.
@@ -617,9 +631,16 @@ int main(int argc, char **argv) try {
                     batch_items[idx].error = "unknown";
                   }
                 }
-              });
+            };
+            // First worker is guaranteed; each subsequent one needs a permit.
+            if (num_workers > 0) threads.emplace_back(worker_body);
+            for (int w = 1; w < num_workers; ++w) {
+              Permit &pm = permits[static_cast<size_t>(w - 1)];
+              pm.held = extra_batch_permits.try_acquire();
+              if (!pm.held) break;
+              threads.emplace_back(worker_body);
             }
-          } // jthreads auto-join here
+          } // jthreads auto-join here (permits release after)
 
           // Emit per-image results AND a sibling errors array so clients
           // can see which slots failed without having to compare lengths.

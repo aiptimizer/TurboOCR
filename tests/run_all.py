@@ -78,9 +78,22 @@ def main():
     if "cpp" in ordered:
         ordered.remove("cpp")
         print("=== cpp suite (ctest) ===")
+        import shutil
         import subprocess
         build_dir = TESTS_DIR.parent / "build"
-        cpp_rc = subprocess.call(["ctest", "--output-on-failure"], cwd=build_dir)
+        if not build_dir.is_dir():
+            print(f"cpp suite: build dir {build_dir} not found — "
+                  f"configure & build first (cmake -B build ...)")
+            cpp_rc = 1
+        elif shutil.which("ctest") is None:
+            print("cpp suite: ctest not on PATH — install CMake")
+            cpp_rc = 1
+        else:
+            # --no-tests=error so a zero-registered suite fails instead of
+            # silently passing (the false-green the add_test comment warns of).
+            cpp_rc = subprocess.call(
+                ["ctest", "--output-on-failure", "--no-tests=error"],
+                cwd=build_dir)
         if cpp_rc != 0 and args.exitfirst:
             sys.exit(cpp_rc)
 

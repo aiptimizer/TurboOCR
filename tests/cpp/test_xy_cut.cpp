@@ -1210,16 +1210,18 @@ TEST_CASE("results_with_blocks: escapes JSON-special chars in content",
         != std::string::npos);
 }
 
-TEST_CASE("recursive_xy_cut terminates and returns every box under deep nesting",
-          "[xy_cut][depth]") {
-  // A tall stack of well-separated single-box rows forces maximal alternating
-  // H/V recursion. The depth cap must keep it terminating and lossless (every
-  // input index appears exactly once in the output).
+TEST_CASE("recursive_xy_cut is lossless on a large input", "[xy_cut]") {
+  // Stress the recursion over many boxes and assert the core invariant: the
+  // output is a permutation of the input (every index exactly once, nothing
+  // lost or duplicated). This does NOT reach the depth cap — well-formed
+  // splits keep the recursion shallow — so the cap remains purely defensive
+  // against a pathological input that can't arise here; it is not claimed to
+  // be exercised by this test.
   const int N = 500;
   std::vector<std::array<int, 4>> rects;
   rects.reserve(N);
   for (int i = 0; i < N; ++i) {
-    const int y = i * 100;  // large vertical gaps -> deep row recursion
+    const int y = i * 100;  // well-separated rows
     rects.push_back({0, y, 50, y + 10});
   }
   std::vector<int> indices(N);
@@ -1231,5 +1233,5 @@ TEST_CASE("recursive_xy_cut terminates and returns every box under deep nesting"
   REQUIRE(order.size() == static_cast<size_t>(N));
   std::vector<int> sorted = order;
   std::sort(sorted.begin(), sorted.end());
-  for (int i = 0; i < N; ++i) CHECK(sorted[i] == i);  // permutation, no loss
+  for (int i = 0; i < N; ++i) CHECK(sorted[i] == i);
 }

@@ -290,6 +290,7 @@ add_executable(turbo_ocr_tests
     tests/cpp/test_pdf_mode_strict.cpp
     tests/cpp/test_serialization_escape.cpp
     tests/cpp/test_logger_bounds.cpp
+    tests/cpp/test_latex_extract.cpp
     src/render/pdf_renderer.cpp
     src/table/html_reconstruct.cpp
     src/formula/formula_tokenizer.cpp

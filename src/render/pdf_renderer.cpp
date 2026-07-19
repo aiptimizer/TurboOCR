@@ -150,6 +150,81 @@ struct TempGuard {
   TempGuard &operator=(const TempGuard &) = delete;
 };
 
+// Parsed PPM (P5/P6) header. `valid` is false for a malformed or bomb-sized
+// header; `payload_offset` is the byte index where pixel data begins and
+// `payload_bytes` its exact declared length, so a complete file is exactly
+// payload_offset + payload_bytes long. One parser shared by decode_ppm and
+// the streamed safety-net's completeness check.
+struct PpmHeader {
+  bool   valid = false;
+  bool   gray = false;
+  int    w = 0, h = 0;
+  size_t payload_offset = 0;
+  size_t payload_bytes = 0;
+};
+
+static PpmHeader parse_ppm_header(const unsigned char *base, size_t len) {
+  PpmHeader hdr;
+  const unsigned char *end = base + len;
+  const unsigned char *p = base;
+  if (len < 3 || p[0] != 'P' || (p[1] != '5' && p[1] != '6')) return hdr;
+  hdr.gray = (p[1] == '5');
+  p += 2;
+
+  // Consume one header token (int), skipping whitespace and '#'-comments.
+  auto next_int = [&](int &out) -> bool {
+    while (p < end) {
+      unsigned char c = *p;
+      if (c == '#') { while (p < end && *p != '\n') ++p; continue; }
+      if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { ++p; continue; }
+      break;
+    }
+    if (p >= end || *p < '0' || *p > '9') return false;
+    int v = 0;
+    while (p < end && *p >= '0' && *p <= '9') {
+      v = v * 10 + (*p - '0');
+      if (v > 100000) return false;
+      ++p;
+    }
+    out = v;
+    return true;
+  };
+
+  int maxval = 0;
+  if (!next_int(hdr.w) || !next_int(hdr.h) || !next_int(maxval)) return hdr;
+  if (hdr.w <= 0 || hdr.h <= 0 || hdr.w > 16384 || hdr.h > 16384 || maxval != 255)
+    return hdr;
+  if (static_cast<int64_t>(hdr.w) * hdr.h > ppm_max_pixels())
+    return hdr;  // area bomb guard
+  // Exactly one whitespace byte separates maxval from the payload.
+  if (p >= end) return hdr;
+  ++p;
+
+  hdr.payload_offset = static_cast<size_t>(p - base);
+  hdr.payload_bytes =
+      static_cast<size_t>(hdr.w) * hdr.h * (hdr.gray ? 1 : 3);
+  hdr.valid = true;
+  return hdr;
+}
+
+// True when `path` is a fully-written PPM: a parseable header plus the entire
+// declared pixel payload present on disk. Used by the streamed safety-net so a
+// file still being flushed by a forked worker is retried, not delivered
+// truncated. Reads only the header prefix, then stats the size.
+static bool ppm_is_complete(const std::string &path) {
+  int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return false;
+  struct stat st{};
+  if (::fstat(fd, &st) < 0) { ::close(fd); return false; }
+  const auto file_size = static_cast<size_t>(st.st_size);
+  unsigned char buf[128];
+  const ssize_t got = ::read(fd, buf, sizeof(buf));
+  ::close(fd);
+  if (got <= 0) return false;
+  const PpmHeader hdr = parse_ppm_header(buf, static_cast<size_t>(got));
+  return hdr.valid && file_size >= hdr.payload_offset + hdr.payload_bytes;
+}
+
 // PPM → BGR decoder. mmap the file, copy pixels into a cv::Mat with a
 // single-pass RGB→BGR swap, then unlink the file. Unlinking immediately
 // after mmap keeps /dev/shm usage bounded by the number of in-flight
@@ -178,43 +253,13 @@ cv::Mat PdfRenderer::decode_ppm(const std::string &path) {
   } guard{map, file_size};
 
   const unsigned char *base = static_cast<const unsigned char *>(map);
-  const unsigned char *end  = base + file_size;
-  const unsigned char *p    = base;
-
-  // Magic: "P5" (gray) or "P6" (color RGB).
-  if (p[0] != 'P' || (p[1] != '5' && p[1] != '6')) return {};
-  const bool gray = (p[1] == '5');
-  p += 2;
-
-  // Consume one header token (int), skipping whitespace and '#'-comments.
-  auto next_int = [&](int &out) -> bool {
-    while (p < end) {
-      unsigned char c = *p;
-      if (c == '#') { while (p < end && *p != '\n') ++p; continue; }
-      if (c == ' ' || c == '\t' || c == '\n' || c == '\r') { ++p; continue; }
-      break;
-    }
-    if (p >= end || *p < '0' || *p > '9') return false;
-    int v = 0;
-    while (p < end && *p >= '0' && *p <= '9') {
-      v = v * 10 + (*p - '0');
-      if (v > 100000) return false;
-      ++p;
-    }
-    out = v;
-    return true;
-  };
-
-  int w = 0, h = 0, maxval = 0;
-  if (!next_int(w) || !next_int(h) || !next_int(maxval)) return {};
-  if (w <= 0 || h <= 0 || w > 16384 || h > 16384 || maxval != 255) return {};
-  if (static_cast<int64_t>(w) * h > ppm_max_pixels()) return {};  // area bomb guard
-  // After maxval there's exactly one whitespace byte before the payload.
-  if (p >= end) return {};
-  ++p;
-
-  const size_t expected = static_cast<size_t>(w) * h * (gray ? 1 : 3);
-  if (static_cast<size_t>(end - p) < expected) return {};
+  const PpmHeader hdr = parse_ppm_header(base, file_size);
+  if (!hdr.valid) return {};
+  const bool gray = hdr.gray;
+  const int w = hdr.w, h = hdr.h;
+  const unsigned char *p = base + hdr.payload_offset;
+  const size_t expected = hdr.payload_bytes;
+  if (file_size - hdr.payload_offset < expected) return {};
 
   if (gray) {
     cv::Mat g(h, w, CV_8UC1);
@@ -728,12 +773,18 @@ PdfRenderer::render_streamed(const uint8_t *data, size_t len, int dpi,
       delivered.resize(num_pages, false);
     using clock = std::chrono::steady_clock;
     const auto deadline = clock::now() + std::chrono::seconds(30);
+    // The primary path waits on IN_CLOSE_WRITE (write complete); this net
+    // must not deliver a page that merely EXISTS but is still being flushed
+    // by a forked worker (the daemon can reply "OK N" before its workers
+    // finish writing). Require a complete PPM — full header plus the declared
+    // pixel payload — before delivering, so a mid-flush file is retried
+    // instead of handed on truncated (decode_ppm would otherwise drop it).
     while (pages_delivered < num_pages && clock::now() < deadline) {
       bool found_any = false;
       for (int i = 0; i < num_pages; ++i) {
         if (delivered[i]) continue;
         std::string ppm_path = std::format("{}/p_{:04d}.ppm", tmpdir.path, i + 1);
-        if (!std::filesystem::exists(ppm_path)) continue;
+        if (!ppm_is_complete(ppm_path)) continue;
         delivered[i] = true;
         on_page(i, std::move(ppm_path));
         ++pages_delivered;

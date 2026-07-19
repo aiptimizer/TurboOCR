@@ -269,8 +269,15 @@ void append_pdf_page_json(std::string &json_str, PdfPageResult &pg, size_t i,
   json_str += ",\"height\":";
   json_str += std::to_string(pg.height);
   json_str += ',';
+  // serialize_page_results returns a full "{...}" object; splice its interior
+  // (drop the braces) into this page object. An empty "{}" would splice
+  // nothing and leave a trailing comma — invalid JSON. The serializer always
+  // emits at least "results":[], so this is defensive, not currently reached.
   auto page_json = pipeline::serialize_page_results(pg, want_blocks);
-  json_str.append(page_json.data() + 1, page_json.size() - 2);
+  if (page_json.size() > 2)
+    json_str.append(page_json.data() + 1, page_json.size() - 2);
+  else
+    json_str += "\"results\":[]";
   json_str += ",\"mode\":\"";
   json_str += pdf::mode_name(pg.resolved_mode);
   json_str += "\",\"text_layer_quality\":\"";
@@ -1039,6 +1046,11 @@ void register_ocr_stream_route_gpu(server::WorkPool &pool,
             state->send_line("{\"event\":\"end\",\"pages\":1,\"failed\":0}");
           } catch (const turbo_ocr::TimeoutError &) {
             state->send_line("{\"event\":\"error\",\"code\":\"INFERENCE_TIMEOUT\"}");
+          } catch (const turbo_ocr::PoolExhaustedError &) {
+            // GPU-queue backpressure is retryable — emit SERVER_BUSY (parity
+            // with the PDF-stream and every non-stream route), not the
+            // terminal INFERENCE_ERROR the generic handler below would send.
+            state->send_line("{\"event\":\"error\",\"code\":\"SERVER_BUSY\"}");
           } catch (const std::exception &ex) {
             TOCR_LOG_ERROR("stream image error", "route", "/ocr/stream",
                            "error", std::string_view(ex.what()));

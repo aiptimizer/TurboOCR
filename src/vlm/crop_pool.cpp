@@ -183,12 +183,12 @@ void VLMCropPool::shutdown() {
     bool expected = false;
     if (!stop_.compare_exchange_strong(expected, true)) return;
 
-    // Wake the worker.
+    // Wake the worker so it observes stop_ and returns. This write races
+    // nothing: the worker is the only reader and is still alive here.
     if (wake_wr_ >= 0) { char b = 0; (void)write(wake_wr_, &b, 1); }
     if (worker_.joinable()) worker_.join();
 
     if (wake_rd_ >= 0) { close(wake_rd_); wake_rd_ = -1; }
-    if (wake_wr_ >= 0) { close(wake_wr_); wake_wr_ = -1; }
 
     // Drain any remaining pending items (not-confident: shutdown is a failure
     // to deliver, not a genuine empty result). Worker has joined, so the
@@ -197,7 +197,12 @@ void VLMCropPool::shutdown() {
         if (r) resolve_request(*r, std::string{}, /*ok=*/false);
     retry_queue_.clear();
 
+    // Close wake_wr_ AND drain the queue under queue_mu_: a concurrent submit()
+    // takes the same lock, so it either observes stop_ and resolves in place
+    // (never touching the fd) or completed its write to a still-open fd before
+    // us — no write to a closed/recycled descriptor.
     std::lock_guard<std::mutex> lk(queue_mu_);
+    if (wake_wr_ >= 0) { close(wake_wr_); wake_wr_ = -1; }
     while (!queue_.empty()) {
         resolve_request(*queue_.front(), std::string{}, /*ok=*/false);
         queue_.pop();
@@ -248,9 +253,11 @@ std::future<std::string> VLMCropPool::submit(std::vector<uint8_t> png_bytes,
             return fut;
         }
         queue_.push(std::move(req));
+        // Wake the worker UNDER the lock: shutdown() closes wake_wr_ while
+        // holding queue_mu_, so the fd is guaranteed open here (or stop_ is
+        // set and we returned above).
+        if (wake_wr_ >= 0) { char b = 0; (void)write(wake_wr_, &b, 1); }
     }
-    // Wake worker.
-    if (wake_wr_ >= 0) { char b = 0; (void)write(wake_wr_, &b, 1); }
     queue_cv_.notify_one();
     return fut;
 }
@@ -285,8 +292,9 @@ VLMCropPool::submit_with_status(std::vector<uint8_t> png_bytes,
             return fut;
         }
         queue_.push(std::move(req));
+        // Wake under the lock — see submit() for the fd-lifetime rationale.
+        if (wake_wr_ >= 0) { char b = 0; (void)write(wake_wr_, &b, 1); }
     }
-    if (wake_wr_ >= 0) { char b = 0; (void)write(wake_wr_, &b, 1); }
     queue_cv_.notify_one();
     return fut;
 }
