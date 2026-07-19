@@ -22,6 +22,7 @@
 #include "simdutf.h"
 #include "turbo_ocr/common/cuda_check.h"
 #include "turbo_ocr/common/env_utils.h"
+#include "turbo_ocr/common/logger.h"
 #include "turbo_ocr/vlm/crop_pool.h"
 
 namespace turbo_ocr::formula {
@@ -113,7 +114,7 @@ HttpResp http_post_json(const std::string &url, const std::string &json_body,
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &r.status);
     r.ok = (r.status >= 200 && r.status < 300);
   } else {
-    std::cerr << "[VLMFormula] curl error: " << curl_easy_strerror(rc) << '\n';
+    TOCR_LOG_ERROR_RL("VLMFormula curl error", "error", curl_easy_strerror(rc));
   }
   return r;
 }
@@ -202,8 +203,7 @@ bool VLMFormula::load_model_dir(const std::string &/*model_dir*/) {
 
   HttpResp r = http_get(base_url_ + "/v1/models", 5);
   if (!r.ok) {
-    std::cerr << "[VLMFormula] /v1/models unreachable at " << base_url_
-              << " (status=" << r.status << ") — formulas disabled\n";
+    TOCR_LOG_ERROR("VLMFormula /v1/models unreachable, formulas disabled", "base_url", base_url_, "status", r.status);
     return false;
   }
   try {
@@ -214,22 +214,16 @@ bool VLMFormula::load_model_dir(const std::string &/*model_dir*/) {
         if (!std::getenv("VLLM_MODEL") || std::getenv("VLLM_MODEL")[0] == '\0') {
           model_ = first;
         }
-        std::cout << "[VLMFormula] endpoint=" << base_url_
-                  << " server_model=" << first
-                  << " using_model=" << model_ << '\n';
+        TOCR_LOG_INFO("VLMFormula endpoint probed", "base_url", base_url_, "server_model", first, "using_model", model_);
       }
     }
   } catch (const std::exception &e) {
-    std::cerr << "[VLMFormula] /v1/models parse warning: " << e.what() << '\n';
+    TOCR_LOG_WARN("VLMFormula /v1/models parse warning", "error", e.what());
   }
 
   ready_ = true;
   const char *backend = use_pool_backend() ? "pool" : "legacy";
-  std::cout << "[VLMFormula] ready: " << base_url_ << " model=" << model_
-            << " batch=" << batch_ << " timeout=" << timeout_s_ << "s"
-            << " max_tokens=" << max_tokens_
-            << " backend=" << backend
-            << " png_threads=" << png_threads_ << '\n';
+  TOCR_LOG_INFO("VLMFormula ready", "base_url", base_url_, "model", model_, "batch", batch_, "timeout_s", timeout_s_, "max_tokens", max_tokens_, "backend", backend, "png_threads", png_threads_);
   return true;
 }
 
@@ -253,9 +247,7 @@ bool VLMFormula::single_request(const std::vector<uint8_t> &crop_png,
   HttpResp r = http_post_json(base_url_ + "/v1/chat/completions",
                               body.dump(), timeout_s_);
   if (!r.ok) {
-    std::cerr << "[VLMFormula] chat status=" << r.status
-              << " body=" << r.body.substr(0, std::min<size_t>(r.body.size(), 200))
-              << '\n';
+    TOCR_LOG_ERROR_RL("VLMFormula chat error", "status", r.status, "body", r.body.substr(0, std::min<size_t>(r.body.size(), 200)));
     return false;
   }
   try {
@@ -264,9 +256,7 @@ bool VLMFormula::single_request(const std::vector<uint8_t> &crop_png,
     out_latex = extract_latex(msg);
     return true;
   } catch (const std::exception &e) {
-    std::cerr << "[VLMFormula] response parse failed: " << e.what()
-              << " body=" << r.body.substr(0, std::min<size_t>(r.body.size(), 200))
-              << '\n';
+    TOCR_LOG_ERROR_RL("VLMFormula response parse failed", "error", e.what(), "body", r.body.substr(0, std::min<size_t>(r.body.size(), 200)));
     return false;
   }
 }
@@ -299,9 +289,7 @@ bool VLMFormula::batched_request(
   HttpResp r = http_post_json(base_url_ + "/v1/chat/completions",
                               body.dump(), timeout_s_ * std::max(1, (int)crops_png.size() / 4));
   if (!r.ok) {
-    std::cerr << "[VLMFormula] batched chat status=" << r.status
-              << " body=" << r.body.substr(0, std::min<size_t>(r.body.size(), 200))
-              << " — falling back to per-crop\n";
+    TOCR_LOG_ERROR_RL("VLMFormula batched chat error, falling back to per-crop", "status", r.status, "body", r.body.substr(0, std::min<size_t>(r.body.size(), 200)));
     return false;
   }
   try {
@@ -321,12 +309,10 @@ bool VLMFormula::batched_request(
       out_latex = std::move(hits);
       return true;
     }
-    std::cerr << "[VLMFormula] batched response had " << hits.size()
-              << " fences but expected " << crops_png.size()
-              << " — falling back to per-crop\n";
+    TOCR_LOG_WARN_RL("VLMFormula batched fence-count mismatch, falling back to per-crop", "got", hits.size(), "expected", crops_png.size());
     return false;
   } catch (const std::exception &e) {
-    std::cerr << "[VLMFormula] batched parse failed: " << e.what() << '\n';
+    TOCR_LOG_ERROR_RL("VLMFormula batched parse failed", "error", e.what());
     return false;
   }
 }
@@ -467,11 +453,12 @@ VLMFormula::submit_async(const GpuImage &page, const std::vector<Box> &boxes,
   std::vector<uint8_t> host_page(need);
   if (cudaSuccess != cudaMemcpyAsync(host_page.data(), page.data, need,
                                      cudaMemcpyDeviceToHost, stream)) {
-    std::cerr << "[VLMFormula] async page D2H failed\n";
+    TOCR_LOG_ERROR_RL("VLMFormula async page D2H failed");
     return futs;
   }
   if (cudaError_t serr = cudaStreamSynchronize(stream); serr != cudaSuccess) {
-    std::cerr << "[VLMFormula] page D2H sync failed: " << cudaGetErrorString(serr) << '\n';
+    TOCR_LOG_ERROR_RL("VLMFormula page D2H sync failed", "cuda", cudaGetErrorString(serr));
+    return futs;
     return futs;
   }
   return submit_async(host_page, page, boxes);
@@ -558,11 +545,11 @@ VLMFormula::run(const GpuImage &page, const std::vector<Box> &boxes,
   std::vector<FormulaEngineResult> out;
   if (boxes.empty()) return out;
   if (page.empty()) {
-    std::cerr << "[VLMFormula] empty page\n";
+    TOCR_LOG_WARN_RL("VLMFormula empty page");
     return out;
   }
   if (!ready_) {
-    std::cerr << "[VLMFormula] not ready\n";
+    TOCR_LOG_WARN_RL("VLMFormula not ready");
     return out;
   }
 
@@ -572,11 +559,11 @@ VLMFormula::run(const GpuImage &page, const std::vector<Box> &boxes,
   if (cudaSuccess !=
       cudaMemcpyAsync(host_page.data(), page.data, need,
                       cudaMemcpyDeviceToHost, stream)) {
-    std::cerr << "[VLMFormula] page D2H failed\n";
+    TOCR_LOG_ERROR_RL("VLMFormula page D2H failed");
     return out;
   }
   if (cudaError_t serr = cudaStreamSynchronize(stream); serr != cudaSuccess) {
-    std::cerr << "[VLMFormula] page D2H sync failed: " << cudaGetErrorString(serr) << '\n';
+    TOCR_LOG_ERROR_RL("VLMFormula page D2H sync failed", "cuda", cudaGetErrorString(serr));
     return out;
   }
 

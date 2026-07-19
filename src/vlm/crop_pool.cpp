@@ -14,6 +14,7 @@
 
 #include "simdutf.h"
 #include "turbo_ocr/common/env_utils.h"
+#include "turbo_ocr/common/logger.h"
 
 namespace turbo_ocr::vlm {
 
@@ -123,9 +124,7 @@ std::string parse_content(const std::string &body) {
         // is the default VLM backend, so log loudly with a truncated body (as
         // the non-pool vlm_formula/vlm_table paths do). Caller derives failure
         // from the empty return; this only makes the cause visible.
-        std::cerr << "[VLMCropPool] response parse failed: " << e.what()
-                  << " body="
-                  << body.substr(0, std::min<size_t>(body.size(), 200)) << '\n';
+        TOCR_LOG_ERROR_RL("VLMCropPool response parse failed", "error", e.what(), "body", body.substr(0, std::min<size_t>(body.size(), 200)));
         return {};
     }
 }
@@ -154,7 +153,7 @@ VLMCropPool::VLMCropPool()
     // stall if the pipe buffer fills.
     int fds[2];
     if (pipe(fds) != 0) {
-        std::cerr << "[VLMCropPool] pipe() failed: " << strerror(errno) << '\n';
+        TOCR_LOG_ERROR("VLMCropPool pipe() failed", "error", strerror(errno));
     } else {
         wake_rd_ = fds[0];
         wake_wr_ = fds[1];
@@ -164,7 +163,7 @@ VLMCropPool::VLMCropPool()
 
     multi_ = curl_multi_init();
     if (!multi_) {
-        std::cerr << "[VLMCropPool] curl_multi_init() failed\n";
+        TOCR_LOG_ERROR("VLMCropPool curl_multi_init() failed");
         return;
     }
     // Limit open connections to avoid FD exhaustion; each handle is loopback
@@ -172,9 +171,8 @@ VLMCropPool::VLMCropPool()
     curl_multi_setopt(multi_, CURLMOPT_MAXCONNECTS, (long)max_concurrency_);
 
     worker_ = std::thread([this] { worker_loop(); });
-    std::cout << "[VLMCropPool] started max_concurrency=" << max_concurrency_
-              << " wake_pipe=" << wake_rd_ << "/" << wake_wr_ << '\n';
-    std::cout.flush();
+    TOCR_LOG_INFO("VLMCropPool started", "max_concurrency", max_concurrency_,
+                  "wake_rd", wake_rd_, "wake_wr", wake_wr_);
 }
 
 VLMCropPool::~VLMCropPool() {
@@ -350,10 +348,9 @@ void VLMCropPool::complete_handle(CURL *easy, CURLcode rc) {
     }
 
     if (rc == CURLE_OK)
-        std::cerr << "[VLMCropPool] HTTP " << status
-                  << " body=" << response.substr(0, 200) << '\n';
+        TOCR_LOG_ERROR_RL("VLMCropPool HTTP error", "status", status, "body", response.substr(0, 200));
     else
-        std::cerr << "[VLMCropPool] curl error: " << curl_easy_strerror(rc) << '\n';
+        TOCR_LOG_ERROR_RL("VLMCropPool curl error", "error", curl_easy_strerror(rc));
 
     // Retry only idempotent transient failures, while attempts and the wall-
     // clock budget both remain. A 4xx or a clean empty 200 falls through to a
@@ -368,8 +365,7 @@ void VLMCropPool::complete_handle(CURL *easy, CURLcode rc) {
         // Keep the backoff inside the remaining budget; skip retry if it would
         // blow past the deadline.
         if (steady_now_ms() + backoff < req->deadline_ms) {
-            std::cerr << "[VLMCropPool] retry " << req->attempts << "/"
-                      << req->max_retries << " after " << backoff << "ms\n";
+            TOCR_LOG_WARN_RL("VLMCropPool retrying crop", "attempt", req->attempts, "max", req->max_retries, "backoff_ms", backoff);
             // Park (don't block the worker on backoff); promote_ready_retries()
             // re-dispatches once ready_ms passes.
             req->ready_ms = steady_now_ms() + backoff;
@@ -390,7 +386,7 @@ void VLMCropPool::dispatch_one(std::unique_ptr<CropRequest> req) {
         json_body = build_json_body(req->png_bytes, req->prompt,
                                     req->model, req->max_tokens);
     } catch (const std::exception &e) {
-        std::cerr << "[VLMCropPool] json build error: " << e.what() << '\n';
+        TOCR_LOG_ERROR_RL("VLMCropPool json build error", "error", e.what());
         resolve_request(*req, std::string{}, /*ok=*/false);
         return;
     }
@@ -404,7 +400,7 @@ void VLMCropPool::dispatch_one(std::unique_ptr<CropRequest> req) {
 
     CURL *easy = curl_easy_init();
     if (!easy) {
-        std::cerr << "[VLMCropPool] curl_easy_init() failed\n";
+        TOCR_LOG_ERROR_RL("VLMCropPool curl_easy_init() failed");
         resolve_request(*req, std::string{}, /*ok=*/false);
         return;
     }
@@ -442,8 +438,7 @@ void VLMCropPool::dispatch_one(std::unique_ptr<CropRequest> req) {
 
     CURLMcode mc = curl_multi_add_handle(multi_, easy);
     if (mc != CURLM_OK) {
-        std::cerr << "[VLMCropPool] curl_multi_add_handle error: "
-                  << curl_multi_strerror(mc) << '\n';
+        TOCR_LOG_ERROR_RL("VLMCropPool curl_multi_add_handle error", "error", curl_multi_strerror(mc));
         resolve_request(*ctx->req, std::string{}, /*ok=*/false);
         curl_slist_free_all(ctx->headers);
         curl_easy_cleanup(easy);
@@ -510,8 +505,7 @@ void VLMCropPool::worker_loop() {
         int running = 0;
         CURLMcode mc = curl_multi_perform(multi_, &running);
         if (mc != CURLM_OK && mc != CURLM_CALL_MULTI_PERFORM) {
-            std::cerr << "[VLMCropPool] curl_multi_perform error: "
-                      << curl_multi_strerror(mc) << '\n';
+            TOCR_LOG_ERROR_RL("VLMCropPool curl_multi_perform error", "error", curl_multi_strerror(mc));
         }
 
         // Harvest completed transfers.

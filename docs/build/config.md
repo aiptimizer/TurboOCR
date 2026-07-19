@@ -184,6 +184,80 @@ At startup the server emits one structured INFO line (`Effective server
 config`) containing every resolved value — a single grep target for
 post-mortems. Recorded warnings are logged immediately after.
 
+
+## Expert / subsystem knobs
+
+These are read directly by their subsystem (not via `ServerConfig`, so they
+do not appear in `--print-config`). Defaults are tuned; override only with a
+measured reason.
+
+### Recognition / detection tuning
+
+| Variable | Default | Description |
+|---|---|---|
+| `REC_BATCH_N` | `32` | Recognition batch size per inference call. |
+| `REC_BUCKET_STEP` | `16` | CPU recognizer: snap crop widths UP to this step so batches pad each crop by at most step-1 columns. |
+| `REC_ZEROCOPY` | `1` | CPU recognizer: zero-copy batch view into ORT (`0` = copy path). |
+| `REC_SELFTEST` | `0` | CPU recognizer: one-shot batch-consistency self-test on first batch. |
+| `SIMD_CTC` | `1` | SIMD CTC argmax decode (`0` = scalar fallback). |
+| `DET_OPT_BATCH` | `8` | Batch dimension the det TRT profile is optimized for. |
+| `TURBO_DET_FUSED_PRE` | `1` | Fused GPU resize+normalize det preprocess (`0` = OpenCV path). |
+| `GPU_CCL` | `1` | Det post-process: `2` all-GPU JFA, `1` GPU CCL + CPU contours, `0` CPU contours. |
+| `GPU_BOX_THRESH` | model default | Override DB box threshold on the GPU path. |
+| `GPU_UNCLIP_SCALE` | `1.0` | Multiplier on the DB unclip ratio (GPU path). |
+| `CLS_BATCH` | `32` | Angle-classifier batch size. |
+| `MAX_IMAGE_PIXELS_MP` | `128` | Decompression-bomb cap: max decoded image area in megapixels. |
+| `MAX_BATCH_PIXELS_MP` | `2048` | Aggregate pixel cap across one /ocr/batch request. |
+
+### ONNX Runtime (CPU / formula backends)
+
+| Variable | Default | Description |
+|---|---|---|
+| `ORT_EP` | `cpu` | Execution provider for the CPU engine (`cpu` / `coreml`). |
+| `ORT_NUM_THREADS` | auto | Intra-op thread count per ORT session. |
+| `ORT_GLOBAL_THREADS` | auto | Shared global thread-pool size (with `ORT_SHARED_POOL=1`). |
+| `ORT_SHARED_POOL` | `1` | One shared ORT thread pool across sessions instead of per-session pools. |
+| `ORT_REC_OPT_CAP` | unset | Cap ORT graph-optimization level for the recognizer. |
+| `DISABLE_COREML` / `COREML_FLAGS` | unset | macOS CoreML EP opt-out / flags. |
+
+### Structure stages (tables / formulas / VLM sidecar)
+
+| Variable | Default | Description |
+|---|---|---|
+| `TABLE_CROP_MODE` | `layout` | `detunion` snaps each table region to the tight AABB of its det boxes. |
+| `TABLE_CROP_MARGIN` | `0.03` | Fractional expansion per table-region side before structure decode. |
+| `TABLE_MATCH_INTER` | `1` | Cell matcher: intersection-based OCR-fragment assignment. |
+| `TABLE_MATCH_FALLBACK` | `1` | Cell matcher: nearest-cell fallback for unmatched fragments. |
+| `TABLE_CLS_TRT`, `TABLE_SLANEXT_DICT`, `TABLE_SLANEXT_DECODER_BIN`, `TABLE_SLANEXT_WIRELESS_ENCODER_ONNX`, `TURBO_OCR_TABLE_DICT_PATH` | bundled paths | Override individual SLANeXt model/dict file locations. |
+| `PPFNS_CHUNK` | `0` | PP-FormulaNet-S decode chunk size (0 = single pass). |
+| `PPFNS_DROP_COLLAPSE` | `1` | Guard that drops collapsed (repeating) formula decodes. |
+| `VLM_BACKEND` | `pool` | `legacy` selects the per-request curl path instead of the shared async pool. |
+| `VLM_GLOBAL_CONCURRENCY` | `50` | Max in-flight VLM crop requests across the whole process. |
+| `VLM_MAX_RETRIES` | `2` | Retries per VLM crop on transient transport failures. |
+| `VLM_PNG_THREADS` | `4` | Threads PNG-encoding crops before VLM submit. |
+| `VLLM_BASE_URL` / `VLLM_MODEL` | `http://localhost:8000` / `PaddleOCR-VL-1.6-0.9B` | VLM sidecar endpoint and model id. |
+| `VLLM_FORMULA_PROMPT` / `VLLM_FORMULA_BATCH` / `VLLM_FORMULA_TIMEOUT_S` / `VLLM_FORMULA_MAX_TOKENS` | `Formula Recognition:` / `8` / `30` / `512` | Formula sidecar request shape. |
+| `VLLM_TABLE_BASE_URL` / `VLLM_TABLE_MODEL` / `VLLM_TABLE_PROMPT` / `VLLM_TABLE_BATCH` / `VLLM_TABLE_TIMEOUT_S` / `VLLM_TABLE_MAX_TOKENS` | formula equivalents / `Table Recognition:` / `8` / `60` / `4096` | Table sidecar request shape (falls back to the `VLLM_*` values). |
+| `TURBO_ROUTING_CONFIG` | env-synthesized | Path to a routing table JSON replacing the env-derived backend routing. |
+| `TURBO_ALLOW_ADHOC_BACKENDS` | `0` | Allow per-request backends outside the routing table. |
+
+### Server / PDF / misc
+
+| Variable | Default | Description |
+|---|---|---|
+| `BIND_HOST` | `0.0.0.0` | Bind address override. |
+| `GRPC_BATCH_GLOBAL_WORKERS` | `16` | Process-wide ceiling on extra gRPC batch fanout threads (each RPC keeps one guaranteed worker). |
+| `FINALIZE_DEFERRED_TIMEOUT_MS` | request timeout | Await budget for deferred (async VLM) structure results. |
+| `PDF_RENDER_REPLY_TIMEOUT_MS` | `120000` | Cap on waiting for a PDF daemon reply. |
+| `FASTPDF2PNG_PATH` | bundled | Path to the fastpdf2png daemon binary. |
+| `NVJPEG_DEVICE_COPY` | `1` | nvJPEG page-image encode keeps data device-side. |
+| `LAYOUT_KEEP_NESTED_CHILDREN` | `0` | Keep child layout blocks nested inside their parents. |
+| `TURBO_LAYOUT_DEBUG` | `0` | Verbose layout-stage debug output. |
+| `TURBO_OCR_STRICT_QUERY_PARAMS` | `1` | Reject unknown query parameters with 400 (set `0` to ignore them). |
+| `TURBO_OCR_DISABLE_MALLOC_REAPER` | `0` | Disable the periodic malloc_trim reaper thread. |
+| `ENABLE_TIMING` / `PROFILE_STAGES` | `0` | Per-stage timing output / CPU-path stage profiler. |
+| `TOCR_LOG_RATELIMIT` | `10:1000` | Per-call-site log rate limit `N[:WINDOW_MS]`; `0` disables. |
+
 !!! info "See also"
     - [Build → Docker](docker.md) — image env vars and the nginx front
       (`TURBO_OCR_PORT`, `MAX_BODY_MB`).

@@ -21,6 +21,7 @@
 #include "simdutf.h"
 #include "turbo_ocr/common/cuda_check.h"
 #include "turbo_ocr/common/env_utils.h"
+#include "turbo_ocr/common/logger.h"
 #include "turbo_ocr/vlm/crop_pool.h"
 
 namespace turbo_ocr::table {
@@ -104,7 +105,7 @@ HttpResp http_post_json(const std::string &url, const std::string &json_body,
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &r.status);
     r.ok = (r.status >= 200 && r.status < 300);
   } else {
-    std::cerr << "[VLMTable] curl error: " << curl_easy_strerror(rc) << '\n';
+    TOCR_LOG_ERROR_RL("VLMTable curl error", "error", curl_easy_strerror(rc));
   }
   return r;
 }
@@ -395,8 +396,7 @@ bool VLMTable::init() {
 
   HttpResp r = http_get(base_url_ + "/v1/models", 5);
   if (!r.ok) {
-    std::cerr << "[VLMTable] /v1/models unreachable at " << base_url_
-              << " (status=" << r.status << ") — tables disabled\n";
+    TOCR_LOG_ERROR("VLMTable /v1/models unreachable, tables disabled", "base_url", base_url_, "status", r.status);
     return false;
   }
   try {
@@ -411,20 +411,17 @@ bool VLMTable::init() {
       if (!model_present) {
         std::string first = j["data"][0].value("id", "");
         if (!first.empty()) {
-          std::cout << "[VLMTable] requested model='" << model_
-                    << "' not found on server; using '" << first << "'\n";
+          TOCR_LOG_INFO("VLMTable requested model not on server, adopting registered id", "requested", model_, "using", first); using '" << first << "'\n";
           model_ = first;
         }
       }
     }
   } catch (const std::exception &e) {
-    std::cerr << "[VLMTable] /v1/models parse warning: " << e.what() << '\n';
+    TOCR_LOG_WARN("VLMTable /v1/models parse warning", "error", e.what());
   }
 
   ready_ = true;
-  std::cout << "[VLMTable] ready: " << base_url_ << " model=" << model_
-            << " batch=" << batch_ << " timeout=" << timeout_s_ << "s"
-            << " max_tokens=" << max_tokens_ << '\n';
+  TOCR_LOG_INFO("VLMTable ready", "base_url", base_url_, "model", model_, "batch", batch_, "timeout_s", timeout_s_, "max_tokens", max_tokens_);
   return true;
 }
 
@@ -447,9 +444,7 @@ bool VLMTable::single_request(const std::vector<uint8_t> &crop_png,
   HttpResp r = http_post_json(base_url_ + "/v1/chat/completions",
                               body.dump(), timeout_s_);
   if (!r.ok) {
-    std::cerr << "[VLMTable] chat status=" << r.status
-              << " body=" << r.body.substr(0, std::min<size_t>(r.body.size(), 200))
-              << '\n';
+    TOCR_LOG_ERROR_RL("VLMTable chat error", "status", r.status, "body", r.body.substr(0, std::min<size_t>(r.body.size(), 200)));
     return false;
   }
   try {
@@ -457,9 +452,7 @@ bool VLMTable::single_request(const std::vector<uint8_t> &crop_png,
     out_otsl = j.at("choices").at(0).at("message").at("content").get<std::string>();
     return true;
   } catch (const std::exception &e) {
-    std::cerr << "[VLMTable] response parse failed: " << e.what()
-              << " body=" << r.body.substr(0, std::min<size_t>(r.body.size(), 200))
-              << '\n';
+    TOCR_LOG_ERROR_RL("VLMTable response parse failed", "error", e.what(), "body", r.body.substr(0, std::min<size_t>(r.body.size(), 200)));
     return false;
   }
 }
@@ -486,12 +479,11 @@ VLMTable::run(const GpuImage &page, const std::vector<Box> &regions,
   std::vector<uint8_t> host_page(need);
   if (cudaSuccess != cudaMemcpyAsync(host_page.data(), page.data, need,
                                       cudaMemcpyDeviceToHost, stream)) {
-    std::cerr << "[VLMTable] page D2H failed\n";
+    TOCR_LOG_ERROR_RL("VLMTable page D2H failed");
     return out;
   }
   if (cudaError_t serr = cudaStreamSynchronize(stream); serr != cudaSuccess) {
-    std::cerr << "[VLMTable] page D2H stream sync failed: "
-              << cudaGetErrorString(serr) << '\n';
+    TOCR_LOG_ERROR_RL("VLMTable page D2H stream sync failed", "cuda", cudaGetErrorString(serr));
     return out;
   }
 
@@ -578,8 +570,7 @@ VLMTable::submit_async(const GpuImage &page,
     return futs;
   }
   if (cudaError_t serr = cudaStreamSynchronize(stream); serr != cudaSuccess) {
-    std::cerr << "[VLMTable] submit_async page D2H stream sync failed: "
-              << cudaGetErrorString(serr) << '\n';
+    TOCR_LOG_ERROR_RL("VLMTable submit_async page D2H stream sync failed", "cuda", cudaGetErrorString(serr));
     return futs;
   }
 

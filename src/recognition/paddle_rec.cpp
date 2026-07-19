@@ -3,6 +3,7 @@
 #include "turbo_ocr/recognition/ctc_decode.h"
 
 #include "turbo_ocr/common/errors.h"
+#include "turbo_ocr/common/logger.h"
 #include "turbo_ocr/common/perspective.h"
 
 #include <algorithm>
@@ -108,8 +109,8 @@ bool PaddleRec::probe_and_init() {
   opt_dims.d[3] = kMaxRecWidth;
 
   engine_->probe_output_dims(opt_dims, actual_seq_len_, actual_num_classes_);
-  std::cout << std::format("[PaddleRec] Output dims: seq_len={} num_classes={}",
-                           actual_seq_len_, actual_num_classes_) << '\n';
+  TOCR_LOG_INFO("PaddleRec output dims probed", "seq_len", actual_seq_len_,
+                "num_classes", actual_num_classes_);
   return true;
 }
 
@@ -186,9 +187,7 @@ void PaddleRec::bake_graphs(cudaStream_t stream) {
     // today (max profile batch == default 32) — guard it so a future profile
     // table or batch-size knob can never turn it into a silent overrun.
     if (gp.batch > rec_batch_num_) {
-      std::cerr << std::format(
-          "[PaddleRec] skipping graph profile ({}x{}): exceeds rec batch {}\n",
-          gp.batch, gp.width, rec_batch_num_);
+      TOCR_LOG_WARN("PaddleRec skipping graph profile, exceeds rec batch", "profile_batch", gp.batch, "profile_width", gp.width, "rec_batch", rec_batch_num_);
       continue;
     }
     nvinfer1::Dims4 dims{gp.batch, 3, rec_image_h_, gp.width};
@@ -202,7 +201,7 @@ void PaddleRec::bake_graphs(cudaStream_t stream) {
     }
   }
   graphs_baked_ = baked > 0;
-  std::cout << std::format("[PaddleRec] baked {} CUDA graphs\n", baked);
+  TOCR_LOG_INFO("PaddleRec baked CUDA graphs", "count", baked);
 }
 
 std::vector<std::pair<std::string, float>>
@@ -304,9 +303,9 @@ PaddleRec::run(const GpuImage &img, const std::vector<Box> &boxes,
       // Counted so the pipeline can flag text_degraded: these crops return
       // empty, which must never pass as a page that simply had less text.
       dropped_crops_ += cur_batch;
-      std::cerr << std::format("[PaddleRec] WARNING: output dims (seq_len={}, num_classes={}) "
-                               "exceed buffer (seq_len={}, num_classes={}), skipping batch\n",
-                               seq_len, num_classes, actual_seq_len_, actual_num_classes_);
+      TOCR_LOG_WARN_RL("PaddleRec output dims exceed decode buffers, skipping batch",
+                       "seq_len", seq_len, "num_classes", num_classes,
+                       "buf_seq_len", actual_seq_len_, "buf_num_classes", actual_num_classes_);
       beg = end;
       continue;
     }
@@ -460,9 +459,9 @@ PaddleRec::run_multi(const std::vector<ImageCrops> &image_crops,
       dropped_crops_ += cur_batch;  // -> text_degraded, same as run()
       for (int k = beg; k < end; ++k)
         dropped_per_image_[crops[k].img_idx]++;
-      std::cerr << std::format("[PaddleRec] WARNING: output dims (seq_len={}, num_classes={}) "
-                               "exceed buffer (seq_len={}, num_classes={}), skipping batch\n",
-                               seq_len, num_classes, actual_seq_len_, actual_num_classes_);
+      TOCR_LOG_WARN_RL("PaddleRec output dims exceed decode buffers, skipping batch",
+                       "seq_len", seq_len, "num_classes", num_classes,
+                       "buf_seq_len", actual_seq_len_, "buf_num_classes", actual_num_classes_);
       beg = end;
       continue;
     }

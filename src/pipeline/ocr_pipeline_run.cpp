@@ -7,6 +7,7 @@
 #include "turbo_ocr/common/backend_error.h"
 #include "turbo_ocr/common/cuda_check.h"
 #include "turbo_ocr/common/errors.h"
+#include "turbo_ocr/common/logger.h"
 #include "turbo_ocr/common/timing.h"
 #include "turbo_ocr/decode/gpu_image.h"
 #include "turbo_ocr/common/serialization.h"
@@ -66,15 +67,14 @@ namespace {
                           err == cudaErrorInvalidConfiguration ||
                           (err == cudaErrorInvalidValue && tiny);
   if (degenerate) {
-    std::cerr << "[Pipeline] degenerate input " << cols << "x" << rows
-              << " in " << where << " — empty result: " << e.what()
-              << " (cuda=" << cudaGetErrorString(err) << ")\n";
+    TOCR_LOG_WARN_RL("degenerate input, returning empty result", "cols", cols,
+                     "rows", rows, "where", where, "error", e.what(),
+                     "cuda", cudaGetErrorString(err));
     return true;
   }
-  std::cerr << "[Pipeline] detection GPU fault on " << cols << "x" << rows
-            << " in " << where << ": " << e.what()
-            << " (cuda=" << cudaGetErrorString(err)
-            << ") — surfacing as an inference error, not a silent blank page\n";
+  TOCR_LOG_ERROR_RL("detection GPU fault, surfacing as inference error",
+                    "cols", cols, "rows", rows, "where", where,
+                    "error", e.what(), "cuda", cudaGetErrorString(err));
   throw turbo_ocr::InferenceError(std::string("detection GPU fault: ") + e.what());
 }
 } // namespace
@@ -632,8 +632,8 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
   // Guard against exceeding pre-allocated batch buffer capacity.
   // Callers should chunk at kMaxBatchImages before calling this method.
   if (n > kMaxBatchImages) [[unlikely]] {
-    std::cerr << std::format("[Pipeline] run_batch called with {} images, max is {}. "
-                             "Processing first {} only.\n", n, kMaxBatchImages, kMaxBatchImages);
+    TOCR_LOG_WARN_RL("run_batch over batch capacity, truncating", "requested", n,
+                     "max", kMaxBatchImages);
   }
   const int batch_n = std::min(n, kMaxBatchImages);
 

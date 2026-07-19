@@ -11,6 +11,8 @@
 #include <string_view>
 
 #include <grpcpp/grpcpp.h>
+
+#include "turbo_ocr/common/logger.h"
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
@@ -402,7 +404,7 @@ public:
         return grpc_error(ctx, ErrorCode::kInferenceTimeout, e.what());
 #endif
       } catch (const std::exception &e) {
-        std::cerr << std::format("[gRPC] Pixels inference error: {}\n", e.what());
+        TOCR_LOG_ERROR_RL("gRPC pixels inference error", "error", e.what());
         return grpc_error(ctx, grpc::StatusCode::INTERNAL,
                           "INFERENCE_ERROR", "Inference error");
       }
@@ -445,7 +447,7 @@ public:
         } catch (const turbo_ocr::TimeoutError &e) {
           return grpc_error(ctx, ErrorCode::kInferenceTimeout, e.what());
         } catch (const std::exception &e) {
-          std::cerr << std::format("[gRPC] JPEG infer error: {}\n", e.what());
+          TOCR_LOG_ERROR_RL("gRPC jpeg inference error", "error", e.what());
           return grpc_error(ctx, grpc::StatusCode::INTERNAL,
                             "INFERENCE_ERROR", "Inference error");
         }
@@ -487,11 +489,11 @@ public:
       return grpc_error(ctx, ErrorCode::kInferenceTimeout, e.what());
 #endif
     } catch (const std::exception &e) {
-      std::cerr << std::format("[gRPC] Inference error: {}\n", e.what());
+      TOCR_LOG_ERROR_RL("gRPC inference error", "error", e.what());
       return grpc_error(ctx, grpc::StatusCode::INTERNAL,
                         "INFERENCE_ERROR", "Inference error");
     } catch (...) {
-      std::cerr << "[gRPC] Inference error: unknown exception\n";
+      TOCR_LOG_ERROR_RL("gRPC inference error", "error", "unknown exception");
       return grpc_error(ctx, grpc::StatusCode::INTERNAL,
                         "INFERENCE_ERROR", "Inference error");
     }
@@ -684,8 +686,7 @@ public:
           }
           fill_response(entries[i], out, want_blocks);
         } catch (const std::exception &e) {
-          std::cerr << std::format("[gRPC Batch] Image {} error: {}\n",
-                                   i, e.what());
+          TOCR_LOG_ERROR_RL("gRPC batch image error", "index", i, "error", e.what());
           mark_empty_slot(entries[i], "INFERENCE_ERROR");
         } catch (...) {
           mark_empty_slot(entries[i], "INFERENCE_ERROR");
@@ -719,8 +720,7 @@ public:
                                  want_tables, want_formulas);
             fill_response(entries[i], out, want_blocks);
           } catch (const std::exception &e) {
-            std::cerr << std::format("[gRPC Batch] Image {} error: {}\n",
-                                     i, e.what());
+            TOCR_LOG_ERROR_RL("gRPC batch image error", "index", i, "error", e.what());
             mark_empty_slot(entries[i], "INFERENCE_ERROR");
           } catch (...) {
             mark_empty_slot(entries[i], "INFERENCE_ERROR");
@@ -856,7 +856,7 @@ public:
       return grpc_error(ctx, grpc::StatusCode::RESOURCE_EXHAUSTED,
                         "SERVER_BUSY", e.what());
     } catch (const std::exception &e) {
-      std::cerr << std::format("[gRPC PDF] error: {}\n", e.what());
+      TOCR_LOG_ERROR_RL("gRPC pdf error", "error", e.what());
       return grpc_error(ctx, grpc::StatusCode::INTERNAL, "INFERENCE_ERROR",
                         "Inference error");
     }
