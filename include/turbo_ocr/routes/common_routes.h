@@ -49,6 +49,10 @@ struct CapabilitiesInfo {
 /// JSON document; see CapabilitiesInfo for the field semantics.
 void register_capabilities_route(const CapabilitiesInfo &info);
 
+/// The capability document itself — the exact JSON GET /capabilities serves.
+/// Exposed so the gRPC HealthResponse can carry the identical bytes.
+[[nodiscard]] std::string build_capabilities_json(const CapabilitiesInfo &info);
+
 /// Register /health, /ocr (base64 JSON), /ocr/raw (CPU decode path).
 /// The GPU binary overrides /ocr/raw with its own nvJPEG version in
 /// image_routes, so register_common_routes is only used by cpu_main.

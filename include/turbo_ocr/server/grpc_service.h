@@ -182,18 +182,23 @@ inline std::future<pipeline::OcrPipelineResult>
 grpc_jpeg_decode_and_infer(pipeline::PipelineDispatcher &dispatcher,
                            std::string_view image_bytes,
                            bool want_layout, bool want_reading_order,
-                           bool want_tables = false, bool want_formulas = false) {
+                           bool want_tables = false, bool want_formulas = false,
+                           const routing::RequestRouting &routing = {},
+                           bool layout_only = false) {
   std::string owned(image_bytes);
   return dispatcher.submit(
       [owned = std::move(owned), want_layout, want_reading_order,
-       want_tables, want_formulas](
+       want_tables, want_formulas, routing, layout_only](
           auto &e) -> pipeline::OcrPipelineResult {
         const auto *d =
             reinterpret_cast<const unsigned char *>(owned.data());
         size_t n = owned.size();
         const int cap = decode::max_image_dim();
         auto &nvjpeg = e.get_nvjpeg();
-        if (nvjpeg.available()) {
+        // layout_only takes the cv::Mat decode below: run_layout_only has no
+        // GpuImage overload, and the layout-only pass is cheap enough that
+        // the zero-copy device-decode fast path buys nothing.
+        if (!layout_only && nvjpeg.available()) {
           auto [w, h] = nvjpeg.get_dimensions(d, n);
           // Bomb guard for JPEGs the caller's pre-decode sniff couldn't
           // parse: reject (per-side AND total area) before allocating GPU
@@ -212,7 +217,7 @@ grpc_jpeg_decode_and_infer(pipeline::PipelineDispatcher &dispatcher,
                   .data = d_buf, .step = pitch, .rows = h, .cols = w};
               try {
                 return e.pipeline->run_with_layout(
-                    gi, e.stream, want_layout, want_reading_order, /*routing=*/{},
+                    gi, e.stream, want_layout, want_reading_order, routing,
                     /*defer_external=*/false, want_tables, want_formulas);
               } catch (const std::exception &) {
                 // Best-effort GPU zero-copy fast path: if inference on the
@@ -242,8 +247,10 @@ grpc_jpeg_decode_and_infer(pipeline::PipelineDispatcher &dispatcher,
           throw turbo_ocr::ImageTooLargeError(std::format(
               "Image area {}x{} exceeds maximum of {} pixels",
               img.cols, img.rows, decode::max_image_pixels()));
+        if (layout_only)
+          return e.pipeline->run_layout_only(img, e.stream);
         return e.pipeline->run_with_layout(img, e.stream, want_layout,
-                                           want_reading_order, /*routing=*/{},
+                                           want_reading_order, routing,
                                            /*defer_external=*/false,
                                            want_tables, want_formulas);
       });
@@ -301,6 +308,23 @@ public:
     formula_available_ = formula_available;
   }
 
+  /// Capability document carried in HealthResponse.capabilities_json — the
+  /// exact JSON GET /capabilities serves (built once by
+  /// routes::build_capabilities_json), so both transports advertise
+  /// identical capabilities.
+  void set_capabilities_json(std::string json) {
+    capabilities_json_ = std::move(json);
+  }
+
+  /// Valid Tier-A routing-override backend names (from
+  /// routing::routable_backend_names), threaded from startup so gRPC
+  /// validates route_table/route_formula against the same registry as HTTP.
+  void set_routing_validation(std::set<std::string> valid_table,
+                              std::set<std::string> valid_formula) {
+    valid_route_table_ = std::move(valid_table);
+    valid_route_formula_ = std::move(valid_formula);
+  }
+
   // ---- Health ----
   grpc::Status Health(grpc::ServerContext *ctx,
                       const ocr::HealthRequest *,
@@ -317,6 +341,7 @@ public:
     response->set_response_mode(mode_ == GrpcResponseMode::json_bytes
                                     ? "json_bytes"
                                     : "structured");
+    response->set_capabilities_json(capabilities_json_);
     if (readiness_check_ && !readiness_check_()) {
       response->set_status("not_ready");
       return grpc_error(ctx, grpc::StatusCode::UNAVAILABLE,
@@ -330,12 +355,38 @@ public:
   grpc::Status Recognize(grpc::ServerContext *ctx,
                          const ocr::OCRRequest *request,
                          ocr::OCRResponse *response) override {
-    if (auto err = grpc_check_layout_request(ctx, request->layout(),
+    routing::RequestRouting routing;
+    if (auto err = grpc_validate_routing(ctx, request->route_table(),
+                                         request->route_formula(), &routing);
+        err)
+      return *err;
+    const bool layout_only = request->layout_only();
+    if (layout_only) {
+#ifdef USE_CPU_ONLY
+      // Same contract as HTTP: parse_query_options rejects text=0 on the CPU
+      // build (no layout-only pipeline path).
+      return grpc_error(ctx, grpc::StatusCode::INVALID_ARGUMENT,
+                        "INVALID_PARAMETER",
+                        "layout_only is not supported on the CPU build");
+#else
+      // Mirrors the HTTP text=0 combination rules: everything text-derived is
+      // meaningless without recognition — fail loud, never silently empty.
+      if (request->reading_order() || request->as_blocks() ||
+          request->tables() || request->formulas())
+        return grpc_error(ctx, grpc::StatusCode::INVALID_ARGUMENT,
+                          "INVALID_PARAMETER",
+                          "layout_only returns layout regions only; it cannot "
+                          "be combined with reading_order/as_blocks/tables/"
+                          "formulas");
+#endif
+    }
+    if (auto err = grpc_check_layout_request(ctx,
+            request->layout() || layout_only,
             request->reading_order() || request->as_blocks() ||
             request->tables() || request->formulas(),
             layout_available_); err)
       return *err;
-    bool want_layout = request->layout();
+    bool want_layout = request->layout() || layout_only;
     bool want_reading_order = request->reading_order();
     const bool want_blocks = request->as_blocks();
     const bool want_tables = request->tables();
@@ -348,7 +399,7 @@ public:
     if (auto err = grpc_check_structure_backends(ctx, want_tables, want_formulas,
             table_available_, formula_available_,
             mode_ == GrpcResponseMode::json_bytes,
-            request->layout(), request->as_blocks()); err)
+            request->layout() || layout_only, request->as_blocks()); err)
       return *err;
 
     // Pixels path: raw BGR pixel data
@@ -398,7 +449,7 @@ public:
 
       try {
         auto out = run_infer(img, want_layout, want_reading_order,
-                             want_tables, want_formulas);
+                             want_tables, want_formulas, routing, layout_only);
         fill_response(response, out, want_blocks);
         return grpc::Status::OK;
       } catch (const turbo_ocr::PoolExhaustedError &e) {
@@ -439,7 +490,8 @@ public:
           auto fut = grpc_jpeg_decode_and_infer(*dispatcher_, request->image(),
                                                  want_layout,
                                                  want_reading_order,
-                                                 want_tables, want_formulas);
+                                                 want_tables, want_formulas,
+                                                 routing, layout_only);
           auto out = pipeline::get_with_timeout(fut, request_timeout_ms_);
           fill_response(response, out, want_blocks);
           return grpc::Status::OK;
@@ -486,7 +538,7 @@ public:
 
     try {
       auto out = run_infer(img, want_layout, want_reading_order,
-                           want_tables, want_formulas);
+                           want_tables, want_formulas, routing, layout_only);
       fill_response(response, out, want_blocks);
       return grpc::Status::OK;
     } catch (const turbo_ocr::PoolExhaustedError &e) {
@@ -520,6 +572,18 @@ public:
     if (n > max_batch_images_)
       return grpc_error(ctx, grpc::StatusCode::INVALID_ARGUMENT, "BATCH_TOO_LARGE",
           std::format("images has {} entries, max is {}", n, max_batch_images_));
+
+    routing::RequestRouting routing;
+    if (auto err = grpc_validate_routing(ctx, request->route_table(),
+                                         request->route_formula(), &routing);
+        err)
+      return *err;
+    if (request->det_batch_num() != 0)
+      // Deprecated, never honored (batching is managed internally). Warn so a
+      // client tuning it learns it is inert instead of chasing a phantom knob.
+      TOCR_LOG_WARN_RL("OCRBatchRequest.det_batch_num is deprecated and "
+                       "ignored (batching is managed internally)",
+                       "det_batch_num", request->det_batch_num());
 
     if (auto err = grpc_check_layout_request(ctx, request->layout(),
             request->reading_order() || request->as_blocks() ||
@@ -660,15 +724,16 @@ public:
           if (is_jpeg[i]) {
             futs[i] = grpc_jpeg_decode_and_infer(
                 *dispatcher_, request->images(i), want_layout,
-                want_reading_order, want_tables, want_formulas);
+                want_reading_order, want_tables, want_formulas, routing);
           } else if (!imgs[i].empty()) {
             cv::Mat img_owned = std::move(imgs[i]);
             futs[i] = dispatcher_->submit(
                 [img_owned = std::move(img_owned), want_layout,
-                 want_reading_order, want_tables, want_formulas](auto &e) {
+                 want_reading_order, want_tables, want_formulas,
+                 routing](auto &e) {
                   return e.pipeline->run_with_layout(
                       img_owned, e.stream, want_layout, want_reading_order,
-                      /*routing=*/{}, /*defer_external=*/false,
+                      routing, /*defer_external=*/false,
                       want_tables, want_formulas);
                 });
           }
@@ -756,7 +821,7 @@ public:
           if (imgs[i].empty()) continue;
           try {
             auto out = run_infer(imgs[i], want_layout, want_reading_order,
-                                 want_tables, want_formulas);
+                                 want_tables, want_formulas, routing);
             fill_response(entries[i], out, want_blocks);
           } catch (const std::exception &e) {
             TOCR_LOG_ERROR_RL("gRPC batch image error", "index", i, "error", e.what());
@@ -807,7 +872,8 @@ public:
                         "MISSING_PDF", "Empty PDF data");
 
     if (auto err = grpc_check_layout_request(ctx, request->layout(),
-            /*reading_order=*/request->as_blocks() ||
+            /*reading_order=*/request->reading_order() ||
+            request->as_blocks() ||
             request->tables() || request->formulas(),
             layout_available_); err)
       return *err;
@@ -817,10 +883,13 @@ public:
 
     bool want_layout = request->layout();
     const bool want_blocks = request->as_blocks();
-    const bool want_reading_order = want_blocks;
+    // reading_order is independently requestable (field 8, HTTP-parity with
+    // /ocr/pdf?reading_order=1); as_blocks still implies it.
+    const bool want_reading_order = request->reading_order() || want_blocks;
     const bool want_tables = request->tables();
     const bool want_formulas = request->formulas();
-    if (want_blocks || want_tables || want_formulas) want_layout = true;
+    if (want_reading_order || want_blocks || want_tables || want_formulas)
+      want_layout = true;
     if (auto err = grpc_check_structure_backends(ctx, want_tables, want_formulas,
             table_available_, formula_available_,
             mode_ == GrpcResponseMode::json_bytes,
@@ -885,7 +954,8 @@ public:
         job = pipeline::run_pdf_job(
             [this](const cv::Mat &img, const InferOptions &o) {
               auto r = run_infer(img, o.want_layout, o.want_reading_order,
-                                 o.want_tables, o.want_formulas);
+                                 o.want_tables, o.want_formulas,
+                                 o.routing_override);
               return InferResult{
                   .results          = std::move(r.results),
                   .layout           = std::move(r.layout),
@@ -1041,13 +1111,45 @@ private:
   /// `want_reading_order` auto-enables `want_layout` because reading-order
   /// is computed over layout regions — the contract matches the HTTP
   /// `?reading_order=1` query handler.
+  // Tier-A routing-override validation, same contract as the HTTP routes:
+  // unknown backend name -> INVALID_ARGUMENT + ROUTING_UNKNOWN_OVERRIDE; on
+  // the CPU build any non-empty override is rejected (no routing plumbing —
+  // validating and then dropping it would be a silent failure).
+  [[nodiscard]] std::optional<grpc::Status>
+  grpc_validate_routing(grpc::ServerContext *ctx, const std::string &table,
+                        const std::string &formula,
+                        routing::RequestRouting *out) {
+    if (table.empty() && formula.empty()) return std::nullopt;
+#ifdef USE_CPU_ONLY
+    (void)out;
+    return grpc_error(ctx, grpc::StatusCode::INVALID_ARGUMENT,
+                      "INVALID_PARAMETER",
+                      "per-request routing overrides are not supported on the "
+                      "CPU build (the configured backend is always used)");
+#else
+    if (auto r = validate_routing_override(table, formula, valid_route_table_,
+                                           valid_route_formula_, out);
+        !r.error.empty())
+      return grpc_error(ctx, grpc::StatusCode::INVALID_ARGUMENT,
+                        r.error_code.c_str(), r.error);
+    return std::nullopt;
+#endif
+  }
+
   pipeline::OcrPipelineResult run_infer(const cv::Mat &img, bool want_layout,
                                          bool want_reading_order = false,
                                          bool want_tables = false,
-                                         bool want_formulas = false) {
+                                         bool want_formulas = false,
+                                         const routing::RequestRouting &routing = {},
+                                         bool layout_only = false) {
     if (want_reading_order || want_tables || want_formulas)
       want_layout = want_layout || layout_available_;
     if (infer_fn_) {
+      if (layout_only)
+        // Rejected with INVALID_PARAMETER before ever reaching here; a logic
+        // change that removed that gate must fail loud, not run full OCR
+        // against the caller's stated intent.
+        throw std::logic_error("layout_only reached the CPU InferFunc");
       InferOptions opts;
       opts.want_layout = want_layout;
       opts.want_reading_order = want_reading_order;
@@ -1074,9 +1176,12 @@ private:
     // BY-VALUE capture of img (cheap cv::Mat refcount bump): submit_for_default
     // may abandon the task on timeout, so it must not reference caller stack.
     return dispatcher_->submit_for_default(
-        [img, want_layout, want_reading_order, want_tables, want_formulas](auto &e) {
+        [img, want_layout, want_reading_order, want_tables, want_formulas,
+         routing, layout_only](auto &e) {
+          if (layout_only)
+            return e.pipeline->run_layout_only(img, e.stream);
           return e.pipeline->run_with_layout(img, e.stream, want_layout,
-                                             want_reading_order, /*routing=*/{},
+                                             want_reading_order, routing,
                                              /*defer_external=*/false,
                                              want_tables, want_formulas);
         });
@@ -1097,6 +1202,9 @@ private:
   bool table_available_ = false;
   bool formula_available_ = false;
   int grpc_batch_workers_ = 8;
+  std::string capabilities_json_;
+  std::set<std::string> valid_route_table_;
+  std::set<std::string> valid_route_formula_;
   int max_pdf_pages_ = 2000;
   int max_batch_images_ = 1024;
   // Default render DPI when the request doesn't specify one.
@@ -1175,11 +1283,19 @@ inline GrpcHandle start_grpc_server(pipeline::PipelineDispatcher &dispatcher,
                                      bool layout_available = false,
                                      std::function<bool()> readiness_check = {},
                                      bool table_available = false,
-                                     bool formula_available = false) {
+                                     bool formula_available = false,
+                                     std::string capabilities_json = {}) {
   auto service = std::make_shared<OCRServiceImpl>(
       dispatcher, cfg, pdf_renderer, layout_available);
   service->set_readiness_check(std::move(readiness_check));
   service->set_structure_availability(table_available, formula_available);
+  service->set_capabilities_json(std::move(capabilities_json));
+  {
+    const auto rtbl = routing::load_routing_config();
+    service->set_routing_validation(
+        routing::routable_backend_names(rtbl, "table"),
+        routing::routable_backend_names(rtbl, "formula"));
+  }
   return detail::launch_grpc_server(std::move(service), cfg.grpc_port, cfg);
 }
 #endif
@@ -1191,11 +1307,21 @@ inline GrpcHandle start_grpc_server(InferFunc infer_fn,
                                      bool layout_available = false,
                                      std::function<bool()> readiness_check = {},
                                      bool table_available = false,
-                                     bool formula_available = false) {
+                                     bool formula_available = false,
+                                     std::string capabilities_json = {}) {
   auto service = std::make_shared<OCRServiceImpl>(
       std::move(infer_fn), cfg, pdf_renderer, layout_available);
   service->set_readiness_check(std::move(readiness_check));
   service->set_structure_availability(table_available, formula_available);
+  service->set_capabilities_json(std::move(capabilities_json));
+  // CPU build: overrides are rejected before validation, but thread the sets
+  // anyway so the behavior is uniform if a CPU routing path ever lands.
+  {
+    const auto rtbl = routing::load_routing_config();
+    service->set_routing_validation(
+        routing::routable_backend_names(rtbl, "table"),
+        routing::routable_backend_names(rtbl, "formula"));
+  }
   return detail::launch_grpc_server(std::move(service), cfg.grpc_port, cfg);
 }
 

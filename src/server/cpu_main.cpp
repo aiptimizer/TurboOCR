@@ -285,6 +285,7 @@ int main(int argc, char **argv) try {
   // client can discover the known GPU/CPU divergences without trial requests.
   // CPU registers /profile and aliases auto_verified->auto (not honored as a
   // distinct path; see pdf_routes.cpp), and its /ocr/pdf default DPI is 100.
+  std::string capabilities_json;
   {
     turbo_ocr::routes::CapabilitiesInfo caps;
     caps.is_gpu              = false;
@@ -301,6 +302,7 @@ int main(int argc, char **argv) try {
     caps.max_body_mb         = cfg.max_body_mb;
     caps.max_image_dim       = cfg.max_image_dim;
     caps.max_batch_images    = cfg.max_batch_images;
+    capabilities_json = turbo_ocr::routes::build_capabilities_json(caps);
     turbo_ocr::routes::register_capabilities_route(caps);
   }
 
@@ -330,9 +332,18 @@ int main(int argc, char **argv) try {
               drogon::k400BadRequest, r.error_code.c_str(), r.error));
           return;
         }
+        if (!req->getParameter("route_table").empty() ||
+            !req->getParameter("route_formula").empty()) {
+          callback(turbo_ocr::server::error_response(
+              drogon::k400BadRequest, "INVALID_PARAMETER",
+              "per-request routing overrides are not supported on the CPU "
+              "build (the configured backend is always used)"));
+          return;
+        }
         if (cpu_reject_unknown_query_params(
                 req, {"layout", "reading_order", "as_blocks", "tables",
-                      "formulas", "text", "width", "height", "channels"},
+                      "formulas", "text", "route_table", "route_formula",
+                      "width", "height", "channels"},
                 callback))
           return;
         if (auto r = turbo_ocr::server::check_structure_backends(
@@ -431,9 +442,18 @@ int main(int argc, char **argv) try {
               drogon::k400BadRequest, r.error_code.c_str(), r.error));
           return;
         }
+        if (!req->getParameter("route_table").empty() ||
+            !req->getParameter("route_formula").empty()) {
+          callback(turbo_ocr::server::error_response(
+              drogon::k400BadRequest, "INVALID_PARAMETER",
+              "per-request routing overrides are not supported on the CPU "
+              "build (the configured backend is always used)"));
+          return;
+        }
         if (cpu_reject_unknown_query_params(
                 req, {"layout", "reading_order", "as_blocks", "tables",
-                      "formulas", "text"}, callback))
+                      "formulas", "text", "route_table", "route_formula"},
+                callback))
           return;
         if (auto r = turbo_ocr::server::check_structure_backends(
                 opts, table_available, formula_available);
@@ -685,7 +705,7 @@ int main(int argc, char **argv) try {
   };
   auto grpc_handle = turbo_ocr::server::start_grpc_server(
       infer, cfg, &pdf_renderer, layout_available, readiness_cached,
-      table_available, formula_available);
+      table_available, formula_available, capabilities_json);
   // Published for the signal-handler drain thread. Not dangling: grpc_handle
   // owns the server on main()'s stack and is destroyed only after run() returns
   // (i.e. after the drain has driven app().quit()). See server_bootstrap.h.

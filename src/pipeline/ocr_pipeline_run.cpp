@@ -495,7 +495,7 @@ OcrPipelineResult OcrPipeline::run_layout_and_structure(
   return out;
 }
 
-std::vector<OCRResultItem> OcrPipeline::run(GpuImage gpu_img,
+std::vector<OCRResultItem> OcrPipeline::run(const GpuImage &gpu_img,
                                             cudaStream_t stream) {
   return run_with_layout(gpu_img, stream).results;
 }
@@ -609,7 +609,8 @@ std::vector<std::vector<OCRResultItem>> OcrPipeline::run_batch(
 std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
     const std::vector<cv::Mat> &imgs, cudaStream_t stream,
     bool want_layout, bool want_reading_order,
-    bool want_tables, bool want_formulas) {
+    bool want_tables, bool want_formulas,
+    const routing::RequestRouting &routing) {
   if (imgs.empty())
     return {};
 
@@ -617,7 +618,7 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
   if (imgs.size() == 1) {
     std::vector<OcrPipelineResult> single;
     single.push_back(run_with_layout(imgs[0], stream, want_layout,
-                                     want_reading_order, /*routing=*/{},
+                                     want_reading_order, routing,
                                      /*defer_external=*/false,
                                      want_tables, want_formulas));
     return single;
@@ -637,7 +638,7 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
       std::vector<cv::Mat> chunk(imgs.begin() + beg, imgs.begin() + end);
       auto part = run_batch_with_layout(chunk, stream, want_layout,
                                         want_reading_order, want_tables,
-                                        want_formulas);
+                                        want_formulas, routing);
       for (auto &r : part) all.push_back(std::move(r));
     }
     return all;
@@ -790,7 +791,7 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
   // a layout model — text-only batches pay zero layout/router cost.
   if (want_layout && use_layout_ && layout_)
     run_batch_layout_stage_(image_crops, want_reading_order, stream,
-                            all_results, want_tables, want_formulas);
+                            all_results, want_tables, want_formulas, routing);
 
   // No cleanup needed — batch_img_bufs_ are pre-allocated and reused
 
@@ -801,7 +802,8 @@ void OcrPipeline::run_batch_layout_stage_(
     const std::vector<PaddleRec::ImageCrops> &image_crops,
     bool want_reading_order, cudaStream_t stream,
     std::vector<OcrPipelineResult> &outs,
-    bool want_tables, bool want_formulas) {
+    bool want_tables, bool want_formulas,
+    const routing::RequestRouting &routing) {
   const int batch_n = static_cast<int>(image_crops.size());
 
   // All det/rec GPU work is host-synced by this point (run_multi syncs
@@ -821,7 +823,7 @@ void OcrPipeline::run_batch_layout_stage_(
     outs[i].layout = layout_->collect();
     PipelineTimer t;
     dispatch_router_(outs[i], gpu_img, image_crops[i].boxes, t,
-                     /*routing=*/{}, /*defer_external=*/false,
+                     routing, /*defer_external=*/false,
                      want_tables, want_formulas);
   }
 

@@ -546,11 +546,20 @@ struct PdfRequestParams {
       out.opts.want_formulas = formula_avail;
   }
 
+  // Recognized-but-unsupported: the PDF job path has no routing plumbing
+  // (PdfJobOptions carries no routing field). Reject explicitly so a caller's
+  // route_table/route_formula never degrades into a silently-served default.
+  if (!req->getParameter("route_table").empty() ||
+      !req->getParameter("route_formula").empty())
+    return fail("INVALID_PARAMETER",
+                "per-request routing overrides are not supported on PDF "
+                "endpoints (the configured backends are always used)");
   if (reject_unknown_query_params(
           req, {"layout", "reading_order", "as_blocks", "tables", "formulas",
                 "text", "dpi", "mode", "markdown", "as_pages",
                 "images", "format", "lossless", "png_compression", "quality",
-                "max_side", "autorotate"}, callback))
+                "max_side", "autorotate", "route_table", "route_formula"},
+          callback))
     return false;
   if (auto r = server::check_structure_backends(out.opts, table_avail,
                                                 formula_avail);
@@ -826,11 +835,20 @@ void register_ocr_stream_route_gpu(server::WorkPool &pool,
                                        r.error_code.c_str(), r.error));
       return;
     }
+    if (!req->getParameter("route_table").empty() ||
+        !req->getParameter("route_formula").empty()) {
+      callback(server::error_response(
+          drogon::k400BadRequest, "INVALID_PARAMETER",
+          "per-request routing overrides are not supported on PDF endpoints "
+          "(the configured backends are always used)"));
+      return;
+    }
     if (reject_unknown_query_params(
             req, {"layout", "reading_order", "as_blocks", "tables", "formulas", "text",
                   "dpi", "mode",
                   "images", "format", "lossless", "png_compression", "quality",
-                  "max_side", "autorotate"}, callback))
+                  "max_side", "autorotate", "route_table", "route_formula"},
+            callback))
       return;
     if (auto r = server::check_structure_backends(opts, table_avail, formula_avail);
         !r.error.empty()) {

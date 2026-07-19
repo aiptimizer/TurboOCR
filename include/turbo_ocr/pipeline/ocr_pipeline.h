@@ -152,7 +152,7 @@ public:
   // Run OCR on an image already in GPU memory (skips CPU→GPU upload).
   // The GpuImage must contain BGR8 data with the given pitch/step.
   // The caller retains ownership of the GPU buffer.
-  [[nodiscard]] std::vector<OCRResultItem> run(GpuImage gpu_img, cudaStream_t stream = 0);
+  [[nodiscard]] std::vector<OCRResultItem> run(const GpuImage &gpu_img, cudaStream_t stream = 0);
 
   // Text + layout in one struct. Returns an empty `layout` vector when the
   // pipeline was never loaded with a layout model, so this overload is
@@ -246,7 +246,8 @@ public:
                         bool want_layout = false,
                         bool want_reading_order = false,
                         bool want_tables = false,
-                        bool want_formulas = false);
+                        bool want_formulas = false,
+                        const routing::RequestRouting &routing = {});
 
 private:
   std::unique_ptr<detection::PaddleDet> det_;
@@ -423,7 +424,8 @@ private:
       cudaStream_t stream,
       std::vector<OcrPipelineResult> &outs,
       bool want_tables = false,
-      bool want_formulas = false);
+      bool want_formulas = false,
+      const routing::RequestRouting &routing = {});
 };
 
 } // namespace turbo_ocr::pipeline

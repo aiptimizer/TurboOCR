@@ -501,7 +501,7 @@ void batch_run_pipeline(pipeline::PipelineDispatcher &dispatcher,
           try {
             auto chunk_results = e.pipeline->run_batch_with_layout(
                 chunk, e.stream, want_layout, opts.want_reading_order,
-                opts.want_tables, opts.want_formulas);
+                opts.want_tables, opts.want_formulas, opts.routing_override);
             for (size_t j = 0; j < chunk_results.size(); ++j)
               o.outs[offset + j] = std::move(chunk_results[j]);
           } catch (const std::exception &) {
@@ -514,7 +514,7 @@ void batch_run_pipeline(pipeline::PipelineDispatcher &dispatcher,
               try {
                 o.outs[offset + j] = e.pipeline->run_with_layout(
                     chunk[j], e.stream, want_layout, opts.want_reading_order,
-                    /*routing=*/{}, /*defer_external=*/false,
+                    opts.routing_override, /*defer_external=*/false,
                     opts.want_tables, opts.want_formulas);
               } catch (const turbo_ocr::PoolExhaustedError &) {
                 throw;  // -> 503 at the route, never a per-slot tag
@@ -620,6 +620,12 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
                                    bool table_available,
                                    bool formula_available,
                                    int max_batch_images) {
+  // Same Tier-A routing-override validation set as /ocr/raw: the batch
+  // pipeline forwards opts.routing_override into every chunk, so the batch
+  // endpoint honors the same per-request backend selection as its siblings.
+  const auto rtbl = routing::load_routing_config();
+  const std::set<std::string> valid_table   = routing::routable_backend_names(rtbl, "table");
+  const std::set<std::string> valid_formula = routing::routable_backend_names(rtbl, "formula");
   // Availability from the warmed pipeline (single source of truth), threaded
   // from main(); not re-derived from config.
   const bool table_avail   = table_available;
@@ -627,7 +633,8 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
   drogon::app().registerHandler(
       "/ocr/batch",
       [&pool, &dispatcher, &decode, nvjpeg_available, layout_available,
-       table_avail, formula_avail, max_batch_images](
+       valid_table, valid_formula, table_avail, formula_avail,
+       max_batch_images](
           const drogon::HttpRequestPtr &req,
           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
 
@@ -638,9 +645,17 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
                                        r.error_code.c_str(), r.error));
       return;
     }
+    if (auto r = server::validate_routing_override(
+            req->getParameter("route_table"), req->getParameter("route_formula"),
+            valid_table, valid_formula, &opts.routing_override);
+        !r.error.empty()) {
+      callback(server::error_response(drogon::k400BadRequest,
+                                       r.error_code.c_str(), r.error));
+      return;
+    }
     if (reject_unknown_query_params(
             req, {"layout", "reading_order", "as_blocks", "tables", "formulas",
-                  "text"}, callback))
+                  "text", "route_table", "route_formula"}, callback))
       return;
     // Layout-only (?text=0) is a single-image feature; the batched det/rec
     // path has no layout-only equivalent. Reject instead of silently running
@@ -748,13 +763,21 @@ void register_ocr_pixels_route_gpu(server::WorkPool &pool,
                                     bool layout_available,
                                     bool table_available,
                                     bool formula_available) {
+  // Same Tier-A routing-override validation set as /ocr/raw — this handler
+  // forwards opts.routing_override to the identical run_with_layout call, so
+  // omitting the parse here silently dropped a caller's route_table/
+  // route_formula while the sibling endpoint honored them.
+  const auto rtbl = routing::load_routing_config();
+  const std::set<std::string> valid_table   = routing::routable_backend_names(rtbl, "table");
+  const std::set<std::string> valid_formula = routing::routable_backend_names(rtbl, "formula");
   // Availability from the warmed pipeline (single source of truth), threaded
   // from main(); not re-derived from config.
   const bool table_avail   = table_available;
   const bool formula_avail = formula_available;
   drogon::app().registerHandler(
       "/ocr/pixels",
-      [&pool, &dispatcher, layout_available, table_avail, formula_avail](
+      [&pool, &dispatcher, valid_table, valid_formula, layout_available,
+       table_avail, formula_avail](
           const drogon::HttpRequestPtr &req,
           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
 
@@ -765,9 +788,18 @@ void register_ocr_pixels_route_gpu(server::WorkPool &pool,
                                        r.error_code.c_str(), r.error));
       return;
     }
+    if (auto r = server::validate_routing_override(
+            req->getParameter("route_table"), req->getParameter("route_formula"),
+            valid_table, valid_formula, &opts.routing_override);
+        !r.error.empty()) {
+      callback(server::error_response(drogon::k400BadRequest,
+                                       r.error_code.c_str(), r.error));
+      return;
+    }
     if (reject_unknown_query_params(
             req, {"layout", "reading_order", "as_blocks", "tables", "formulas", "text",
-                  "width", "height", "channels"}, callback))
+                  "route_table", "route_formula", "width", "height", "channels"},
+            callback))
       return;
     if (auto r = server::check_structure_backends(opts, table_avail, formula_avail);
         !r.error.empty()) {
@@ -870,6 +902,8 @@ void register_ocr_markdown_route_gpu(server::WorkPool &pool,
                                           "EMPTY_BODY", "Empty body"));
           return;
         }
+        if (reject_unknown_query_params(req, {"embed"}, callback))
+          return;
         if (!layout_available) {
           callback(server::error_response(drogon::k400BadRequest,
               "LAYOUT_DISABLED",
@@ -980,6 +1014,9 @@ void register_infer_route_gpu(server::WorkPool &pool,
       [&pool, &dispatcher, &decode, valid_table, valid_formula](
           const drogon::HttpRequestPtr &req,
           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
+        // All /infer inputs travel in the JSON body; no query params exist.
+        if (reject_unknown_query_params(req, {}, callback))
+          return;
         auto json = req->getJsonObject();
         if (!json) {
           callback(server::error_response(drogon::k400BadRequest, "INVALID_JSON", "Invalid JSON body"));

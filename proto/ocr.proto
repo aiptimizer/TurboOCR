@@ -44,16 +44,37 @@ message OCRRequest {
   bool formulas = 13;        // run formula recognition on layout-detected formula
                              // regions (strict opt-in; requires a formula backend).
                              // Auto-enables layout.
+  // Per-request routing overrides (Tier-A): backend NAME from the server's
+  // routing table (see Health.capabilities_json -> routing.backends). Unknown
+  // name => INVALID_ARGUMENT with x-error-code ROUTING_UNKNOWN_OVERRIDE.
+  // Empty => the configured default backend. Same contract as the HTTP
+  // ?route_table=/?route_formula= params. Not supported on the CPU build
+  // (non-empty => INVALID_ARGUMENT, like HTTP).
+  string route_table = 14;
+  string route_formula = 15;
+  // Layout-only fast path: skip detection/recognition and return only the
+  // layout regions (auto-enables layout; same as HTTP ?text=0&layout=1).
+  // Cannot be combined with reading_order/as_blocks/tables/formulas (those
+  // need recognized text) and is rejected on the CPU build — both mirror the
+  // HTTP contract.
+  bool layout_only = 16;
 }
 
 message OCRBatchRequest {
   repeated bytes images = 1;
-  int32 det_batch_num = 2;
+  // DEPRECATED, never honored: batching is managed internally (fixed chunk
+  // size). Setting it logs a warning and has no other effect; kept only for
+  // wire compatibility with old clients.
+  int32 det_batch_num = 2 [deprecated = true];
   bool layout = 3;           // enable layout analysis for all images in batch
   bool reading_order = 4;    // emit reading_order permutation per image (auto-enables layout)
   bool as_blocks = 5;        // emit `blocks` aggregate per image (auto-enables layout + reading_order)
   bool tables = 6;           // run table recognition (strict opt-in; auto-enables layout)
   bool formulas = 7;         // run formula recognition (strict opt-in; auto-enables layout)
+  // Per-request routing overrides — same contract as OCRRequest.route_table/
+  // route_formula, applied to every image in the batch.
+  string route_table = 8;
+  string route_formula = 9;
 }
 
 message BoundingBox {
@@ -113,6 +134,8 @@ message OCRPDFRequest {
   bool as_blocks = 5;     // emit `blocks` aggregate per page (auto-enables layout)
   bool tables = 6;        // run table recognition (strict opt-in; auto-enables layout)
   bool formulas = 7;      // run formula recognition (strict opt-in; auto-enables layout)
+  bool reading_order = 8; // emit per-page reading_order (auto-enables layout);
+                          // previously only available implicitly via as_blocks
 }
 
 message OCRPDFResponse {
@@ -141,4 +164,9 @@ message HealthResponse {
   // Additive (field 2): older clients that ignore it are unaffected, and the
   // value is purely informational — it does not change any other output.
   string response_mode = 2;
+  // The server's capability document — the exact JSON body GET /capabilities
+  // serves (features, endpoints, limits, pdf modes, routing table). Additive
+  // (field 3); lets a gRPC-only client discover what the server supports
+  // without probing. Parse as JSON.
+  string capabilities_json = 3;
 }

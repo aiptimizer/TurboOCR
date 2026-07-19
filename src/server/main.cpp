@@ -139,10 +139,11 @@ int main(int argc, char **argv) try {
   // An explicitly configured CLS_ONNX that fails to resolve must not silently
   // disable orientation handling (only the unset default may soft-disable).
   if (cls_model.empty() && cfg.cls_explicit && !cfg.disable_angle_cls) {
-    std::cerr << "[config error] CLS_ONNX=\"" << cfg.cls_onnx
-              << "\" could not be loaded (file missing or engine build failed). "
-                 "Refusing to start with a silently disabled angle classifier; "
-                 "unset CLS_ONNX or set DISABLE_ANGLE_CLS=1 to run without it.\n";
+    TOCR_LOG_ERROR("CLS_ONNX could not be loaded (file missing or engine "
+                   "build failed); refusing to start with a silently disabled "
+                   "angle classifier — unset CLS_ONNX or set "
+                   "DISABLE_ANGLE_CLS=1 to run without it",
+                   "cls_onnx", cfg.cls_onnx);
     return 2;
   }
   if (cfg.disable_angle_cls) {
@@ -432,6 +433,7 @@ int main(int argc, char **argv) try {
   // GET /capabilities (M6) — advertise this build's honored feature set so a
   // client can discover the known GPU/CPU divergences without trial requests.
   // GPU honors auto_verified as its own path and has no /profile endpoint.
+  std::string capabilities_json;
   {
     turbo_ocr::routes::CapabilitiesInfo caps;
     caps.is_gpu              = true;
@@ -448,6 +450,7 @@ int main(int argc, char **argv) try {
     caps.max_body_mb         = cfg.max_body_mb;
     caps.max_image_dim       = cfg.max_image_dim;
     caps.max_batch_images    = cfg.max_batch_images;
+    capabilities_json = turbo_ocr::routes::build_capabilities_json(caps);
     turbo_ocr::routes::register_capabilities_route(caps);
   }
 
@@ -473,7 +476,7 @@ int main(int argc, char **argv) try {
   // consistent across transports (TABLE_BACKEND_DISABLED / FORMULA_BACKEND_DISABLED).
   auto grpc_handle = turbo_ocr::server::start_grpc_server(
       *dispatcher, cfg, &pdf_renderer, layout_available, readiness_cached,
-      table_avail, formula_avail);
+      table_avail, formula_avail, capabilities_json);
   // Published for the signal-handler drain thread. Not dangling: grpc_handle
   // owns the server on main()'s stack and is destroyed only after run() returns
   // (i.e. after the drain has driven app().quit()). See server_bootstrap.h.

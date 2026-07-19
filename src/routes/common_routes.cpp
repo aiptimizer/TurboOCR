@@ -93,11 +93,12 @@ using decode::max_image_dim;
 }
 } // namespace
 
-void register_capabilities_route(const CapabilitiesInfo &info) {
-  // Build the stable advertisement once at registration and serve the same
-  // bytes for every request — nothing here is request- or runtime-varying
-  // (the availability bools are fixed once startup finished). Built as a
-  // shared string captured by the handler so each call is a cheap copy.
+std::string build_capabilities_json(const CapabilitiesInfo &info) {
+  // Build the stable advertisement once at startup — nothing here is
+  // request- or runtime-varying (the availability bools are fixed once
+  // startup finished). The SAME document is served by GET /capabilities and
+  // carried in the gRPC HealthResponse.capabilities_json, so the two
+  // transports can never advertise different capabilities.
   std::string body;
   body.reserve(640);
   const auto b = [](bool v) { return v ? "true" : "false"; };
@@ -169,8 +170,11 @@ void register_capabilities_route(const CapabilitiesInfo &info) {
     body += R"({"error":"invalid"})";
   }
   body += "}";
+  return body;
+}
 
-  auto shared = std::make_shared<std::string>(std::move(body));
+void register_capabilities_route(const CapabilitiesInfo &info) {
+  auto shared = std::make_shared<std::string>(build_capabilities_json(info));
   drogon::app().registerHandler(
       "/capabilities",
       [shared](const drogon::HttpRequestPtr &,
@@ -288,6 +292,18 @@ void register_ocr_base64_route(server::WorkPool &pool,
             if (ro.isMember("table") && ro["table"].isString())   rt = ro["table"].asString();
             if (ro.isMember("formula") && ro["formula"].isString()) rf = ro["formula"].asString();
           }
+#ifdef USE_CPU_ONLY
+          // The CPU pipeline has no routing plumbing (run_with_layout takes no
+          // routing argument), so an override here would validate and then do
+          // nothing. Fail loud instead of silently serving the default backend.
+          if (!rt.empty() || !rf.empty()) {
+            callback(server::error_response(
+                drogon::k400BadRequest, "INVALID_PARAMETER",
+                "per-request routing overrides are not supported on the CPU "
+                "build (the configured backend is always used)"));
+            return;
+          }
+#else
           if (auto r = server::validate_routing_override(
                   rt, rf, valid_table, valid_formula, &opts.routing_override);
               !r.error.empty()) {
@@ -295,6 +311,7 @@ void register_ocr_base64_route(server::WorkPool &pool,
                                              r.error_code.c_str(), r.error));
             return;
           }
+#endif
         }
 
         auto b64_str = std::make_shared<std::string>((*json)["image"].asString());
@@ -353,8 +370,21 @@ void register_ocr_raw_route(server::WorkPool &pool,
                                            r.error_code.c_str(), r.error));
           return;
         }
+        // Recognized-but-unsupported here: this registrar serves the CPU
+        // build's /ocr/raw, and the CPU pipeline has no routing plumbing.
+        // Reject explicitly (same policy as /ocr's JSON routing field) rather
+        // than let the params fall through as silently-ignored unknowns.
+        if (!req->getParameter("route_table").empty() ||
+            !req->getParameter("route_formula").empty()) {
+          callback(server::error_response(
+              drogon::k400BadRequest, "INVALID_PARAMETER",
+              "per-request routing overrides are not supported on the CPU "
+              "build (the configured backend is always used)"));
+          return;
+        }
         if (reject_unknown_query_params(
-                req, {"layout", "reading_order", "as_blocks", "tables", "formulas", "text"}, callback))
+                req, {"layout", "reading_order", "as_blocks", "tables", "formulas",
+                      "text", "route_table", "route_formula"}, callback))
           return;
         if (auto r = server::check_structure_backends(opts, table_avail, formula_avail);
             !r.error.empty()) {
