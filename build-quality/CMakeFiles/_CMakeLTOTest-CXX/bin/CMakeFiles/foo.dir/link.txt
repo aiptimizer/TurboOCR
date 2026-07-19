@@ -1,2 +1,0 @@
-"/usr/bin/gcc-ar" qc libfoo.a CMakeFiles/foo.dir/foo.cpp.o
-"/usr/bin/gcc-ranlib" libfoo.a

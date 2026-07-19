@@ -1,7 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/nataell/code/epAiland/paddle-highspeed-cpp/build-quality/cmake_install.cmake"
-	],
-	"Parallel" : false
-}

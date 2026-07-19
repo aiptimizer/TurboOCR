@@ -2,6 +2,7 @@
 /build_cpu/
 /build-cpu/
 /build-coverage/
+/build-*/
 /predeploy/
 __pycache__/
 .pytest_cache/

@@ -1,2 +1,0 @@
-# Hashes of file build rules.
-e5588b5bdef396330f280f0ad2037fe3 proto_gen/ocr.pb.cc
