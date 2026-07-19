@@ -623,19 +623,32 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
     return single;
   }
 
-  // Guard AFTER the n==1 delegation above — run_with_layout self-guards, and a
-  // guard here would trip on that nested call.
+  // Oversized batches are processed in full by chunking here (BEFORE the
+  // UseGuard, like the n==1 delegation) — never silently truncated to
+  // kMaxBatchImages, which would drop pages behind a clean 200 (the
+  // no-silent-failure contract, and parity with PaddleDet::run_batch's
+  // overflow handling). Each chunk is a fresh guarded call over the shared
+  // batch buffers.
+  if (imgs.size() > static_cast<size_t>(kMaxBatchImages)) [[unlikely]] {
+    std::vector<OcrPipelineResult> all;
+    all.reserve(imgs.size());
+    for (size_t beg = 0; beg < imgs.size(); beg += kMaxBatchImages) {
+      const size_t end = std::min(beg + kMaxBatchImages, imgs.size());
+      std::vector<cv::Mat> chunk(imgs.begin() + beg, imgs.begin() + end);
+      auto part = run_batch_with_layout(chunk, stream, want_layout,
+                                        want_reading_order, want_tables,
+                                        want_formulas);
+      for (auto &r : part) all.push_back(std::move(r));
+    }
+    return all;
+  }
+
+  // Guard AFTER the n==1 delegation and chunk fan-out above — run_with_layout /
+  // the recursive call self-guard, and a guard here would trip on them.
   UseGuard _ug{in_use_, "run_batch_with_layout"};
 
   const int n = static_cast<int>(imgs.size());
-
-  // Guard against exceeding pre-allocated batch buffer capacity.
-  // Callers should chunk at kMaxBatchImages before calling this method.
-  if (n > kMaxBatchImages) [[unlikely]] {
-    TOCR_LOG_WARN_RL("run_batch over batch capacity, truncating", "requested", n,
-                     "max", kMaxBatchImages);
-  }
-  const int batch_n = std::min(n, kMaxBatchImages);
+  const int batch_n = n;  // <= kMaxBatchImages by the chunking above
 
   // Batch buffers and the shared pinned staging buffer are reused across
   // requests — same reuse contract as upload_image().
