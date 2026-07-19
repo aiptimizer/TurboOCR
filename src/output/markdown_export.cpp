@@ -535,6 +535,20 @@ column_major_order(const std::vector<std::array<int, 4>> &rects) {
   return out;
 }
 
+// Escape the characters that terminate a Markdown image-link caption or
+// destination — an OCR'd ']' or ')' in a figure caption must not truncate
+// the link and leak the rest as raw text.
+std::string escape_md_link_text(std::string_view s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    if (c == '[' || c == ']' || c == '(' || c == ')' || c == '\\')
+      out.push_back('\\');
+    out.push_back(c);
+  }
+  return out;
+}
+
 } // namespace
 
 const std::unordered_set<std::string> &default_ignore_labels() {
@@ -796,7 +810,7 @@ std::string render_markdown(const pipeline::OcrPipelineResult &res,
                    "block" + std::to_string(bid) + ".png";
       const std::string caption = gather(li);
       const std::string src = resolver ? resolver(a) : a.rel_path;
-      parts.push_back("![" + caption + "](" + src + ")");
+      parts.push_back("![" + escape_md_link_text(caption) + "](" + src + ")");
       if (assets_out) assets_out->push_back(std::move(a));
       continue;
     }

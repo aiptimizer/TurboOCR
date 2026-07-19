@@ -23,6 +23,26 @@ std::string_view td_content(std::string_view text) {
     return text;
 }
 
+// Escape &, <, > in cell text while preserving the intentional <b>/</b>
+// emphasis wrappers the cell matcher emits — OCR'd angle brackets and
+// ampersands must not become live markup in the reconstructed table HTML.
+std::string escape_cell_html(std::string_view text) {
+    std::string out;
+    out.reserve(text.size());
+    for (std::size_t i = 0; i < text.size();) {
+        if (text.compare(i, 3, "<b>") == 0)  { out += "<b>";  i += 3; continue; }
+        if (text.compare(i, 4, "</b>") == 0) { out += "</b>"; i += 4; continue; }
+        const char c = text[i++];
+        switch (c) {
+            case '&': out += "&amp;"; break;
+            case '<': out += "&lt;";  break;
+            case '>': out += "&gt;";  break;
+            default:  out += c;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 std::string reconstruct_html(
@@ -34,7 +54,8 @@ std::string reconstruct_html(
     // expansion. A guaranteed upper bound means no reallocation while appending.
     std::size_t budget = cells.size() * 8;
     for (const auto& tag : structure) budget += tag.size();
-    for (const auto& text : ocr_texts) budget += text.size();
+    // 5x: worst-case escape_cell_html expansion ('&' -> "&amp;").
+    for (const auto& text : ocr_texts) budget += text.size() * 5;
     for (const auto& c : cells) budget += c.ocr_indices.size();
 
     std::string out;
@@ -69,8 +90,10 @@ std::string reconstruct_html(
             const std::vector<std::size_t>& idx = cells[td_index].ocr_indices;
             const std::size_t nm = idx.size();
             if (nm == 1) {
-                // Sole fragment is emitted untouched (attributes/emphasis intact).
-                if (idx[0] < ocr_texts.size()) out += ocr_texts[idx[0]];
+                // Sole fragment keeps its emphasis wrapper; everything else is
+                // escaped (see escape_cell_html).
+                if (idx[0] < ocr_texts.size())
+                    out += escape_cell_html(ocr_texts[idx[0]]);
             } else if (nm > 1) {
                 const std::size_t first = idx.front();
                 const bool wrap_b =
@@ -84,7 +107,7 @@ std::string reconstruct_html(
                             : std::string_view{};
                     frag = td_content(frag);
                     if (frag.empty()) continue;
-                    out += frag;
+                    out += escape_cell_html(frag);
                     if (j + 1 != nm && frag.back() != ' ') out.push_back(' ');
                 }
                 if (wrap_b) out += "</b>";

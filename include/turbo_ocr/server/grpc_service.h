@@ -7,6 +7,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <semaphore>
 #include <string_view>
 
 #include <grpcpp/grpcpp.h>
@@ -696,29 +697,46 @@ public:
 
     // CPU-only fanout: bounded jthread pool, each thread calls run_infer
     // (which is synchronous through the InferFunc on this build).
+    // grpc_batch_workers_ bounds ONE RPC; without a process-wide ceiling, N
+    // concurrent RPCs would spawn N*grpc_batch_workers_ threads (resource-
+    // exhaustion vector, unlike the HTTP WorkPool which is globally bounded).
+    // Every RPC keeps one guaranteed worker (progress under contention);
+    // extra workers need a permit from the shared pool.
+    // GRPC_BATCH_GLOBAL_WORKERS caps the process-wide total of extra workers.
+    static std::counting_semaphore<1024> extra_worker_permits{
+        static_cast<std::ptrdiff_t>(
+            env::env_int("GRPC_BATCH_GLOBAL_WORKERS", 16, 1, 1024) - 1)};
     const int num_workers = std::min(n, grpc_batch_workers_);
     std::atomic<int> next_idx{0};
     {
+      const auto worker_fn = [&]() {
+        while (true) {
+          const int i = next_idx.fetch_add(1);
+          if (i >= n) break;
+          if (imgs[i].empty()) continue;
+          try {
+            auto out = run_infer(imgs[i], want_layout, want_reading_order,
+                                 want_tables, want_formulas);
+            fill_response(entries[i], out, want_blocks);
+          } catch (const std::exception &e) {
+            std::cerr << std::format("[gRPC Batch] Image {} error: {}\n",
+                                     i, e.what());
+            mark_empty_slot(entries[i], "INFERENCE_ERROR");
+          } catch (...) {
+            mark_empty_slot(entries[i], "INFERENCE_ERROR");
+          }
+        }
+      };
       std::vector<std::jthread> workers;
       workers.reserve(static_cast<size_t>(num_workers));
-      for (int w = 0; w < num_workers; ++w) {
-        workers.emplace_back([&]() {
-          while (true) {
-            const int i = next_idx.fetch_add(1);
-            if (i >= n) break;
-            if (imgs[i].empty()) continue;
-            try {
-              auto out = run_infer(imgs[i], want_layout, want_reading_order,
-                                   want_tables, want_formulas);
-              fill_response(entries[i], out, want_blocks);
-            } catch (const std::exception &e) {
-              std::cerr << std::format("[gRPC Batch] Image {} error: {}\n",
-                                       i, e.what());
-              mark_empty_slot(entries[i], "INFERENCE_ERROR");
-            } catch (...) {
-              mark_empty_slot(entries[i], "INFERENCE_ERROR");
-            }
-          }
+      workers.emplace_back(worker_fn);  // guaranteed worker, no permit
+      for (int w = 1; w < num_workers; ++w) {
+        if (!extra_worker_permits.try_acquire()) break;
+        workers.emplace_back([&worker_fn]() {
+          struct Release {
+            ~Release() { extra_worker_permits.release(); }
+          } release_on_exit;
+          worker_fn();
         });
       }
     }
