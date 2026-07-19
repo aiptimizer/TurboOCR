@@ -23,13 +23,18 @@ static int coop_grid_for(Fn kernel, int threads) {
   static thread_local int cached_threads = 0;
   static thread_local int cached_per_sm = 0;
   if (dev != cached_dev) {
-    cudaDeviceGetAttribute(&cached_sms, cudaDevAttrMultiProcessorCount, dev);
+    if (cudaDeviceGetAttribute(&cached_sms, cudaDevAttrMultiProcessorCount,
+                               dev) != cudaSuccess || cached_sms <= 0)
+      cached_sms = 1;  // conservative fallback; the kernel's stride loop is
+                       // still correct on a single-block grid, just slower
     cached_dev = dev;
     cached_fn = nullptr;
   }
   if (cached_fn != (const void *)kernel || cached_threads != threads) {
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-        &cached_per_sm, kernel, threads, 0);
+    if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+            &cached_per_sm, kernel, threads, 0) != cudaSuccess ||
+        cached_per_sm <= 0)
+      cached_per_sm = 1;
     cached_fn = (const void *)kernel;
     cached_threads = threads;
   }
@@ -303,9 +308,13 @@ void batch_roi_warp_kernel(
     return;
   }
 
-  // Perspective transform using shared memory M
+  // Perspective transform using shared memory M. Clamp the projective
+  // denominator away from zero while PRESERVING its sign — a bare `+1e-7`
+  // would flip a small negative denom positive, mirroring the sampled pixel
+  // (dead for the affine rec/cls transforms where denom==1, but correct now
+  // for any genuine projective matrix).
   float denom = s_M[6] * x + s_M[7] * y + s_M[8];
-  denom += (fabsf(denom) < 1e-7f) ? 1e-7f : 0.0f;
+  denom = copysignf(fmaxf(fabsf(denom), 1e-7f), denom);
   float inv_denom = 1.0f / denom;  // division -> multiplication
   float src_x = (s_M[0] * x + s_M[1] * y + s_M[2]) * inv_denom;
   float src_y = (s_M[3] * x + s_M[4] * y + s_M[5]) * inv_denom;
