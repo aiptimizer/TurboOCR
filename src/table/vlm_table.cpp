@@ -22,6 +22,7 @@
 #include "turbo_ocr/common/cuda_check.h"
 #include "turbo_ocr/common/env_utils.h"
 #include "turbo_ocr/common/logger.h"
+#include "turbo_ocr/table/html_reconstruct.h"
 #include "turbo_ocr/vlm/crop_pool.h"
 
 namespace turbo_ocr::table {
@@ -106,6 +107,7 @@ HttpResp http_post_json(const std::string &url, const std::string &json_body,
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &r.body);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);  // bound redirect chains
   CURLcode rc = curl_easy_perform(curl);
   if (rc == CURLE_OK) {
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &r.status);
@@ -465,7 +467,9 @@ bool VLMTable::single_request(const std::vector<uint8_t> &crop_png,
 // whitespace/newline-prefixed HTML response isn't mangled by otsl_to_html
 // (matches backends/openai_endpoint.cpp::otsl_or_html).
 static std::string otsl_or_html(const std::string &raw) {
-  if (trim(raw).rfind("<table", 0) == 0) return raw;
+  // Model-emitted HTML is semi-trusted (an adversarial page can steer it):
+  // sanitize the passthrough so no <script>/on*= survives into the document.
+  if (trim(raw).rfind("<table", 0) == 0) return sanitize_table_html(raw);
   return raw.empty() ? "" : otsl_to_html(raw);
 }
 

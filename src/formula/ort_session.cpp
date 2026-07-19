@@ -1,4 +1,5 @@
 #include "turbo_ocr/formula/ort_session.h"
+#include "turbo_ocr/common/logger.h"
 
 #include <onnxruntime_cxx_api.h>
 
@@ -80,7 +81,7 @@ bool OrtSession::load(const std::string &onnx_path, int device_id, void *cuda_st
     p_->ready = true;
     return true;
   } catch (const std::exception &e) {
-    std::cerr << "[OrtSession] FATAL load failed (" << onnx_path << "): " << e.what() << '\n';
+    TOCR_LOG_ERROR("OrtSession FATAL load failed", "onnx", onnx_path, "error", e.what());
     return false;
   }
 }
@@ -98,7 +99,7 @@ bool OrtSession::load_cpu(const std::string &onnx_path) {
     // session) oversubscribes under load. Mirror the engine CPU path (intra 4, inter 1,
     // sequential); result is bit-identical (MLAS partitions output tiles with a fixed
     // accumulation order, deterministic across thread count). ORT_NUM_THREADS overrides.
-    if (const char *env = std::getenv("ORT_NUM_THREADS"))
+    if (const char *env = std::getenv("ORT_NUM_THREADS"))  // pre-commit-allow-getenv
       opts.SetIntraOpNumThreads(std::atoi(env));
     else
       opts.SetIntraOpNumThreads(4);
@@ -112,7 +113,7 @@ bool OrtSession::load_cpu(const std::string &onnx_path) {
     p_->ready = true;
     return true;
   } catch (const std::exception &e) {
-    std::cerr << "[OrtSession] FATAL CPU load failed (" << onnx_path << "): " << e.what() << '\n';
+    TOCR_LOG_ERROR("OrtSession FATAL CPU load failed", "onnx", onnx_path, "error", e.what());
     return false;
   }
 }
@@ -158,7 +159,7 @@ bool OrtSession::run(const std::vector<OrtTensor> &inputs,
     p_->sess->Run(Ort::RunOptions{nullptr}, binding);
     return true;
   } catch (const std::exception &e) {
-    std::cerr << "[OrtSession] run failed: " << e.what() << '\n';
+    TOCR_LOG_ERROR_RL("OrtSession run failed", "error", e.what());
     return false;
   }
 }
@@ -182,7 +183,7 @@ bool OrtSession::run_graph(const std::vector<OrtTensor> &inputs,
     p_->sess->Run(Ort::RunOptions{nullptr}, *p_->binding);  // captures on 1st call, replays after
     return true;
   } catch (const std::exception &e) {
-    std::cerr << "[OrtSession] run_graph failed: " << e.what() << '\n';
+    TOCR_LOG_ERROR_RL("OrtSession run_graph failed", "error", e.what());
     return false;
   }
 }
@@ -209,11 +210,15 @@ bool OrtSession::run_tokens(const char *in_name, const char *out_name, const flo
     std::vector<Ort::Value> outs = binding.GetOutputValues();
     auto shape = outs[0].GetTensorTypeAndShapeInfo().GetShape();
     L = shape.size() >= 2 ? shape[1] : 0;
+    // Copy exactly what the model returned: an output batch smaller than the
+    // requested B would over-read ORT's buffer if we trusted the input B.
+    const int64_t rows = shape.empty() ? 0 : shape[0];
+    const size_t emitted = static_cast<size_t>(rows) * static_cast<size_t>(L);
     const int64_t *d = outs[0].GetTensorData<int64_t>();
-    tokens.assign(d, d + (size_t)B * L);
+    tokens.assign(d, d + emitted);
     return true;
   } catch (const std::exception &e) {
-    std::cerr << "[OrtSession] run_tokens failed: " << e.what() << '\n';
+    TOCR_LOG_ERROR_RL("OrtSession run_tokens failed", "error", e.what());
     return false;
   }
 }

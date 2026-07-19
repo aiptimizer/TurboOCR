@@ -464,7 +464,7 @@ void batch_check_dims_post(std::vector<cv::Mat> &imgs,
 // caller maps them to absolute slots via valid_indices.
 void batch_run_pipeline(pipeline::PipelineDispatcher &dispatcher,
                          std::vector<cv::Mat> valid_imgs,
-                         std::vector<size_t> valid_indices,
+                         const std::vector<size_t> &valid_indices,
                          bool want_layout,
                          const server::InferOptions &opts,
                          std::vector<BatchItem> &all_items,
@@ -882,8 +882,8 @@ void register_ocr_markdown_route_gpu(server::WorkPool &pool,
         // filesystem (the markdown would then reference nonexistent files). Not served here.
         const bool embed = true;
         if (auto p = req->getParameter("embed"); p == "0" || p == "false")
-          std::cerr << "[/ocr/markdown] embed=0 (file-ref) is not supported over HTTP — "
-                       "returning self-contained data-URIs instead\n";
+          TOCR_LOG_WARN("/ocr/markdown embed=0 (file-ref) is not supported over "
+                        "HTTP; returning self-contained data-URIs instead");
 
         // Faithful export gates structure on what the server actually loaded:
         // request table/formula recognition only when their backends exist, so

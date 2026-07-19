@@ -78,3 +78,47 @@ TEST_CASE("reconstruct_html below the wrapped minimum falls back to concatenatio
   const auto html = reconstruct_html({"<table>", "</table>"}, {}, {});
   CHECK(html == "<table></table>");
 }
+
+// ---- sanitize_table_html ----------------------------------------------------
+
+#include "turbo_ocr/table/html_reconstruct.h"
+using turbo_ocr::table::sanitize_table_html;
+
+TEST_CASE("sanitize_table_html drops script elements and their content",
+          "[html_reconstruct][sanitize]") {
+  const auto out = sanitize_table_html(
+      "<table><tr><td>ok</td></tr></table><script>alert(1)</script>");
+  CHECK(out.find("script") == std::string::npos);
+  CHECK(out.find("alert") == std::string::npos);
+  CHECK(out.find("<table>") != std::string::npos);
+  CHECK(out.find("ok") != std::string::npos);
+}
+
+TEST_CASE("sanitize_table_html strips event-handler and style attributes",
+          "[html_reconstruct][sanitize]") {
+  const auto out = sanitize_table_html(
+      "<table><tr><td onclick=\"x\" style=\"y\" colspan=\"2\">c</td></tr></table>");
+  CHECK(out.find("onclick") == std::string::npos);
+  CHECK(out.find("style") == std::string::npos);
+  // The structural span attribute survives.
+  CHECK(out.find("colspan=\"2\"") != std::string::npos);
+  CHECK(out.find("c") != std::string::npos);
+}
+
+TEST_CASE("sanitize_table_html removes non-table tags but keeps their text",
+          "[html_reconstruct][sanitize]") {
+  const auto out = sanitize_table_html(
+      "<table><tr><td><a href=\"javascript:evil()\">link</a></td></tr></table>");
+  CHECK(out.find("<a") == std::string::npos);
+  CHECK(out.find("javascript") == std::string::npos);
+  CHECK(out.find("link") != std::string::npos);
+}
+
+TEST_CASE("sanitize_table_html keeps a clean table byte-safe", "[html_reconstruct][sanitize]") {
+  const auto out = sanitize_table_html(
+      "<table><tr><td>a</td><td rowspan=\"3\">b</td></tr></table>");
+  CHECK(out.find("<table>") != std::string::npos);
+  CHECK(out.find("rowspan=\"3\"") != std::string::npos);
+  CHECK(out.find("a") != std::string::npos);
+  CHECK(out.find("b") != std::string::npos);
+}

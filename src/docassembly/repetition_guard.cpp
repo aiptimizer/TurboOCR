@@ -73,8 +73,17 @@ std::string truncate_repetitive_content(const std::string& content,
 
   const bool single_line = stripped.find('\n') == std::string::npos;
 
+  // The two single-line passes below are O(n^2) in the line length. Untrusted
+  // OCR can collapse a whole page into one multi-MB line, which would spin the
+  // quadratic scan into a per-page hang — so skip them above a bound. A real
+  // hallucinated-repetition tail is caught long before this; 64 KB is orders
+  // of magnitude past any genuine document line.
+  constexpr std::size_t kMaxSingleLineScan = 64 * 1024;
+  const bool scannable_single_line =
+      single_line && stripped.size() <= kMaxSingleLineScan;
+
   // Priority 1: phrase-level suffix repetition in long single lines.
-  if (single_line && stripped.size() > 100) {
+  if (scannable_single_line && stripped.size() > 100) {
     if (auto m = find_repeating_suffix(stripped, 8, 5)) {
       const auto& [prefix, unit, count] = *m;
       if (static_cast<double>(unit.size()) * count >
@@ -85,7 +94,7 @@ std::string truncate_repetitive_content(const std::string& content,
   }
 
   // Priority 2: full-string character-level repetition (e.g. 'ababab').
-  if (single_line && static_cast<int>(stripped.size()) > min_len) {
+  if (scannable_single_line && static_cast<int>(stripped.size()) > min_len) {
     if (auto unit = find_shortest_repeating_substring(stripped)) {
       int count = static_cast<int>(stripped.size() / unit->size());
       if (count >= char_threshold) return *unit;

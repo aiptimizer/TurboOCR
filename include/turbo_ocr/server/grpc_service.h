@@ -105,15 +105,21 @@ grpc_check_layout_request(grpc::ServerContext *ctx, bool req_layout,
 grpc_check_structure_backends(grpc::ServerContext *ctx, bool want_tables,
                               bool want_formulas, bool table_available,
                               bool formula_available,
-                              bool json_bytes_mode) {
-  // Structured response mode carries only `results` (the proto has no
-  // table/formula message). Running the stage then dropping it is a silent
-  // failure — reject loudly so a structured-mode client knows to use json_bytes.
-  if ((want_tables || want_formulas) && !json_bytes_mode)
+                              bool json_bytes_mode,
+                              bool want_layout = false,
+                              bool want_blocks = false) {
+  // Structured response mode carries only `results` + `reading_order` (the
+  // proto has no table/formula/layout/blocks message). Running any of those
+  // stages then dropping the output is a silent failure — reject loudly so a
+  // structured-mode client knows to use json_bytes. reading_order stays
+  // allowed: it HAS a dedicated proto field.
+  if ((want_tables || want_formulas || want_layout || want_blocks) &&
+      !json_bytes_mode)
     return grpc_error(ctx, grpc::StatusCode::UNIMPLEMENTED,
                       "STRUCTURED_MODE_NO_STRUCTURE",
-                      "tables/formulas require the json_bytes gRPC response mode "
-                      "(structured mode returns only text results)");
+                      "layout/blocks/tables/formulas require the json_bytes "
+                      "gRPC response mode (structured mode returns only text "
+                      "results + reading_order)");
   if (want_tables && !table_available)
     return grpc_error(ctx, grpc::StatusCode::INVALID_ARGUMENT,
                       "TABLE_BACKEND_DISABLED",
@@ -340,7 +346,8 @@ public:
     if (want_reading_order || want_tables || want_formulas) want_layout = true;
     if (auto err = grpc_check_structure_backends(ctx, want_tables, want_formulas,
             table_available_, formula_available_,
-            mode_ == GrpcResponseMode::json_bytes); err)
+            mode_ == GrpcResponseMode::json_bytes,
+            request->layout(), request->as_blocks()); err)
       return *err;
 
     // Pixels path: raw BGR pixel data
@@ -530,7 +537,8 @@ public:
     if (want_reading_order || want_tables || want_formulas) want_layout = true;
     if (auto err = grpc_check_structure_backends(ctx, want_tables, want_formulas,
             table_available_, formula_available_,
-            mode_ == GrpcResponseMode::json_bytes); err)
+            mode_ == GrpcResponseMode::json_bytes,
+            request->layout(), request->as_blocks()); err)
       return *err;
 
     // Per-slot oversize handling: an oversized image is dropped to an empty
@@ -788,7 +796,8 @@ public:
     if (want_blocks || want_tables || want_formulas) want_layout = true;
     if (auto err = grpc_check_structure_backends(ctx, want_tables, want_formulas,
             table_available_, formula_available_,
-            mode_ == GrpcResponseMode::json_bytes); err)
+            mode_ == GrpcResponseMode::json_bytes,
+            request->layout(), request->as_blocks()); err)
       return *err;
 
     int dpi = request->dpi();

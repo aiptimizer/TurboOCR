@@ -17,9 +17,11 @@ namespace {
 // The IHDR bit-depth byte lives at a fixed offset: 8-byte PNG signature +
 // 4-byte chunk length + 4-byte "IHDR" type + 4-byte width + 4-byte height,
 // i.e. offset 24 (color type follows at 25). A 16-bit-depth PNG (PIL mode
-// 'I;16' grayscale, or 16-bit RGB/RGBA) reports bit_depth == 16 here.
+// 'I;16' grayscale, or 16-bit RGB/RGBA) reports bit_depth == 16 here. The
+// signature check makes offset 24 meaningful for a non-PNG blob whose byte
+// 24 happens to be 16 (self-contained; callers also gate on is_png).
 [[nodiscard]] bool png_is_16bit(const unsigned char *data, std::size_t len) noexcept {
-  return len >= 26 && data[24] == 16;
+  return len >= 26 && FastPngDecoder::is_png(data, len) && data[24] == 16;
 }
 
 // IHDR width/height (big-endian u32 at offsets 16/20), for cap enforcement on

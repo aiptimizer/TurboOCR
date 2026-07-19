@@ -1,6 +1,7 @@
 #include "turbo_ocr/backends/openai_endpoint.h"
 #include "turbo_ocr/common/logger.h"
 #include "turbo_ocr/formula/latex_extract.h"
+#include "turbo_ocr/table/html_reconstruct.h"
 
 #include <algorithm>
 #include <atomic>
@@ -79,7 +80,8 @@ std::string trim(const std::string &s) {
 // this, otsl_to_html would mangle a valid-HTML response from a kind:openai model.
 std::string otsl_or_html(const std::string &raw) {
   std::string t = trim(raw);
-  if (t.rfind("<table", 0) == 0) return raw;
+  // Sanitize model-emitted HTML passthrough (adversarial-image XSS vector).
+  if (t.rfind("<table", 0) == 0) return table::sanitize_table_html(raw);
   return raw.empty() ? "" : table::otsl_to_html(raw);
 }
 
@@ -157,7 +159,9 @@ OpenAIEndpoint::submit_crops_async(const GpuImage &page,
   if (cudaSuccess != cudaMemcpyAsync(host.data(), page.data, need,
                                      cudaMemcpyDeviceToHost, stream))
     return futs;
-  cudaStreamSynchronize(stream);
+  // A sync failure leaves `host` partially/garbage-filled; PNG-encoding and
+  // shipping crops built from undefined memory is worse than failing loud.
+  if (cudaSuccess != cudaStreamSynchronize(stream)) return futs;
 
   auto &pool = vlm::VLMCropPool::instance();
   futs.reserve(n);
@@ -199,7 +203,7 @@ OpenAIEndpoint::infer_crops(const GpuImage &page, const std::vector<Box> &boxes,
   if (cudaSuccess != cudaMemcpyAsync(host.data(), page.data, need,
                                      cudaMemcpyDeviceToHost, stream))
     return out;
-  cudaStreamSynchronize(stream);
+  if (cudaSuccess != cudaStreamSynchronize(stream)) return out;
 
   auto &pool = vlm::VLMCropPool::instance();
   std::vector<std::future<vlm::CropOutcome>> futs;

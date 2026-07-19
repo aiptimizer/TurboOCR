@@ -116,6 +116,7 @@ HttpResp http_post_json(const std::string &url, const std::string &json_body,
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_cb);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &r.body);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);  // bound redirect chains
   CURLcode rc = curl_easy_perform(curl);
   if (rc == CURLE_OK) {
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &r.status);

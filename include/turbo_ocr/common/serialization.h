@@ -5,6 +5,7 @@
 #include "turbo_ocr/pipeline/pipeline_result.h"
 #include "turbo_ocr/router/router_types.h"
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <vector>
@@ -12,6 +13,25 @@
 namespace turbo_ocr {
 
 namespace detail {
+
+// Full JSON-string escape with a UTF-8 backstop (definition below). Forward-
+// declared so every text-bearing writer above its definition can route
+// through the ONE escaper instead of a weaker inline copy that would ship
+// RFC-8259-invalid bytes on malformed UTF-8. Caller writes the quotes.
+inline void append_escaped_string(std::string &j, const std::string &s);
+
+// Serialize a confidence/score as JSON. snprintf("%.5g", NaN|Inf) emits the
+// bare tokens `nan`/`inf`, which are NOT valid JSON and break the entire
+// response for a strict client — a single degraded region must not do that.
+// Non-finite -> 0.
+inline void append_score(std::string &j, double v) {
+  char buf[16];
+  if (std::isfinite(v))
+    std::snprintf(buf, sizeof(buf), "%.5g", v);
+  else
+    std::snprintf(buf, sizeof(buf), "0");
+  j += buf;
+}
 
 // Append `[[x,y],[x,y],[x,y],[x,y]]` to j — shared by text + layout writers.
 inline void append_box(std::string &j, const Box &box) {
@@ -41,31 +61,9 @@ inline void append_ocr_item(std::string &j, const OCRResultItem &item) {
     j += ',';
   }
   j += "\"text\":\"";
-  for (char c : item.text) {
-    // Compare against unsigned so UTF-8 continuation bytes (0x80+) don't
-    // sign-extend to negative and get mis-escaped as \u00xx. JSON allows
-    // raw UTF-8 in strings; only control chars (< 0x20) need \u escaping.
-    auto uc = static_cast<unsigned char>(c);
-    switch (c) {
-      case '"':  j += "\\\""; break;
-      case '\\': j += "\\\\"; break;
-      case '\n': j += "\\n"; break;
-      case '\r': j += "\\r"; break;
-      case '\t': j += "\\t"; break;
-      default:
-        if (uc < 0x20) {
-          char buf[7];
-          snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(uc));
-          j += buf;
-        } else {
-          j += c;
-        }
-    }
-  }
+  append_escaped_string(j, item.text);
   j += "\",\"confidence\":";
-  char conf_str[16];
-  snprintf(conf_str, sizeof(conf_str), "%.5g", item.confidence);
-  j += conf_str;
+  append_score(j, item.confidence);
   j += ",\"bounding_box\":";
   append_box(j, item.box);
   if (!item.source.empty() && item.source != "ocr") {
@@ -102,9 +100,7 @@ inline void append_layout_item(std::string &j, const layout::LayoutBox &lb) {
   j += "\",\"class_id\":";
   j += std::to_string(lb.class_id);
   j += ",\"confidence\":";
-  char conf_str[16];
-  snprintf(conf_str, sizeof(conf_str), "%.5g", lb.score);
-  j += conf_str;
+  append_score(j, lb.score);
   j += ",\"bounding_box\":";
   append_box(j, lb.box);
   j += '}';
@@ -193,9 +189,7 @@ inline void append_tables_array(std::string &j,
     j += ",\"html\":\"";
     append_escaped_string(j, t.html);
     j += "\",\"confidence\":";
-    char conf_str[16];
-    snprintf(conf_str, sizeof(conf_str), "%.5g", t.score);
-    j += conf_str;
+    append_score(j, t.score);
     j += ",\"bounding_box\":";
     append_box(j, t.box);
     j += '}';
@@ -214,9 +208,7 @@ inline void append_formulas_array(std::string &j,
     j += ",\"latex\":\"";
     append_escaped_string(j, f.latex);
     j += "\",\"confidence\":";
-    char conf_str[16];
-    snprintf(conf_str, sizeof(conf_str), "%.5g", f.score);
-    j += conf_str;
+    append_score(j, f.score);
     j += ",\"bounding_box\":";
     append_box(j, f.box);
     j += '}';
@@ -336,27 +328,8 @@ inline void append_blocks_array(std::string &j,
       }
       prev_cy = cy;
       prev_x1 = max_x;
-      // Escape JSON-special chars.
-      for (char c : it.text) {
-        switch (c) {
-          case '"':  j += "\\\""; break;
-          case '\\': j += "\\\\"; break;
-          case '\b': j += "\\b";  break;
-          case '\f': j += "\\f";  break;
-          case '\n': j += "\\n";  break;
-          case '\r': j += "\\r";  break;
-          case '\t': j += "\\t";  break;
-          default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-              char buf[8];
-              snprintf(buf, sizeof(buf), "\\u%04x",
-                        static_cast<unsigned char>(c));
-              j += buf;
-            } else {
-              j += c;
-            }
-        }
-      }
+      // Same JSON escaping + UTF-8 backstop as every other text field.
+      append_escaped_string(j, it.text);
     }
     j += "\",\"order_index\":";
     j += std::to_string(oi);

@@ -49,7 +49,18 @@ std::size_t irfind(std::string_view s, std::string_view lit) {
 constexpr int kMaxSpan = 512;
 
 int attr_int(std::string_view tag, std::string_view name, int def) {
-  std::size_t p = tag.find(name);
+  // Match `name` only as a whole attribute (preceded by '<', space, or a
+  // quote), so `colspan` doesn't substring-match inside `data-colspanx` and
+  // silently return the default span, skewing the merge column math.
+  std::size_t p = std::string_view::npos;
+  for (std::size_t i = tag.find(name); i != std::string_view::npos;
+       i = tag.find(name, i + 1)) {
+    if (i == 0 || tag[i - 1] == '<' || tag[i - 1] == ' ' ||
+        tag[i - 1] == '\t' || tag[i - 1] == '"' || tag[i - 1] == '\'') {
+      p = i;
+      break;
+    }
+  }
   if (p == std::string_view::npos) return def;
   p += name.size();
   while (p < tag.size() &&

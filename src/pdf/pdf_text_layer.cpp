@@ -1,6 +1,7 @@
 #include "turbo_ocr/pdf/pdf_text_layer.h"
 
 #include "turbo_ocr/common/box.h"
+#include "turbo_ocr/common/logger.h"
 
 #include <algorithm>
 #include <climits>
@@ -71,9 +72,18 @@ std::string utf16le_to_utf8(const unsigned short *buf, int n) {
   out.reserve(static_cast<size_t>(n));
   for (int i = 0; i < n; ) {
     uint32_t cp = buf[i++];
-    if (cp >= 0xD800 && cp <= 0xDBFF && i < n) {
-      uint32_t lo = buf[i++];
-      cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+    if (cp >= 0xD800 && cp <= 0xDBFF) {
+      // High surrogate: pair only with a valid low surrogate; a malformed or
+      // unpaired half becomes U+FFFD rather than an out-of-range/WTF-8 code
+      // point (a crafted ToUnicode map could otherwise emit invalid UTF-8).
+      if (i < n && buf[i] >= 0xDC00 && buf[i] <= 0xDFFF) {
+        uint32_t lo = buf[i++];
+        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+      } else {
+        cp = 0xFFFD;
+      }
+    } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+      cp = 0xFFFD;  // lone low surrogate
     }
     if (cp < 0x80) {
       out.push_back(static_cast<char>(cp));
@@ -199,7 +209,7 @@ struct PdfDocument::Impl {
 
     FPDF_PAGE page = FPDF_LoadPage(doc, page_index);
     if (!page) {
-      std::cerr << "[pdf_text] FPDF_LoadPage(" << page_index << ") failed\n";
+      TOCR_LOG_ERROR_RL("pdf_text FPDF_LoadPage failed", "page_index", page_index);
       return nullptr;
     }
     FPDF_TEXTPAGE tp = FPDFText_LoadPage(page);
@@ -244,8 +254,8 @@ PdfDocument::PdfDocument(const uint8_t *data, size_t len)
   // page-count guard. Refuse up front instead. PDFs that large are not a
   // real workload for in-process text-layer extraction.
   if (len > static_cast<size_t>(INT_MAX)) {
-    std::cerr << "[pdf_text] PDF body " << len
-              << " bytes exceeds 2 GiB FPDF limit; rejecting\n";
+    TOCR_LOG_ERROR("pdf_text PDF body exceeds 2 GiB FPDF limit; rejecting",
+                   "bytes", len);
     return;  // doc_ stays null -> ok() == false
   }
   // PDFium is not thread-safe: hold the library-wide lock around any
@@ -253,8 +263,8 @@ PdfDocument::PdfDocument(const uint8_t *data, size_t len)
   std::lock_guard<std::mutex> gl(pdfium_lock());
   doc_ = FPDF_LoadMemDocument(data, static_cast<int>(len), /*password=*/nullptr);
   if (!doc_) {
-    std::cerr << "[pdf_text] FPDF_LoadMemDocument failed, err="
-              << FPDF_GetLastError() << '\n';
+    TOCR_LOG_ERROR_RL("pdf_text FPDF_LoadMemDocument failed",
+                      "err", static_cast<long>(FPDF_GetLastError()));
   }
 }
 
@@ -549,6 +559,10 @@ SanityVerdict passes_sanity_check(const std::string &text,
 void verify_results_with_text_layer(std::vector<OCRResultItem> &results,
                                     const PdfDocument &doc, int page_index,
                                     int dpi) {
+  // dpi is caller-supplied; a zero/negative value would make px_to_pt inf/nan
+  // and silently blank the text-layer coords for every item (mis-verifying the
+  // whole page). Callers validate DPI, but this guard keeps the invariant local.
+  if (dpi <= 0) return;
   const float px_to_pt = 72.0f / static_cast<float>(dpi);
   for (auto &item : results) {
     auto [ix0, iy0, ix1, iy1] = turbo_ocr::aabb(item.box);

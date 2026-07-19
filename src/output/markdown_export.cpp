@@ -1,3 +1,4 @@
+#include "turbo_ocr/table/html_reconstruct.h"
 #include "turbo_ocr/output/markdown_export.h"
 
 #include <algorithm>
@@ -73,7 +74,14 @@ namespace {
   const size_t a = lo.find("<table");
   const size_t b = lo.rfind("</table>");
   if (a == std::string::npos || b == std::string::npos || b < a) return {};
-  return trim(std::string_view(html).substr(a, (b + 8) - a)); // 8 = "</table>"
+  // Single choke point for every backend's table HTML entering the Markdown
+  // document — sanitize here so no <script>/on*= can survive into rendered
+  // output regardless of which recognizer produced it (defense in depth;
+  // SLANeXt already escapes cell text, the VLM passthrough is also sanitized
+  // at source). Bare `<table>…</table>`, colspan/rowspan kept.
+  const std::string inner =
+      trim(std::string_view(html).substr(a, (b + 8) - a)); // 8 = "</table>"
+  return turbo_ocr::table::sanitize_table_html(inner);
 }
 
 // ── LaTeX render-safety ──────────────────────────────────────────────────

@@ -77,6 +77,12 @@ std::string byte_level_to_utf8(const std::string& s) {
         else if ((c >> 4) == 0xE && i + 2 < n) { cp = c & 0x0Fu; len = 3; }
         else if ((c >> 3) == 0x1E && i + 3 < n) { cp = c & 0x07u; len = 4; }
         else { out.push_back(s[i]); ++i; continue; }
+        // Validate continuation bytes before shifting — a malformed
+        // (non-byte-level) token would otherwise decode to a wrong byte.
+        bool valid = true;
+        for (int k = 1; k < len; ++k)
+            if ((static_cast<unsigned char>(s[i + k]) & 0xC0u) != 0x80u) { valid = false; break; }
+        if (!valid) { out.push_back(s[i]); ++i; continue; }
         for (int k = 1; k < len; ++k)
             cp = (cp << 6) | (static_cast<unsigned char>(s[i + k]) & 0x3Fu);
         i += len;
@@ -176,7 +182,7 @@ std::string remove_chinese_text_wrapping(const std::string& s) {
     std::size_t n = s.size();
     std::size_t i = 0;
     while (i < n) {
-        if (i + 5 < n && std::string_view(data + i, 5) == "\\text") {
+        if (i + 5 <= n && std::string_view(data + i, 5) == "\\text") {
             std::size_t j = i + 5;
             while (j < n && std::isspace(static_cast<unsigned char>(s[j]))) ++j;
             if (j < n && s[j] == '{') {

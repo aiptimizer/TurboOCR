@@ -437,6 +437,7 @@ void VLMCropPool::dispatch_one(std::unique_ptr<CropRequest> req) {
     curl_easy_setopt(easy, CURLOPT_WRITEDATA,     ctx.get());
     curl_easy_setopt(easy, CURLOPT_PRIVATE,       ctx.get());
     curl_easy_setopt(easy, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(easy, CURLOPT_MAXREDIRS, 3L);  // bound redirect chains
     // HTTP/1.1 keep-alive is enough for loopback.
     curl_easy_setopt(easy, CURLOPT_HTTP_VERSION,  CURL_HTTP_VERSION_1_1);
 

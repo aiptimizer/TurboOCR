@@ -38,8 +38,8 @@ struct Config {
 
 inline const Config &config() {
   static const Config cfg = {
-      parse_level(std::getenv("LOG_LEVEL")),
-      parse_format(std::getenv("LOG_FORMAT")),
+      parse_level(std::getenv("LOG_LEVEL")),  // pre-commit-allow-getenv (logger bootstrap)
+      parse_format(std::getenv("LOG_FORMAT")),  // pre-commit-allow-getenv (logger bootstrap)
   };
   return cfg;
 }
@@ -82,6 +82,22 @@ inline int format_timestamp_text(char *buf, size_t cap) {
 // ── Value serialization helpers ────────────────────────────────────────
 
 namespace detail {
+
+// Advance the write cursor by a formatter's return value, clamped to what
+// can actually have been written. snprintf reports the WOULD-BE length on
+// truncation (>= cap); advancing by that raw value walks p past the buffer
+// and wraps rem (size_t) — an out-of-bounds write on the next append. Every
+// cursor advance in this file goes through here so truncation degrades to a
+// clipped line, never memory corruption. rem stays >= 1 (snprintf writes at
+// most cap-1 chars plus NUL), preserving the caller's \n\0 reserve.
+inline void advance(char *&p, size_t &rem, int n) {
+  if (n < 0) return;                       // encoding error: nothing written
+  size_t adv = static_cast<size_t>(n);
+  if (rem == 0) return;
+  if (adv >= rem) adv = rem - 1;           // truncated: cap-1 chars + NUL
+  p += adv;
+  rem -= adv;
+}
 
 // Append a JSON-escaped string value (with quotes) to buffer.
 // Returns number of chars written.
@@ -173,12 +189,11 @@ inline void write_json_kvs(char *&, size_t &) {}
 
 template <typename V, typename... Rest>
 void write_json_kvs(char *&p, size_t &rem, std::string_view key, V &&val, Rest &&...rest) {
-  int n;
   // comma + key
-  n = std::snprintf(p, rem, ","); p += n; rem -= static_cast<size_t>(n);
-  n = json_string(p, rem, key); p += n; rem -= static_cast<size_t>(n);
-  n = std::snprintf(p, rem, ":"); p += n; rem -= static_cast<size_t>(n);
-  n = append_json_value(p, rem, std::forward<V>(val)); p += n; rem -= static_cast<size_t>(n);
+  advance(p, rem, std::snprintf(p, rem, ","));
+  advance(p, rem, json_string(p, rem, key));
+  advance(p, rem, std::snprintf(p, rem, ":"));
+  advance(p, rem, append_json_value(p, rem, std::forward<V>(val)));
   write_json_kvs(p, rem, std::forward<Rest>(rest)...);
 }
 
@@ -186,10 +201,9 @@ inline void write_text_kvs(char *&, size_t &) {}
 
 template <typename V, typename... Rest>
 void write_text_kvs(char *&p, size_t &rem, std::string_view key, V &&val, Rest &&...rest) {
-  int n;
-  n = std::snprintf(p, rem, " %.*s=", static_cast<int>(key.size()), key.data());
-  p += n; rem -= static_cast<size_t>(n);
-  n = append_text_value(p, rem, std::forward<V>(val)); p += n; rem -= static_cast<size_t>(n);
+  advance(p, rem, std::snprintf(p, rem, " %.*s=",
+                                static_cast<int>(key.size()), key.data()));
+  advance(p, rem, append_text_value(p, rem, std::forward<V>(val)));
   write_text_kvs(p, rem, std::forward<Rest>(rest)...);
 }
 
@@ -224,27 +238,31 @@ void log_msg(Level lvl, std::string_view msg, KVs &&...kvs) {
   if (static_cast<int>(lvl) < static_cast<int>(config().min_level)) return;
 
   // Fixed 4KB thread-local buffer — zero allocation
+  // Fixed 4KB thread-local buffer — zero allocation. Every cursor move goes
+  // through detail::advance (truncation-safe); rem never reaches 0, and the
+  // -3 reserve leaves room for the closing '}' + '\n' + '\0' even on a
+  // fully clipped line.
   thread_local char buf[4096];
   char *p = buf;
-  size_t rem = sizeof(buf) - 2;  // reserve for \n\0
-  int n;
+  size_t rem = sizeof(buf) - 3;
 
   if (config().format == Format::Json) {
     // {"ts":"...","level":"...","msg":"...",...}\n
-    n = std::snprintf(p, rem, "{\"ts\":\""); p += n; rem -= static_cast<size_t>(n);
-    n = format_timestamp_iso(p, rem); p += n; rem -= static_cast<size_t>(n);
-    n = std::snprintf(p, rem, "\",\"level\":\"%s\",\"msg\":", level_name_json(lvl));
-    p += n; rem -= static_cast<size_t>(n);
-    n = detail::json_string(p, rem, msg); p += n; rem -= static_cast<size_t>(n);
+    detail::advance(p, rem, std::snprintf(p, rem, "{\"ts\":\""));
+    detail::advance(p, rem, format_timestamp_iso(p, rem));
+    detail::advance(p, rem, std::snprintf(p, rem, "\",\"level\":\"%s\",\"msg\":",
+                                          level_name_json(lvl)));
+    detail::advance(p, rem, detail::json_string(p, rem, msg));
     detail::write_json_kvs(p, rem, std::forward<KVs>(kvs)...);
     *p++ = '}';
   } else {
     // [2026-04-13 10:00:00.123] [INFO] message key=val ...\n
     *p++ = '['; rem--;
-    n = format_timestamp_text(p, rem); p += n; rem -= static_cast<size_t>(n);
-    n = std::snprintf(p, rem, "] [%s] %.*s", level_name_text(lvl),
-        static_cast<int>(msg.size()), msg.data());
-    p += n; rem -= static_cast<size_t>(n);
+    detail::advance(p, rem, format_timestamp_text(p, rem));
+    detail::advance(p, rem, std::snprintf(p, rem, "] [%s] %.*s",
+                                          level_name_text(lvl),
+                                          static_cast<int>(msg.size()),
+                                          msg.data()));
     detail::write_text_kvs(p, rem, std::forward<KVs>(kvs)...);
   }
   *p++ = '\n';
@@ -268,7 +286,7 @@ struct RateLimitConfig {
 inline const RateLimitConfig &ratelimit_config() {
   static const RateLimitConfig cfg = []() {
     RateLimitConfig c{10, 1000};
-    if (const char *s = std::getenv("TOCR_LOG_RATELIMIT")) {
+    if (const char *s = std::getenv("TOCR_LOG_RATELIMIT")) {  // pre-commit-allow-getenv (logger bootstrap)
       // "0" disables; "N" sets max logs per default 1s window;
       // "N:W_MS" sets both. Anything unparseable falls back to defaults.
       char *end = nullptr;

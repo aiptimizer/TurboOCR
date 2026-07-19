@@ -1,5 +1,7 @@
 #include "turbo_ocr/render/pdf_renderer.h"
 #include "turbo_ocr/common/errors.h"
+#include "turbo_ocr/common/env_utils.h"
+#include "turbo_ocr/common/logger.h"
 
 #include <algorithm>
 #include <atomic>
@@ -37,7 +39,7 @@ using namespace turbo_ocr::render;
 // CPU-only path — no GPU required.
 static bool ppm_swap_use_simd() {
   static const bool simd = [] {
-    const char *e = std::getenv("TURBO_PPM_SWAP");
+    const char *e = std::getenv("TURBO_PPM_SWAP");  // pre-commit-allow-getenv
     return !(e && std::strcmp(e, "scalar") == 0);
   }();
   return simd;
@@ -51,10 +53,19 @@ static bool ppm_swap_use_simd() {
 // it to [1,268] at startup. Default 40 MP (e.g. 5000x8000 at ~600 DPI A4).
 static int64_t ppm_max_pixels() {
   static const int64_t px = [] {
-    const char *e = std::getenv("MAX_PDF_PAGE_PIXELS_MP");
-    int mp = 40;
-    // Best-effort env parse: keep the default on any malformed value.
-    if (e) { try { mp = std::clamp(std::stoi(e), 1, 268); } catch (...) { /* keep default on malformed value */ } }
+    // env_int clamps to [1,268] and returns the default (40) on any malformed
+    // value; a garbage value would previously revert to 40 with no diagnostic.
+    const int def = 40;
+    const int mp = turbo_ocr::env::env_int("MAX_PDF_PAGE_PIXELS_MP", def, 1, 268);
+    if (const char *e = std::getenv("MAX_PDF_PAGE_PIXELS_MP");  // pre-commit-allow-getenv
+        e && *e && mp == def) {
+      // Distinguish "explicitly set to 40" from "malformed -> default".
+      char *end = nullptr;
+      std::strtol(e, &end, 10);
+      if (end == e || *end != '\0')
+        TOCR_LOG_WARN("MAX_PDF_PAGE_PIXELS_MP malformed; using default",
+                      "value", e, "default", def);
+    }
     return static_cast<int64_t>(mp) * 1000000;
   }();
   return px;
@@ -64,7 +75,7 @@ static std::string find_binary() {
   // Explicit override — used by tests and by deployments that put the binary
   // in a non-standard location. Fails fast if the configured path is missing
   // rather than falling back to the default search (surprises hurt in prod).
-  if (const char *env = std::getenv("FASTPDF2PNG_PATH"); env && *env) {
+  if (const char *env = std::getenv("FASTPDF2PNG_PATH"); env && *env) {  // pre-commit-allow-getenv
     if (std::filesystem::exists(env)) return env;
     throw turbo_ocr::PdfRenderError(
         std::format("FASTPDF2PNG_PATH does not exist: {}", env));
@@ -452,9 +463,7 @@ bool PdfRenderer::send_cmd_once(Daemon &d, const std::string &cmd,
   // and let send_cmd's existing respawn+retry path recover. Configurable via
   // PDF_RENDER_REPLY_TIMEOUT_MS (default 120000).
   static const int reply_timeout_ms = [] {
-    const char *e = std::getenv("PDF_RENDER_REPLY_TIMEOUT_MS");
-    int v = e ? std::atoi(e) : 120000;
-    return v > 0 ? v : 120000;
+    return turbo_ocr::env::env_int("PDF_RENDER_REPLY_TIMEOUT_MS", 120000, 1, 3600000);
   }();
   struct pollfd pfd = {fileno(d.result_out), POLLIN, 0};
   // poll() returns -1/EINTR on signal delivery — that is NOT a daemon failure, so

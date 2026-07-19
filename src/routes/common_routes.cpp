@@ -3,6 +3,7 @@
 #include "turbo_ocr/decode/image_dims.h"
 #include "turbo_ocr/server/env_utils.h"
 #include "turbo_ocr/routing/routing_config.h"
+#include "turbo_ocr/common/serialization.h"
 
 #include <drogon/HttpAppFramework.h>
 #include <json/json.h>
@@ -139,20 +140,28 @@ void register_capabilities_route(const CapabilitiesInfo &info) {
   // time this registers, but guard anyway so a bad config can't crash startup.
   body += R"(,"routing":)";
   try {
+    // Operator-supplied routing.json backend/route names may contain " or \,
+    // which would produce malformed JSON here. Route every name through the
+    // shared JSON-string escaper (quotes written explicitly around it).
+    const auto esc = [](const std::string &s) {
+      std::string q;
+      turbo_ocr::detail::append_escaped_string(q, s);
+      return q;
+    };
     const auto tbl = routing::load_routing_config();
     body += R"({"routes":{)";
     bool first = true;
     for (const auto &kv : tbl.routes) {
       if (!first) body += ",";
       first = false;
-      body += "\"" + kv.first + "\":\"" + kv.second + "\"";
+      body += "\"" + esc(kv.first) + "\":\"" + esc(kv.second) + "\"";
     }
     body += R"(},"backends":{)";
     first = true;
     for (const auto &kv : tbl.backends) {
       if (!first) body += ",";
       first = false;
-      body += "\"" + kv.first + R"(":{"kind":")" +
+      body += "\"" + esc(kv.first) + R"(":{"kind":")" +
               std::string(routing::kind_name(kv.second.kind)) + "\"}";
     }
     body += "}}";
