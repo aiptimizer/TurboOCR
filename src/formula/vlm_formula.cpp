@@ -33,9 +33,8 @@ using env::env_int;
 using env::env_or;
 
 bool use_pool_backend() {
-  const char *v = std::getenv("VLM_BACKEND");
-  // Default to pool; legacy only if explicitly set.
-  return !(v && v[0] == 'l');  // "legacy" starts with 'l'
+  // Default to pool; "legacy" (prefix 'l') selects the per-request curl path.
+  return env_or("VLM_BACKEND", "pool").front() != 'l';
 }
 
 std::string to_base64(const std::vector<uint8_t> &bin) {
@@ -211,7 +210,7 @@ bool VLMFormula::load_model_dir(const std::string &/*model_dir*/) {
     if (j.contains("data") && j["data"].is_array() && !j["data"].empty()) {
       std::string first = j["data"][0].value("id", "");
       if (!first.empty()) {
-        if (!std::getenv("VLLM_MODEL") || std::getenv("VLLM_MODEL")[0] == '\0') {
+        if (!env::env_present("VLLM_MODEL")) {
           model_ = first;
         }
         TOCR_LOG_INFO("VLMFormula endpoint probed", "base_url", base_url_, "server_model", first, "using_model", model_);

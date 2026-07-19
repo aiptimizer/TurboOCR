@@ -32,8 +32,8 @@ using env::env_int;
 using env::env_or;
 
 bool use_pool_backend() {
-  const char *v = std::getenv("VLM_BACKEND");
-  return !(v && v[0] == 'l');
+  // Default to pool; "legacy" (prefix 'l') selects the per-request curl path.
+  return env_or("VLM_BACKEND", "pool").front() != 'l';
 }
 
 std::string to_base64(const std::vector<uint8_t> &bin) {
@@ -378,16 +378,12 @@ VLMTable::~VLMTable() noexcept = default;
 bool VLMTable::init() {
   // Prefer table-specific env, then fall back to the shared VLLM_* envs so
   // a single endpoint can drive both modalities without duplicating config.
-  const char *url_env = std::getenv("VLLM_TABLE_BASE_URL");
-  base_url_ = (url_env && url_env[0])
-                  ? std::string(url_env)
-                  : env_or("VLLM_BASE_URL", "http://localhost:8000");
+  base_url_ = env_or("VLLM_TABLE_BASE_URL",
+                     env_or("VLLM_BASE_URL", "http://localhost:8000"));
   while (!base_url_.empty() && base_url_.back() == '/') base_url_.pop_back();
 
-  const char *model_env = std::getenv("VLLM_TABLE_MODEL");
-  model_ = (model_env && model_env[0])
-               ? std::string(model_env)
-               : env_or("VLLM_MODEL", "PaddleOCR-VL-1.6-0.9B");
+  model_ = env_or("VLLM_TABLE_MODEL",
+                  env_or("VLLM_MODEL", "PaddleOCR-VL-1.6-0.9B"));
 
   prompt_     = env_or("VLLM_TABLE_PROMPT", "Table Recognition:");
   batch_      = env_int("VLLM_TABLE_BATCH", 8, 1, 1024);
@@ -411,7 +407,8 @@ bool VLMTable::init() {
       if (!model_present) {
         std::string first = j["data"][0].value("id", "");
         if (!first.empty()) {
-          TOCR_LOG_INFO("VLMTable requested model not on server, adopting registered id", "requested", model_, "using", first); using '" << first << "'\n";
+          TOCR_LOG_INFO("VLMTable requested model not on server, adopting registered id",
+                        "requested", model_, "using", first);
           model_ = first;
         }
       }
