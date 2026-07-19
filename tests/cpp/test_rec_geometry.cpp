@@ -1,6 +1,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "turbo_ocr/recognition/rec_geometry.h"
+#include "turbo_ocr/common/perspective.h"
 
 using namespace turbo_ocr::recognition;
 using turbo_ocr::Box;
@@ -83,4 +84,63 @@ TEST_CASE("snap_width_step pads at most step-1 and never shrinks", "[rec_geometr
     CHECK(b >= w);
     CHECK(b - w < 16);
   }
+}
+
+TEST_CASE("kMinRecWidth floors tiny crops without stretching", "[rec_geometry]") {
+  // A 4:12 single-character box has natural width ceil(48*4/12) = 16; the
+  // recognizer input must floor at kMinRecWidth (pad, never stretch). The
+  // regression this guards: flooring at the 320px model probe width stretched
+  // tiny glyphs ~10x horizontally and dropped them from recognition entirely.
+  CHECK(natural_rec_width(4.0f / 12.0f, 48, kMinRecWidth) == kMinRecWidth);
+  // A crop already wider than the floor keeps its natural width.
+  CHECK(natural_rec_width(10.0f / 12.0f, 48, kMinRecWidth) == 40);
+  // The floor must never exceed the smallest TRT bucket, or bucket snapping
+  // could not represent floored widths.
+  static_assert(kMinRecWidth <= kRecWidthBuckets.front());
+}
+
+TEST_CASE("compute_crop_transform maps dst rect corners onto the box quad",
+          "[rec_geometry]") {
+  // Axis-aligned 100x24 box at (10,20): the inverse matrix must map the
+  // destination rectangle's corners back onto the source quad corners; this
+  // is the mapping both cv::warpPerspective(WARP_INVERSE_MAP) on the CPU path
+  // and batch_roi_warp_kernel on the GPU path evaluate per pixel.
+  turbo_ocr::Box box{};
+  box[0] = {10, 20};
+  box[1] = {110, 20};
+  box[2] = {110, 44};
+  box[3] = {10, 44};
+  const auto ct = turbo_ocr::compute_crop_transform(box, 48, kMaxRecWidth);
+  CHECK_FALSE(ct.vertical);
+  CHECK(ct.crop_width == 200);  // ceil(48 * 100/24)
+
+  const auto apply = [&](float x, float y, float &sx, float &sy) {
+    const float w = ct.M_inv[6] * x + ct.M_inv[7] * y + ct.M_inv[8];
+    sx = (ct.M_inv[0] * x + ct.M_inv[1] * y + ct.M_inv[2]) / w;
+    sy = (ct.M_inv[3] * x + ct.M_inv[4] * y + ct.M_inv[5]) / w;
+  };
+  const float dst[4][2] = {{0, 0},
+                           {static_cast<float>(ct.crop_width), 0},
+                           {static_cast<float>(ct.crop_width), 48},
+                           {0, 48}};
+  const float src[4][2] = {{10, 20}, {110, 20}, {110, 44}, {10, 44}};
+  for (int k = 0; k < 4; ++k) {
+    float sx = 0, sy = 0;
+    apply(dst[k][0], dst[k][1], sx, sy);
+    CHECK(sx == Catch::Approx(src[k][0]).margin(1e-3));
+    CHECK(sy == Catch::Approx(src[k][1]).margin(1e-3));
+  }
+}
+
+TEST_CASE("compute_crop_transform swaps vertical boxes upright", "[rec_geometry]") {
+  // 20x100 vertical box: crop_w/crop_h swap, so the content renders wide
+  // (ceil(48 * 100/20) = 240), not squeezed into a 10px-wide strip.
+  turbo_ocr::Box box{};
+  box[0] = {50, 10};
+  box[1] = {70, 10};
+  box[2] = {70, 110};
+  box[3] = {50, 110};
+  const auto ct = turbo_ocr::compute_crop_transform(box, 48, kMaxRecWidth);
+  CHECK(ct.vertical);
+  CHECK(ct.crop_width == 240);
 }

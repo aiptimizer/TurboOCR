@@ -1,9 +1,9 @@
 #include "turbo_ocr/detection/cpu_paddle_det.h"
 #include "turbo_ocr/detection/det_config.h"
 #include "turbo_ocr/detection/det_postprocess.h"
+#include "turbo_ocr/common/env_utils.h"
 #include "turbo_ocr/common/stage_profiler.h"
 
-#include <cstdlib>
 #include <opencv2/imgproc.hpp>
 
 using namespace turbo_ocr;
@@ -16,10 +16,7 @@ namespace {
 // per-channel MatExpr path, so it sits behind an env flag for A/B until the
 // lead confirms box count + text_sig are unchanged.
 bool det_fused_pre() {
-  static const bool e = [] {
-    const char *v = std::getenv("TURBO_DET_FUSED_PRE");
-    return v && v[0] == '1';
-  }();
+  static const bool e = turbo_ocr::env::env_enabled("TURBO_DET_FUSED_PRE");
   return e;
 }
 } // namespace
@@ -55,42 +52,45 @@ std::vector<Box> CpuPaddleDet::run(const cv::Mat &img) {
     turbo_ocr::prof::Scope _s(turbo_ocr::prof::DET_PRE);
     cv::resize(img, resized_, cv::Size(resize_w, resize_h));
 
+    // Channel order is BGR: the det models are exported with DecodeImage
+    // img_mode: BGR, and mean/std [0.485,0.456,0.406]/[0.229,0.224,0.225]
+    // apply POSITIONALLY to that BGR tensor (channel 0 = B gets 0.485).
+    // This matches cuda_fused_resize_normalize_det exactly — feeding RGB
+    // here measurably loses marginal detections vs the GPU path.
+    constexpr float kMean0 = 0.485f, kMean1 = 0.456f, kMean2 = 0.406f;
+    constexpr float kStd0 = 0.229f, kStd1 = 0.224f, kStd2 = 0.225f;
     if (det_fused_pre()) {
-      // Single pass: BGR uint8 -> planar RGB float with per-channel
+      // Single pass: BGR uint8 -> planar BGR float with per-channel
       // (1/(255*std)) scale and (-mean/std) shift, written into the NCHW buffer.
       cv::split(resized_, bgr_);
-      cv::Mat r_plane(resize_h, resize_w, CV_32F, input_data_buf_.data());
-      cv::Mat g_plane(resize_h, resize_w, CV_32F,
-                      input_data_buf_.data() + plane_size);
-      cv::Mat b_plane(resize_h, resize_w, CV_32F,
-                      input_data_buf_.data() + 2 * plane_size);
-      bgr_[2].convertTo(r_plane, CV_32F, 1.0 / (255.0 * 0.229), -0.485 / 0.229);
-      bgr_[1].convertTo(g_plane, CV_32F, 1.0 / (255.0 * 0.224), -0.456 / 0.224);
-      bgr_[0].convertTo(b_plane, CV_32F, 1.0 / (255.0 * 0.225), -0.406 / 0.225);
+      cv::Mat p0(resize_h, resize_w, CV_32F, input_data_buf_.data());
+      cv::Mat p1(resize_h, resize_w, CV_32F,
+                 input_data_buf_.data() + plane_size);
+      cv::Mat p2(resize_h, resize_w, CV_32F,
+                 input_data_buf_.data() + 2 * plane_size);
+      bgr_[0].convertTo(p0, CV_32F, 1.0 / (255.0 * kStd0), -kMean0 / kStd0);
+      bgr_[1].convertTo(p1, CV_32F, 1.0 / (255.0 * kStd1), -kMean1 / kStd1);
+      bgr_[2].convertTo(p2, CV_32F, 1.0 / (255.0 * kStd2), -kMean2 / kStd2);
     } else {
       // Default path: same two-step normalize as the original (u8/255, then the
       // folded (x-mean)/std convert), but cv::split writes straight into the
       // NCHW buffer planes and the per-channel normalize runs in place -- no
-      // split temporaries, no MatExpr temporaries, no final memcpy. The output
-      // is byte-identical to the original convert/split/MatExpr/memcpy sequence
-      // (OpenCV folds `(x-mean)/std` into exactly this convertTo, verified).
+      // split temporaries, no MatExpr temporaries, no final memcpy.
       resized_.convertTo(float_img_, CV_32F, 1.0 / 255.0);
-      cv::Mat r_plane(resize_h, resize_w, CV_32F, input_data_buf_.data());
-      cv::Mat g_plane(resize_h, resize_w, CV_32F,
-                      input_data_buf_.data() + plane_size);
-      cv::Mat b_plane(resize_h, resize_w, CV_32F,
-                      input_data_buf_.data() + 2 * plane_size);
+      cv::Mat p0(resize_h, resize_w, CV_32F, input_data_buf_.data());
+      cv::Mat p1(resize_h, resize_w, CV_32F,
+                 input_data_buf_.data() + plane_size);
+      cv::Mat p2(resize_h, resize_w, CV_32F,
+                 input_data_buf_.data() + 2 * plane_size);
 
-      // NCHW, RGB order (PaddleOCR convention): route the BGR split so
-      // ch0(B)->plane2, ch1(G)->plane1, ch2(R)->plane0.
-      cv::Mat planes[3] = {b_plane, g_plane, r_plane};
+      // cv::Mat BGR split lands positionally: ch0(B)->plane0, ch1(G)->plane1,
+      // ch2(R)->plane2.
+      cv::Mat planes[3] = {p0, p1, p2};
       cv::split(float_img_, planes);
 
-      constexpr float kMeanB = 0.406f, kMeanG = 0.456f, kMeanR = 0.485f;
-      constexpr float kStdB = 0.225f, kStdG = 0.224f, kStdR = 0.229f;
-      b_plane.convertTo(b_plane, CV_32F, 1.0 / kStdB, -1.0 * kMeanB / kStdB);
-      g_plane.convertTo(g_plane, CV_32F, 1.0 / kStdG, -1.0 * kMeanG / kStdG);
-      r_plane.convertTo(r_plane, CV_32F, 1.0 / kStdR, -1.0 * kMeanR / kStdR);
+      p0.convertTo(p0, CV_32F, 1.0 / kStd0, -1.0 * kMean0 / kStd0);
+      p1.convertTo(p1, CV_32F, 1.0 / kStd1, -1.0 * kMean1 / kStd1);
+      p2.convertTo(p2, CV_32F, 1.0 / kStd2, -1.0 * kMean2 / kStd2);
     }
     input_shape_buf_ = {1, 3, static_cast<int64_t>(resize_h),
                         static_cast<int64_t>(resize_w)};

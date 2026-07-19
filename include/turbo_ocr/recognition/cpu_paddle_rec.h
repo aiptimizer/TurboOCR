@@ -56,9 +56,18 @@ private:
   int actual_seq_len_ = 600;
   int actual_num_classes_ = 20000;
 
-  // Preprocess a crop into NCHW float buffer
-  void preprocess_crop(const cv::Mat &crop, int target_w,
-                       std::vector<float> &buffer);
+  // Recognizer input width for a box: natural content width (after the
+  // vertical-text swap) floored at kMinRecWidth, capped at kMaxRecWidth.
+  [[nodiscard]] int rec_target_width(const Box &box) const;
+
+  // Warp one detection quad from the FULL image straight into a NCHW float
+  // buffer of width target_w: content columns rendered by a single
+  // perspective warp, remaining columns zero-padded (mid-gray). One resample,
+  // mirroring the GPU batch_roi_warp kernel — the old crop-then-resize path
+  // resampled twice and stretched sub-kMinRecWidth crops, destroying small
+  // glyphs.
+  void preprocess_box(const cv::Mat &img, const Box &box, int target_w,
+                      std::vector<float> &buffer);
 
   // Batched path: bucket crops by rounded width, one ORT Run per bucket batch.
   [[nodiscard]] std::vector<std::pair<std::string, float>>
@@ -67,6 +76,8 @@ private:
   // Reused across batches to avoid per-call heap churn.
   std::vector<float> batch_buf_;   // {B,3,48,pad_w}
   std::vector<float> scratch_chw_; // {3,48,target_w} for one crop
+  cv::Mat warped_;                 // preprocess_box warp output (u8 BGR)
+  cv::Mat float_crop_;             // preprocess_box normalized float crop
 };
 
 } // namespace turbo_ocr::recognition

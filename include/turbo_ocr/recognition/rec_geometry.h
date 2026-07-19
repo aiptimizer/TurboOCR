@@ -21,6 +21,13 @@ namespace turbo_ocr::recognition {
 // accuracy-gated experiment, not a local fix.
 inline constexpr int kMaxRecWidth = 4000;
 
+// Narrowest crop width fed to any recognizer. Tiny boxes (single characters,
+// checkbox marks) keep their natural width down to this floor and are
+// right-padded — never stretched to a wider canvas, which smears the glyph
+// beyond recognition. Both the TRT and ORT paths must use this same floor or
+// their outputs diverge on exactly those small boxes.
+inline constexpr int kMinRecWidth = 32;
+
 // Fixed bucket table for the TRT engine's optimization profiles. The last
 // bucket must equal kMaxRecWidth so every clamped width has a bucket.
 inline constexpr std::array kRecWidthBuckets = {320, 480, 800, 1200,
