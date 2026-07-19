@@ -37,6 +37,45 @@ macro(turbo_find_protobuf)
   endif()
 endmacro()
 
+# Shared by the CPU and GPU arms: protobuf/gRPC discovery + ocr.proto codegen.
+# A macro (not function) on purpose — the GRPC_LIBRARIES / PROTO_GEN_* /
+# GRPC_GEN_* variables must land in the calling scope, exactly as the two
+# previously hand-duplicated blocks did.
+macro(turbo_setup_grpc_codegen)
+  turbo_find_protobuf()
+  find_package(gRPC CONFIG QUIET)
+  if(NOT gRPC_FOUND)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(GRPC REQUIRED grpc++ grpc)
+    set(GRPC_LIBRARIES ${GRPC_LINK_LIBRARIES})
+    find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin)
+  else()
+    set(GRPC_LIBRARIES gRPC::grpc++)
+    get_target_property(GRPC_CPP_PLUGIN gRPC::grpc_cpp_plugin LOCATION)
+  endif()
+
+  set(PROTO_SRC_DIR "${CMAKE_SOURCE_DIR}/proto")
+  set(PROTO_GEN_DIR "${CMAKE_BINARY_DIR}/proto_gen")
+  file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
+  set(PROTO_FILE "${PROTO_SRC_DIR}/ocr.proto")
+  set(PROTO_GEN_CC "${PROTO_GEN_DIR}/ocr.pb.cc")
+  set(PROTO_GEN_H "${PROTO_GEN_DIR}/ocr.pb.h")
+  set(GRPC_GEN_CC "${PROTO_GEN_DIR}/ocr.grpc.pb.cc")
+  set(GRPC_GEN_H "${PROTO_GEN_DIR}/ocr.grpc.pb.h")
+
+  add_custom_command(
+      OUTPUT ${PROTO_GEN_CC} ${PROTO_GEN_H} ${GRPC_GEN_CC} ${GRPC_GEN_H}
+      COMMAND protobuf::protoc
+          --proto_path=${PROTO_SRC_DIR}
+          --cpp_out=${PROTO_GEN_DIR}
+          --grpc_out=${PROTO_GEN_DIR}
+          --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
+          ${PROTO_FILE}
+      DEPENDS ${PROTO_FILE}
+      COMMENT "Generating protobuf/gRPC sources"
+  )
+endmacro()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -326,40 +365,8 @@ if(USE_CPU_ONLY)
     endif()
     message(STATUS "ONNX Runtime: ${ONNXRUNTIME_LIB}")
 
-    # Protobuf + gRPC (same discovery logic as GPU build).
-    turbo_find_protobuf()
-    find_package(gRPC CONFIG QUIET)
-    if(NOT gRPC_FOUND)
-        find_package(PkgConfig REQUIRED)
-        pkg_check_modules(GRPC REQUIRED grpc++ grpc)
-        set(GRPC_LIBRARIES ${GRPC_LINK_LIBRARIES})
-        find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin)
-    else()
-        set(GRPC_LIBRARIES gRPC::grpc++)
-        get_target_property(GRPC_CPP_PLUGIN gRPC::grpc_cpp_plugin LOCATION)
-    endif()
-
-    # Proto codegen
-    set(PROTO_SRC_DIR "${CMAKE_SOURCE_DIR}/proto")
-    set(PROTO_GEN_DIR "${CMAKE_BINARY_DIR}/proto_gen")
-    file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
-    set(PROTO_FILE "${PROTO_SRC_DIR}/ocr.proto")
-    set(PROTO_GEN_CC "${PROTO_GEN_DIR}/ocr.pb.cc")
-    set(PROTO_GEN_H "${PROTO_GEN_DIR}/ocr.pb.h")
-    set(GRPC_GEN_CC "${PROTO_GEN_DIR}/ocr.grpc.pb.cc")
-    set(GRPC_GEN_H "${PROTO_GEN_DIR}/ocr.grpc.pb.h")
-
-    add_custom_command(
-        OUTPUT ${PROTO_GEN_CC} ${PROTO_GEN_H} ${GRPC_GEN_CC} ${GRPC_GEN_H}
-        COMMAND protobuf::protoc
-            --proto_path=${PROTO_SRC_DIR}
-            --cpp_out=${PROTO_GEN_DIR}
-            --grpc_out=${PROTO_GEN_DIR}
-            --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
-            ${PROTO_FILE}
-        DEPENDS ${PROTO_FILE}
-        COMMENT "Generating protobuf/gRPC sources (CPU)"
-    )
+    # Protobuf + gRPC discovery + proto codegen (shared with the GPU arm).
+    turbo_setup_grpc_codegen()
 
     # --- CPU library ---
     add_library(turbo_ocr_cpu STATIC
@@ -439,49 +446,20 @@ else()
 
     set(TENSORRT_DIR "/usr/local/tensorrt" CACHE PATH "Path to TensorRT")
 
-    # Protobuf + gRPC (see turbo_find_protobuf for the CONFIG/MODULE rationale).
-    turbo_find_protobuf()
-    find_package(gRPC CONFIG QUIET)
-    if(NOT gRPC_FOUND)
-        find_package(PkgConfig REQUIRED)
-        pkg_check_modules(GRPC REQUIRED grpc++ grpc)
-        set(GRPC_LIBRARIES ${GRPC_LINK_LIBRARIES})
-        find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin)
-    else()
-        set(GRPC_LIBRARIES gRPC::grpc++)
-        get_target_property(GRPC_CPP_PLUGIN gRPC::grpc_cpp_plugin LOCATION)
-    endif()
-
-    # Proto codegen
-    set(PROTO_SRC_DIR "${CMAKE_SOURCE_DIR}/proto")
-    set(PROTO_GEN_DIR "${CMAKE_BINARY_DIR}/proto_gen")
-    file(MAKE_DIRECTORY ${PROTO_GEN_DIR})
-    set(PROTO_FILE "${PROTO_SRC_DIR}/ocr.proto")
-    set(PROTO_GEN_CC "${PROTO_GEN_DIR}/ocr.pb.cc")
-    set(PROTO_GEN_H "${PROTO_GEN_DIR}/ocr.pb.h")
-    set(GRPC_GEN_CC "${PROTO_GEN_DIR}/ocr.grpc.pb.cc")
-    set(GRPC_GEN_H "${PROTO_GEN_DIR}/ocr.grpc.pb.h")
-
-    add_custom_command(
-        OUTPUT ${PROTO_GEN_CC} ${PROTO_GEN_H} ${GRPC_GEN_CC} ${GRPC_GEN_H}
-        COMMAND protobuf::protoc
-            --proto_path=${PROTO_SRC_DIR}
-            --cpp_out=${PROTO_GEN_DIR}
-            --grpc_out=${PROTO_GEN_DIR}
-            --plugin=protoc-gen-grpc=${GRPC_CPP_PLUGIN}
-            ${PROTO_FILE}
-        DEPENDS ${PROTO_FILE}
-        COMMENT "Generating protobuf/gRPC sources"
-    )
+    # Protobuf + gRPC discovery + proto codegen (shared with the CPU arm).
+    turbo_setup_grpc_codegen()
 
     # CUDA
     enable_language(CUDA)
     set(CMAKE_CUDA_STANDARD 20)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    # Compute capabilities to bake into the GPU binary. Default targets
-    # sm_120 (Blackwell consumer, RTX 50-series) only — the full multi-arch
-    # fat binary balloons to ~12.5 GB and PTX-JIT cold-start adds 10-15 s.
-    # Override via -DCMAKE_CUDA_ARCHITECTURES="86;89;120" for other GPUs.
+    # Compute capabilities baked into the GPU binary. When not set on the
+    # command line, CMake pre-fills CMAKE_CUDA_ARCHITECTURES with nvcc's
+    # default arch during enable_language() — the oldest arch the toolkit
+    # supports (sm_75 on CUDA 13), whose embedded PTX forward-JITs onto every
+    # newer GPU. That is why the published image runs on Turing and up.
+    # Override for a native build of your GPU (skips JIT, e.g. RTX 50):
+    #   -DCMAKE_CUDA_ARCHITECTURES=120
     # Reference SMs:
     #   75   Turing            (T4, RTX 20, GTX 16)
     #   80   Ampere DC         (A100)
@@ -490,9 +468,7 @@ else()
     #   90   Hopper            (H100, H200, GH200)              [needs CUDA 12.0+]
     #   100  Blackwell DC      (B100, B200, B300, GB200)        [needs CUDA 12.8+]
     #   120  Blackwell consumer (RTX 50-series)                 [needs CUDA 12.8+]
-    if(NOT CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "120" CACHE STRING "Comma-separated CUDA SMs to build for")
-    endif()
+    message(STATUS "CUDA architectures: ${CMAKE_CUDA_ARCHITECTURES}")
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -lineinfo --expt-relaxed-constexpr")
 
     # --- ONNX Runtime (GPU build: CUDA execution provider REQUIRED) ---

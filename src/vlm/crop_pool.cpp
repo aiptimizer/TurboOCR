@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 
 #include "simdutf.h"
+#include "turbo_ocr/common/env_utils.h"
 
 namespace turbo_ocr::vlm {
 
@@ -31,12 +32,6 @@ struct CurlGlobalInit {
     ~CurlGlobalInit() { curl_global_cleanup(); }
 };
 CurlGlobalInit g_curl_init;
-
-int get_env_int(const char *k, int dflt) {
-    const char *v = std::getenv(k);
-    if (!v || !v[0]) return dflt;
-    try { return std::stoi(v); } catch (...) { return dflt; }
-}
 
 long steady_now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -151,8 +146,8 @@ VLMCropPool &VLMCropPool::instance() {
 // ---------------------------------------------------------------------------
 
 VLMCropPool::VLMCropPool()
-    : max_concurrency_(std::max(1, get_env_int("VLM_GLOBAL_CONCURRENCY", 50))),
-      max_retries_(std::max(0, get_env_int("VLM_MAX_RETRIES", 2))) {
+    : max_concurrency_(turbo_ocr::env::env_int("VLM_GLOBAL_CONCURRENCY", 50, 1, 4096)),
+      max_retries_(turbo_ocr::env::env_int("VLM_MAX_RETRIES", 2, 0, 100)) {
     // Pipe for waking the worker when new items are queued.
     // Both ends must be non-blocking: the reader uses drain_pipe() which loops
     // until EAGAIN, and the writer uses write() from submit() which must not

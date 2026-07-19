@@ -69,6 +69,23 @@ PageImageFormat parse_page_image_format(const char *s) noexcept {
   return PageImageFormat::Png;
 }
 
+bool is_valid_page_image_format(const char *s) noexcept {
+  if (!s || !*s) return false;
+  // Round-trip through the lenient parser: a value is valid iff parsing it
+  // does not merely hit the Png fallback.
+  const PageImageFormat f = parse_page_image_format(s);
+  if (f != PageImageFormat::Png) return true;
+  auto lower_eq = [](const char *a, const char *b) noexcept {
+    while (*a && *b) {
+      char ca = static_cast<char>((*a >= 'A' && *a <= 'Z') ? *a + 32 : *a);
+      if (ca != *b) return false;
+      ++a; ++b;
+    }
+    return *a == '\0' && *b == '\0';
+  };
+  return lower_eq(s, "png");
+}
+
 const char *page_image_format_name(PageImageFormat fmt) noexcept {
   switch (fmt) {
     case PageImageFormat::Jpeg: return "jpeg";

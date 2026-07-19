@@ -20,27 +20,19 @@
 
 #include "simdutf.h"
 #include "turbo_ocr/common/cuda_check.h"
+#include "turbo_ocr/common/env_utils.h"
 #include "turbo_ocr/vlm/crop_pool.h"
 
 namespace turbo_ocr::table {
 
 namespace {
 
-const char *get_env(const char *k, const char *dflt) {
-  const char *v = std::getenv(k);
-  if (v == nullptr || v[0] == '\0') return dflt;
-  return v;
-}
+using env::env_int;
+using env::env_or;
 
 bool use_pool_backend() {
   const char *v = std::getenv("VLM_BACKEND");
   return !(v && v[0] == 'l');
-}
-
-int get_env_int(const char *k, int dflt) {
-  const char *v = std::getenv(k);
-  if (v == nullptr || v[0] == '\0') return dflt;
-  try { return std::stoi(v); } catch (...) { return dflt; }
 }
 
 std::string to_base64(const std::vector<uint8_t> &bin) {
@@ -388,18 +380,18 @@ bool VLMTable::init() {
   const char *url_env = std::getenv("VLLM_TABLE_BASE_URL");
   base_url_ = (url_env && url_env[0])
                   ? std::string(url_env)
-                  : std::string(get_env("VLLM_BASE_URL", "http://localhost:8000"));
+                  : env_or("VLLM_BASE_URL", "http://localhost:8000");
   while (!base_url_.empty() && base_url_.back() == '/') base_url_.pop_back();
 
   const char *model_env = std::getenv("VLLM_TABLE_MODEL");
   model_ = (model_env && model_env[0])
                ? std::string(model_env)
-               : std::string(get_env("VLLM_MODEL", "PaddleOCR-VL-1.6-0.9B"));
+               : env_or("VLLM_MODEL", "PaddleOCR-VL-1.6-0.9B");
 
-  prompt_     = get_env("VLLM_TABLE_PROMPT", "Table Recognition:");
-  batch_      = std::max(1, get_env_int("VLLM_TABLE_BATCH", 8));
-  timeout_s_  = std::max(1, get_env_int("VLLM_TABLE_TIMEOUT_S", 60));
-  max_tokens_ = std::max(64, get_env_int("VLLM_TABLE_MAX_TOKENS", 4096));
+  prompt_     = env_or("VLLM_TABLE_PROMPT", "Table Recognition:");
+  batch_      = env_int("VLLM_TABLE_BATCH", 8, 1, 1024);
+  timeout_s_  = env_int("VLLM_TABLE_TIMEOUT_S", 60, 1, 3600);
+  max_tokens_ = env_int("VLLM_TABLE_MAX_TOKENS", 4096, 64, 65535);
 
   HttpResp r = http_get(base_url_ + "/v1/models", 5);
   if (!r.ok) {
@@ -504,7 +496,7 @@ VLMTable::run(const GpuImage &page, const std::vector<Box> &regions,
   }
 
   const int n = static_cast<int>(regions.size());
-  const int png_threads = std::max(1, get_env_int("VLM_PNG_THREADS", 4));
+  const int png_threads = env_int("VLM_PNG_THREADS", 4, 1, 256);
 
   // PNG-encode all crops in parallel.
   std::vector<std::vector<uint8_t>> crops_png(n);
@@ -591,7 +583,7 @@ VLMTable::submit_async(const GpuImage &page,
     return futs;
   }
 
-  const int png_threads = std::max(1, get_env_int("VLM_PNG_THREADS", 4));
+  const int png_threads = env_int("VLM_PNG_THREADS", 4, 1, 256);
   const int workers = std::min(png_threads, n);
   std::vector<std::vector<uint8_t>> crops_png(n);
   {

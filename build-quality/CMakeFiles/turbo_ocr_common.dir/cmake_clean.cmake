@@ -1,0 +1,41 @@
+file(REMOVE_RECURSE
+  "CMakeFiles/turbo_ocr_common.dir/src/decode/fast_png_decoder.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/decode/fast_png_decoder.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/detection/det_postprocess.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/detection/det_postprocess.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/docassembly/repetition_guard.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/docassembly/repetition_guard.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/docassembly/table_merge.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/docassembly/table_merge.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/docassembly/title_level.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/docassembly/title_level.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/formula/cjk_stats.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/formula/cjk_stats.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/layout/child_blocks.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/layout/child_blocks.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/layout/match_unsorted.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/layout/match_unsorted.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/layout/reading_order.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/layout/reading_order.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/layout/text_line_cluster.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/layout/text_line_cluster.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/output/markdown_export.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/output/markdown_export.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/recognition/crop_utils.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/recognition/crop_utils.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/recognition/ctc_decode.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/recognition/ctc_decode.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/src/routing/routing_config.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/src/routing/routing_config.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/third_party/clipper/clipper.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/third_party/clipper/clipper.cpp.o.d"
+  "CMakeFiles/turbo_ocr_common.dir/third_party/simdutf/simdutf.cpp.o"
+  "CMakeFiles/turbo_ocr_common.dir/third_party/simdutf/simdutf.cpp.o.d"
+  "libturbo_ocr_common.a"
+  "libturbo_ocr_common.pdb"
+)
+
+# Per-language clean rules from dependency scanning.
+foreach(lang CXX)
+  include(CMakeFiles/turbo_ocr_common.dir/cmake_clean_${lang}.cmake OPTIONAL)
+endforeach()

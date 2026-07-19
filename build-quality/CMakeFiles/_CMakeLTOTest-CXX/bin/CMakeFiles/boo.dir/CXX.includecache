@@ -1,0 +1,10 @@
+#IncludeRegexLine: ^[ 	]*[#%][ 	]*(include|import)[ 	]*[<"]([^">]+)([">])
+
+#IncludeRegexScan: ^.*$
+
+#IncludeRegexComplain: ^$
+
+#IncludeRegexTransform: 
+
+/home/nataell/code/epAiland/paddle-highspeed-cpp/build-quality/CMakeFiles/_CMakeLTOTest-CXX/src/main.cpp
+

@@ -21,23 +21,15 @@
 
 #include "simdutf.h"
 #include "turbo_ocr/common/cuda_check.h"
+#include "turbo_ocr/common/env_utils.h"
 #include "turbo_ocr/vlm/crop_pool.h"
 
 namespace turbo_ocr::formula {
 
 namespace {
 
-const char *get_env(const char *k, const char *dflt) {
-  const char *v = std::getenv(k);
-  if (v == nullptr || v[0] == '\0') return dflt;
-  return v;
-}
-
-int get_env_int(const char *k, int dflt) {
-  const char *v = std::getenv(k);
-  if (v == nullptr || v[0] == '\0') return dflt;
-  try { return std::stoi(v); } catch (...) { return dflt; }
-}
+using env::env_int;
+using env::env_or;
 
 bool use_pool_backend() {
   const char *v = std::getenv("VLM_BACKEND");
@@ -195,18 +187,18 @@ VLMFormula::VLMFormula() = default;
 VLMFormula::~VLMFormula() noexcept = default;
 
 bool VLMFormula::load_model_dir(const std::string &/*model_dir*/) {
-  base_url_   = get_env("VLLM_BASE_URL", "http://localhost:8000");
+  base_url_   = env_or("VLLM_BASE_URL", "http://localhost:8000");
   while (!base_url_.empty() && base_url_.back() == '/') base_url_.pop_back();
   // Default to PaddleOCR-VL-1.6 (96.33% OmniDocBench, architecturally
   // identical to 1.5 → drop-in). Its formula head is trained on the exact
   // "Formula Recognition:" prompt; a free-form instruction degrades it. Point
   // VLLM_MODEL/VLLM_FORMULA_PROMPT at a MiniCPM endpoint to override.
-  model_      = get_env("VLLM_MODEL", "PaddleOCR-VL-1.6-0.9B");
-  prompt_     = get_env("VLLM_FORMULA_PROMPT", "Formula Recognition:");
-  batch_      = std::max(1, get_env_int("VLLM_FORMULA_BATCH", 8));
-  timeout_s_  = std::max(1, get_env_int("VLLM_FORMULA_TIMEOUT_S", 30));
-  max_tokens_ = std::max(16, get_env_int("VLLM_FORMULA_MAX_TOKENS", 512));
-  png_threads_ = std::max(1, get_env_int("VLM_PNG_THREADS", 4));
+  model_      = env_or("VLLM_MODEL", "PaddleOCR-VL-1.6-0.9B");
+  prompt_     = env_or("VLLM_FORMULA_PROMPT", "Formula Recognition:");
+  batch_      = env_int("VLLM_FORMULA_BATCH", 8, 1, 1024);
+  timeout_s_  = env_int("VLLM_FORMULA_TIMEOUT_S", 30, 1, 3600);
+  max_tokens_ = env_int("VLLM_FORMULA_MAX_TOKENS", 512, 16, 65535);
+  png_threads_ = env_int("VLM_PNG_THREADS", 4, 1, 256);
 
   HttpResp r = http_get(base_url_ + "/v1/models", 5);
   if (!r.ok) {

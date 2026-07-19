@@ -118,13 +118,26 @@ std::string parse_image_query_params(const drogon::HttpRequestPtr &req,
   image_mode = PdfImageMode::None;
   encode_opts = {};
 
+  // Explicit-but-unknown values 400 (same contract as dpi/quality below);
+  // only an absent parameter selects the default.
   auto images_str = req->getParameter("images");
-  if (!images_str.empty())
-    image_mode = parse_image_mode(std::string(images_str));
+  if (!images_str.empty()) {
+    if (images_str == "0" || images_str == "false" || images_str == "off" ||
+        images_str == "no" || images_str == "none") {
+      image_mode = PdfImageMode::None;
+    } else {
+      image_mode = parse_image_mode(std::string(images_str));
+      if (image_mode == PdfImageMode::None)
+        return "images must be inline (or 0/none to disable)";
+    }
+  }
 
   auto fmt_str = req->getParameter("format");
-  if (!fmt_str.empty())
+  if (!fmt_str.empty()) {
+    if (!pdf::is_valid_page_image_format(fmt_str.c_str()))
+      return "format must be one of png, jpeg, webp";
     encode_opts.format = pdf::parse_page_image_format(fmt_str.c_str());
+  }
 
   // lossless: defaults to true (set in EncodeOptions).
   auto lossless_str = req->getParameter("lossless");
@@ -459,6 +472,132 @@ make_pdf_page_markdown_renderer() {
   };
 }
 
+// Everything /ocr/pdf accepts, parsed and validated. The GPU and CPU
+// handlers previously each hand-maintained this ~120-line phase and had
+// already drifted (the CPU copy lost the want_text handling); the single
+// parser is the drift fix.
+struct PdfRequestParams {
+  server::InferOptions opts;
+  bool want_markdown = false;
+  bool md_as_pages = false;
+  bool autorotate = false;
+  int dpi = 0;
+  pdf::PdfMode mode = pdf::PdfMode::Ocr;
+  PdfImageMode image_mode = PdfImageMode::None;
+  pdf::EncodeOptions encode_opts;
+};
+
+// Returns false after answering the request with a 400 through `callback`.
+// allow_image_only mirrors parse_query_options: the GPU route accepts
+// text=0 (layout-only / image-only responses), the CPU route does not.
+[[nodiscard]] bool parse_pdf_request(
+    const drogon::HttpRequestPtr &req,
+    std::function<void(const drogon::HttpResponsePtr &)> &callback,
+    bool layout_available, bool table_avail, bool formula_avail,
+    bool doc_ori_available, int default_dpi, pdf::PdfMode default_pdf_mode,
+    bool allow_image_only, PdfRequestParams &out) {
+  auto fail = [&](const char *code, const std::string &msg) {
+    callback(server::error_response(drogon::k400BadRequest, code, msg));
+    return false;
+  };
+
+  if (auto r = server::parse_query_options(req, layout_available, &out.opts,
+                                           allow_image_only);
+      !r.error.empty())
+    return fail(r.error_code.c_str(), r.error);
+
+  // ?markdown=1: run the /ocr/markdown pipeline per page and return the
+  // assembled Markdown document instead of the JSON envelope.
+  if (auto err = server::parse_bool_query(req, "markdown", &out.want_markdown);
+      !err.empty())
+    return fail("INVALID_PARAMETER", err);
+  if (auto err = server::parse_bool_query(req, "as_pages", &out.md_as_pages);
+      !err.empty())
+    return fail("INVALID_PARAMETER", err);
+  if (out.md_as_pages && !out.want_markdown)
+    return fail("INVALID_PARAMETER", "as_pages=1 requires markdown=1");
+  if (out.want_markdown) {
+    if (!layout_available)
+      return fail("LAYOUT_DISABLED",
+                  "markdown=1 requires the layout model (do not start with "
+                  "DISABLE_LAYOUT=1)");
+    if (!out.opts.want_text)
+      return fail("INVALID_PARAMETER",
+                  "text=0 cannot be combined with markdown=1 (markdown needs "
+                  "the text)");
+    out.opts.want_layout = true;
+    out.opts.want_reading_order = true;
+    // Faithful-export defaults (mirror /ocr/markdown): stages the server
+    // actually loaded run unless the query explicitly disabled them, so a
+    // text-only server produces honest text markdown rather than silently
+    // dropping table/formula sections. Safe in every mode — geometric pages
+    // recognize tables/formulas on the rendered image while KEEPING the exact
+    // text layer (run_layout_and_structure), so structure never replaces
+    // born-digital text.
+    if (req->getParameter("tables").empty()) out.opts.want_tables = table_avail;
+    if (req->getParameter("formulas").empty())
+      out.opts.want_formulas = formula_avail;
+  }
+
+  if (reject_unknown_query_params(
+          req, {"layout", "reading_order", "as_blocks", "tables", "formulas",
+                "text", "dpi", "mode", "markdown", "as_pages",
+                "images", "format", "lossless", "png_compression", "quality",
+                "max_side", "autorotate"}, callback))
+    return false;
+  if (auto r = server::check_structure_backends(out.opts, table_avail,
+                                                formula_avail);
+      !r.error.empty())
+    return fail(r.error_code.c_str(), r.error);
+
+  auto dpi_str = req->getParameter("dpi");
+  // Absent -> default; present-but-garbage/overflow -> -1 -> rejected below
+  // (don't silently fall back to default on a bad explicit value).
+  out.dpi = dpi_str.empty() ? default_dpi : query_int(std::string(dpi_str), -1);
+  if (out.dpi < kMinPdfDpi || out.dpi > kMaxPdfDpi)
+    return fail("INVALID_DPI", std::format("DPI must be between {} and {}",
+                                           kMinPdfDpi, kMaxPdfDpi));
+
+  out.mode = default_pdf_mode;
+  auto mode_str = req->getParameter("mode");
+  if (!mode_str.empty()) {
+    if (!pdf::is_valid_pdf_mode(mode_str))
+      return fail("INVALID_PARAMETER",
+                  "mode must be one of ocr, geometric, auto, auto_verified");
+    out.mode = pdf::parse_pdf_mode(mode_str.c_str(), default_pdf_mode);
+  }
+
+  // Page-image export params (?images=inline&format=...&quality=...)
+  if (auto err = parse_image_query_params(req, out.image_mode, out.encode_opts);
+      !err.empty())
+    return fail("INVALID_PARAMETER", err);
+  if (out.want_markdown && out.image_mode != PdfImageMode::None)
+    return fail("INVALID_PARAMETER",
+                "images= page-image export is not available with markdown=1 "
+                "(figure crops are already embedded in the markdown)");
+
+  // text=0 on /ocr/pdf must produce SOMETHING: a layout-only run or inline
+  // page images (the fast pdf->images path). Bare text=0 returns empty pages.
+  if (allow_image_only && !out.opts.want_text && !out.opts.want_layout &&
+      out.image_mode != PdfImageMode::Inline)
+    return fail("INVALID_PARAMETER",
+                "text=0 without layout=1 or images=inline would return empty "
+                "pages; add layout=1 (layout-only) and/or images=inline "
+                "(page images)");
+
+  // autorotate=1: de-rotate each OCR'd page upright using the doc-orientation
+  // model. Rejected when the model isn't loaded (parity with LAYOUT_DISABLED).
+  if (auto err = server::parse_bool_query(req, "autorotate", &out.autorotate);
+      !err.empty())
+    return fail("INVALID_PARAMETER", err);
+  if (out.autorotate && !doc_ori_available)
+    return fail("AUTOROTATE_DISABLED",
+                "autorotate=1 requires the doc-orientation model "
+                "(models/doc_ori.onnx); it was not found at startup");
+
+  return true;
+}
+
 } // namespace
 
 #ifndef USE_CPU_ONLY
@@ -493,135 +632,25 @@ void register_pdf_route(server::WorkPool &pool,
     if (!extract_pdf_bytes(req, *pdf_buf, pdf_ptr, pdf_len, callback))
       return;
 
-    server::InferOptions opts;
-    if (auto r = server::parse_query_options(req, layout_available, &opts,
-                                             /*allow_image_only=*/true);
-        !r.error.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       r.error_code.c_str(), r.error));
+    PdfRequestParams p;
+    if (!parse_pdf_request(req, callback, layout_available, table_avail,
+                           formula_avail, doc_ori_available, default_dpi,
+                           default_pdf_mode, /*allow_image_only=*/true, p))
       return;
-    }
 
-    // ?markdown=1: run the /ocr/markdown pipeline per page and return the
-    // assembled Markdown document instead of the JSON envelope.
-    bool want_markdown = false;
-    bool md_as_pages = false;
-    if (auto err = server::parse_bool_query(req, "markdown", &want_markdown);
-        !err.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       "INVALID_PARAMETER", err));
-      return;
-    }
-    if (auto err = server::parse_bool_query(req, "as_pages", &md_as_pages);
-        !err.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       "INVALID_PARAMETER", err));
-      return;
-    }
-    if (md_as_pages && !want_markdown) {
-      callback(server::error_response(drogon::k400BadRequest, "INVALID_PARAMETER",
-          "as_pages=1 requires markdown=1"));
-      return;
-    }
-    if (want_markdown) {
-      if (!layout_available) {
-        callback(server::error_response(drogon::k400BadRequest, "LAYOUT_DISABLED",
-            "markdown=1 requires the layout model (do not start with "
-            "DISABLE_LAYOUT=1)"));
-        return;
-      }
-      if (!opts.want_text) {
-        callback(server::error_response(drogon::k400BadRequest, "INVALID_PARAMETER",
-            "text=0 cannot be combined with markdown=1 (markdown needs the text)"));
-        return;
-      }
-      opts.want_layout = true;
-      opts.want_reading_order = true;
-      // Faithful-export defaults (mirror /ocr/markdown): stages the server
-      // actually loaded run unless the query explicitly disabled them, so a
-      // text-only server produces honest text markdown rather than silently
-      // dropping table/formula sections. Safe in every mode — geometric pages
-      // recognize tables/formulas on the rendered image while KEEPING the exact
-      // text layer (run_layout_and_structure), so structure no longer forces OCR.
-      if (req->getParameter("tables").empty()) opts.want_tables = table_avail;
-      if (req->getParameter("formulas").empty()) opts.want_formulas = formula_avail;
-    }
-
-    const bool layout_enabled = opts.want_layout;
-    const bool want_reading_order = opts.want_reading_order;
-    const bool want_blocks = opts.want_blocks;
-    const bool want_tables = opts.want_tables;
-    const bool want_formulas = opts.want_formulas;
-    const bool want_text = opts.want_text;
-
-    if (reject_unknown_query_params(
-            req, {"layout", "reading_order", "as_blocks", "tables", "formulas", "text",
-                  "dpi", "mode", "markdown", "as_pages",
-                  "images", "format", "lossless", "png_compression", "quality",
-                  "max_side", "autorotate"}, callback))
-      return;
-    if (auto r = server::check_structure_backends(opts, table_avail, formula_avail);
-        !r.error.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       r.error_code.c_str(), r.error));
-      return;
-    }
-
-    auto dpi_str = req->getParameter("dpi");
-    // Absent -> default; present-but-garbage/overflow -> -1 -> rejected below
-    // (don't silently fall back to default on a bad explicit value).
-    int dpi = dpi_str.empty() ? default_dpi : query_int(std::string(dpi_str), -1);
-    if (dpi < kMinPdfDpi || dpi > kMaxPdfDpi) {
-      callback(server::error_response(drogon::k400BadRequest, "INVALID_DPI",
-          std::format("DPI must be between {} and {}", kMinPdfDpi, kMaxPdfDpi)));
-      return;
-    }
-
-    pdf::PdfMode req_mode = default_pdf_mode;
-    auto mode_str = req->getParameter("mode");
-    if (!mode_str.empty())
-      req_mode = pdf::parse_pdf_mode(mode_str.c_str(), default_pdf_mode);
-
-    // Page-image export params (?images=inline&format=...&quality=...)
-    PdfImageMode image_mode;
-    pdf::EncodeOptions encode_opts;
-    if (auto err = parse_image_query_params(req, image_mode, encode_opts);
-        !err.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       "INVALID_PARAMETER", err));
-      return;
-    }
-    if (want_markdown && image_mode != PdfImageMode::None) {
-      callback(server::error_response(drogon::k400BadRequest, "INVALID_PARAMETER",
-          "images= page-image export is not available with markdown=1 "
-          "(figure crops are already embedded in the markdown)"));
-      return;
-    }
-
-    // text=0 on /ocr/pdf must produce SOMETHING: a layout-only run or inline
-    // page images (the fast pdf->images path). Bare text=0 returns empty pages.
-    if (!want_text && !layout_enabled && image_mode != PdfImageMode::Inline) {
-      callback(server::error_response(drogon::k400BadRequest, "INVALID_PARAMETER",
-          "text=0 without layout=1 or images=inline would return empty pages; "
-          "add layout=1 (layout-only) and/or images=inline (page images)"));
-      return;
-    }
-
-    // autorotate=1: de-rotate each OCR'd page upright using the doc-orientation
-    // model. Rejected when the model isn't loaded (parity with LAYOUT_DISABLED).
-    bool autorotate = false;
-    if (auto err = server::parse_bool_query(req, "autorotate", &autorotate);
-        !err.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       "INVALID_PARAMETER", err));
-      return;
-    }
-    if (autorotate && !doc_ori_available) {
-      callback(server::error_response(drogon::k400BadRequest, "AUTOROTATE_DISABLED",
-          "autorotate=1 requires the doc-orientation model (models/doc_ori.onnx); "
-          "it was not found at startup"));
-      return;
-    }
+    const bool layout_enabled = p.opts.want_layout;
+    const bool want_reading_order = p.opts.want_reading_order;
+    const bool want_blocks = p.opts.want_blocks;
+    const bool want_tables = p.opts.want_tables;
+    const bool want_formulas = p.opts.want_formulas;
+    const bool want_text = p.opts.want_text;
+    const bool want_markdown = p.want_markdown;
+    const bool md_as_pages = p.md_as_pages;
+    const bool autorotate = p.autorotate;
+    const int dpi = p.dpi;
+    const pdf::PdfMode req_mode = p.mode;
+    const PdfImageMode image_mode = p.image_mode;
+    const pdf::EncodeOptions encode_opts = p.encode_opts;
 
     // For raw body case, pdf_ptr points into req->body() — copy into pdf_buf
     if (pdf_buf->empty())
@@ -1059,118 +1088,24 @@ void register_pdf_route(server::WorkPool &pool,
     if (!extract_pdf_bytes(req, decoded_buf, pdf_ptr, pdf_len, callback))
       return;
 
-    server::InferOptions opts;
-    if (auto r = server::parse_query_options(req, layout_available, &opts);
-        !r.error.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       r.error_code.c_str(), r.error));
+    PdfRequestParams p;
+    if (!parse_pdf_request(req, callback, layout_available, table_avail,
+                           formula_avail, doc_ori_available, kCpuDefaultDpi,
+                           default_pdf_mode, /*allow_image_only=*/false, p))
       return;
-    }
 
-    // ?markdown=1 / ?as_pages=1 — parity with the GPU route (see there for the
-    // full rationale). CPU build has the same CUDA-free render_markdown.
-    bool want_markdown = false;
-    bool md_as_pages = false;
-    if (auto err = server::parse_bool_query(req, "markdown", &want_markdown);
-        !err.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       "INVALID_PARAMETER", err));
-      return;
-    }
-    if (auto err = server::parse_bool_query(req, "as_pages", &md_as_pages);
-        !err.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       "INVALID_PARAMETER", err));
-      return;
-    }
-    if (md_as_pages && !want_markdown) {
-      callback(server::error_response(drogon::k400BadRequest, "INVALID_PARAMETER",
-          "as_pages=1 requires markdown=1"));
-      return;
-    }
-    if (want_markdown) {
-      if (!layout_available) {
-        callback(server::error_response(drogon::k400BadRequest, "LAYOUT_DISABLED",
-            "markdown=1 requires the layout model (do not start with "
-            "DISABLE_LAYOUT=1)"));
-        return;
-      }
-      if (!opts.want_text) {
-        callback(server::error_response(drogon::k400BadRequest, "INVALID_PARAMETER",
-            "text=0 cannot be combined with markdown=1 (markdown needs the text)"));
-        return;
-      }
-      opts.want_layout = true;
-      opts.want_reading_order = true;
-      // Mirror /ocr/markdown: recognize whatever backends loaded unless the
-      // query disabled them. Safe in geometric mode too — the geometric render
-      // path keeps the exact text layer and only takes layout/tables/formulas
-      // from the structure pass, so this never replaces born-digital text.
-      if (req->getParameter("tables").empty()) opts.want_tables = table_avail;
-      if (req->getParameter("formulas").empty()) opts.want_formulas = formula_avail;
-    }
-
-    const bool want_layout = opts.want_layout;
-    const bool want_reading_order = opts.want_reading_order;
-    const bool want_blocks = opts.want_blocks;
-    const bool want_tables = opts.want_tables;
-    const bool want_formulas = opts.want_formulas;
-
-    if (reject_unknown_query_params(
-            req, {"layout", "reading_order", "as_blocks", "tables", "formulas", "text",
-                  "dpi", "mode", "markdown", "as_pages",
-                  "images", "format", "lossless", "png_compression", "quality",
-                  "max_side", "autorotate"}, callback))
-      return;
-    if (auto r = server::check_structure_backends(opts, table_avail, formula_avail);
-        !r.error.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       r.error_code.c_str(), r.error));
-      return;
-    }
-
-    auto dpi_str = req->getParameter("dpi");
-    int dpi = dpi_str.empty() ? kCpuDefaultDpi : query_int(std::string(dpi_str), -1);
-    if (dpi < kMinPdfDpi || dpi > kMaxPdfDpi) {
-      callback(server::error_response(drogon::k400BadRequest, "INVALID_DPI",
-          std::format("DPI must be between {} and {}", kMinPdfDpi, kMaxPdfDpi)));
-      return;
-    }
-
-    pdf::PdfMode req_mode = default_pdf_mode;
-    auto mode_str = req->getParameter("mode");
-    if (!mode_str.empty())
-      req_mode = pdf::parse_pdf_mode(mode_str.c_str(), default_pdf_mode);
-
-    // Page-image export params (?images=inline&format=...&quality=...)
-    PdfImageMode image_mode;
-    pdf::EncodeOptions encode_opts;
-    if (auto err = parse_image_query_params(req, image_mode, encode_opts);
-        !err.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       "INVALID_PARAMETER", err));
-      return;
-    }
-    if (want_markdown && image_mode != PdfImageMode::None) {
-      callback(server::error_response(drogon::k400BadRequest, "INVALID_PARAMETER",
-          "images= page-image export is not available with markdown=1 "
-          "(figure crops are already embedded in the markdown)"));
-      return;
-    }
-
-    bool autorotate = false;
-    if (auto err = server::parse_bool_query(req, "autorotate", &autorotate);
-        !err.empty()) {
-      callback(server::error_response(drogon::k400BadRequest,
-                                       "INVALID_PARAMETER", err));
-      return;
-    }
-    if (autorotate && !doc_ori_available) {
-      callback(server::error_response(drogon::k400BadRequest, "AUTOROTATE_DISABLED",
-          "autorotate=1 requires the doc-orientation model (models/doc_ori.onnx); "
-          "it was not found at startup"));
-      return;
-    }
+    const bool want_layout = p.opts.want_layout;
+    const bool want_reading_order = p.opts.want_reading_order;
+    const bool want_blocks = p.opts.want_blocks;
+    const bool want_tables = p.opts.want_tables;
+    const bool want_formulas = p.opts.want_formulas;
+    const bool want_markdown = p.want_markdown;
+    const bool md_as_pages = p.md_as_pages;
+    const bool autorotate = p.autorotate;
+    const int dpi = p.dpi;
+    const pdf::PdfMode req_mode = p.mode;
+    const PdfImageMode image_mode = p.image_mode;
+    const pdf::EncodeOptions encode_opts = p.encode_opts;
 
     auto pdf_buf = std::make_shared<std::string>(pdf_ptr, pdf_len);
 
