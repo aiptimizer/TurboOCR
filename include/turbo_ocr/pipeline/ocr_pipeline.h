@@ -265,6 +265,21 @@ private:
   GpuImage upload_image(const cv::Mat &img, cudaStream_t stream,
                         PipelineTimer &timer);
 
+  // Block until every consumer of the previous request's image buffers is
+  // done: recognition (rec_event_) AND the table/formula streams
+  // (table_done_event_ / formula_done_event_). Called before any buffer
+  // reuse. Today the local structure backends host-sync before returning,
+  // so the table/formula waits are no-ops — but that is their contract
+  // enforcement, not an assumption: a future truly-async backend would
+  // otherwise read a buffer the next request is overwriting.
+  void wait_prior_readers_();
+
+  // Angle classification with the CLS_ALL_BOXES / vertical-only gate applied
+  // identically on every pipeline path (single cv::Mat, GpuImage, batch).
+  // Flips 180-degree boxes in place. timer may be null (batch path).
+  void classify_angles_(const GpuImage &img, std::vector<Box> &boxes,
+                        cudaStream_t stream, PipelineTimer *timer);
+
   // Dedicated stream for recognition — allows det on the caller's stream to
   // overlap with rec on this stream across consecutive requests.
   cudaStream_t rec_stream_ = nullptr;

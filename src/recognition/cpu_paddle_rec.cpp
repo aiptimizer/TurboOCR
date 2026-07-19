@@ -117,9 +117,7 @@ CpuPaddleRec::run(const cv::Mat &img, const std::vector<Box> &boxes) {
       float ar = (cropped.rows > 0)
                      ? static_cast<float>(cropped.cols) / cropped.rows
                      : 0;
-      target_w =
-          std::min(static_cast<int>(std::ceil(rec_image_h_ * ar)), kMaxRecWidth);
-      target_w = std::max(target_w, rec_image_w_);
+      target_w = natural_rec_width(ar, rec_image_h_, rec_image_w_);
 
       preprocess_crop(cropped, target_w, input_buf);
     }
@@ -161,8 +159,7 @@ CpuPaddleRec::run_batched(const cv::Mat &img, const std::vector<Box> &boxes) {
     std::call_once(selftest_flag, [&] {
       cv::Mat c0 = get_rotate_crop_image(img, boxes[0]);
       float ar = (c0.rows > 0) ? static_cast<float>(c0.cols) / c0.rows : 0;
-      int tw = std::min(static_cast<int>(std::ceil(rec_image_h_ * ar)), kMaxRecWidth);
-      tw = std::max(tw, rec_image_w_);
+      int tw = natural_rec_width(ar, rec_image_h_, rec_image_w_);
       std::vector<float> one;
       preprocess_crop(c0, tw, one);
       const size_t re = static_cast<size_t>(3) * rec_image_h_ * tw;
@@ -213,15 +210,8 @@ CpuPaddleRec::run_batched(const cv::Mat &img, const std::vector<Box> &boxes) {
       float ar = (cropped.rows > 0)
                      ? static_cast<float>(cropped.cols) / cropped.rows
                      : 0;
-      int target_w =
-          std::min(static_cast<int>(std::ceil(rec_image_h_ * ar)), kMaxRecWidth);
-      target_w = std::max(target_w, rec_image_w_);
-      int bucket_w = target_w;
-      if (rec_bucket_step_ > 1)
-        bucket_w = ((target_w + rec_bucket_step_ - 1) / rec_bucket_step_) *
-                   rec_bucket_step_;
-      bucket_w = std::min(bucket_w, kMaxRecWidth);
-      bucket_w = std::max(bucket_w, target_w);
+      int target_w = natural_rec_width(ar, rec_image_h_, rec_image_w_);
+      int bucket_w = snap_width_step(target_w, rec_bucket_step_);
       crops[i] = {i, target_w, bucket_w, std::move(cropped)};
     }
   }

@@ -151,6 +151,8 @@ void batch_fused_resize_normalize_chw_kernel(
     const int * __restrict__ src_steps,
     const int * __restrict__ src_heights,
     const int * __restrict__ src_widths,
+    const int * __restrict__ dst_heights,
+    const int * __restrict__ dst_widths,
     float * __restrict__ dst_chw, int dst_h, int dst_w,
     float mean0, float mean1, float mean2,
     float inv_std0, float inv_std1, float inv_std2, float inv_255) {
@@ -167,8 +169,24 @@ void batch_fused_resize_normalize_chw_kernel(
   int src_w = src_widths[b];
   int src_step = src_steps[b];
 
-  float scale_x = (float)src_w / dst_w;
-  float scale_y = (float)src_h / dst_h;
+  // Letterbox: this image occupies only its own aspect-preserving
+  // (content_h, content_w) in the canvas top-left. Outside it, write a
+  // normalized black pixel so the DB head sees "no text", never stretched
+  // glyphs from a foreign aspect ratio.
+  int content_h = dst_heights[b];
+  int content_w = dst_widths[b];
+  if (dx >= content_w || dy >= content_h) {
+    int plane = dst_h * dst_w;
+    int batch_offset = b * 3 * plane;
+    int idx = dy * dst_w + dx;
+    dst_chw[batch_offset + 0 * plane + idx] = (0.0f - mean0) * inv_std0;
+    dst_chw[batch_offset + 1 * plane + idx] = (0.0f - mean1) * inv_std1;
+    dst_chw[batch_offset + 2 * plane + idx] = (0.0f - mean2) * inv_std2;
+    return;
+  }
+
+  float scale_x = (float)src_w / content_w;
+  float scale_y = (float)src_h / content_h;
 
   // OpenCV INTER_LINEAR mapping
   float sx = (dx + 0.5f) * scale_x - 0.5f;
@@ -218,6 +236,7 @@ void batch_fused_resize_normalize_chw_kernel(
 void cuda_batch_fused_resize_normalize_det(
     const void *const *d_src_ptrs, const int *d_src_steps,
     const int *d_src_heights, const int *d_src_widths,
+    const int *d_dst_heights, const int *d_dst_widths,
     float *dst_chw, int dst_w, int dst_h, int batch_size,
     cudaStream_t stream) {
   if (batch_size == 0)
@@ -230,6 +249,7 @@ void cuda_batch_fused_resize_normalize_det(
 
   batch_fused_resize_normalize_chw_kernel<<<grid, block, 0, stream>>>(
       d_src_ptrs, d_src_steps, d_src_heights, d_src_widths,
+      d_dst_heights, d_dst_widths,
       dst_chw, dst_h, dst_w,
       0.485f, 0.456f, 0.406f,
       1.0f / 0.229f, 1.0f / 0.224f, 1.0f / 0.225f, 1.0f / 255.0f);

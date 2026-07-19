@@ -85,9 +85,12 @@ void cuda_fused_slanext_pre_rgb(const GpuImage &src,
 // batched CHW tensor [N, 3, dst_h, dst_w].
 // d_src_ptrs[N], d_src_steps[N], d_src_heights[N], d_src_widths[N] are
 // device arrays describing each source image.
+// dst_heights/dst_widths: per-image letterbox content dims inside the
+// (dst_h, dst_w) canvas; the remainder is padded with normalized black.
 void cuda_batch_fused_resize_normalize_det(
     const void *const *d_src_ptrs, const int *d_src_steps,
     const int *d_src_heights, const int *d_src_widths,
+    const int *d_dst_heights, const int *d_dst_widths,
     float *dst_chw, int dst_w, int dst_h, int batch_size,
     cudaStream_t stream = 0);
 

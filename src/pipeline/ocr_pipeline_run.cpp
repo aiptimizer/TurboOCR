@@ -44,6 +44,41 @@ using turbo_ocr::pipeline::OcrPipelineResult;
 
 using turbo_ocr::pipeline::detail::adjust_table_region;
 
+namespace {
+// Single fault taxonomy for the upload+detection stage, shared by the cv::Mat
+// and GpuImage entry points. Returns true when the fault is attributable to a
+// degenerate INPUT (genuinely no text -> empty result is the correct answer);
+// throws InferenceError for everything else so a real fault — crucially OOM
+// under VRAM pressure — is never a silent blank page. Callers run this only
+// after abort_on_sticky_cuda_fault() has ruled out a poisoned context; the
+// error is cleared either way so it does not poison subsequent requests.
+[[nodiscard]] bool det_fault_is_degenerate_input(const turbo_ocr::CudaError &e,
+                                                 int cols, int rows,
+                                                 const char *where) {
+  const cudaError_t err = cudaGetLastError();
+  // InvalidPitchValue / InvalidConfiguration fire for dims no GPU op can
+  // launch on (1x1 pages, corrupt-decoded Mats with broken pitch). The
+  // generic InvalidValue is accepted as degenerate ONLY for genuinely tiny
+  // inputs — on a full-size image it means a real launch bug and must be
+  // loud, not an empty 200.
+  const bool tiny = cols < 8 || rows < 8;
+  const bool degenerate = err == cudaErrorInvalidPitchValue ||
+                          err == cudaErrorInvalidConfiguration ||
+                          (err == cudaErrorInvalidValue && tiny);
+  if (degenerate) {
+    std::cerr << "[Pipeline] degenerate input " << cols << "x" << rows
+              << " in " << where << " — empty result: " << e.what()
+              << " (cuda=" << cudaGetErrorString(err) << ")\n";
+    return true;
+  }
+  std::cerr << "[Pipeline] detection GPU fault on " << cols << "x" << rows
+            << " in " << where << ": " << e.what()
+            << " (cuda=" << cudaGetErrorString(err)
+            << ") — surfacing as an inference error, not a silent blank page\n";
+  throw turbo_ocr::InferenceError(std::string("detection GPU fault: ") + e.what());
+}
+} // namespace
+
 void OcrPipeline::dispatch_router_(OcrPipelineResult &out,
                                    const GpuImage &gpu_img,
                                    const std::vector<Box> &boxes,
@@ -297,26 +332,9 @@ OcrPipelineResult OcrPipeline::run_with_layout(const cv::Mat &img,
     // std::abort — skip atexit/dtors that would issue poisoned CUDA calls and hang).
     cudaStreamSynchronize(stream);
     turbo_ocr::abort_on_sticky_cuda_fault("run_with_layout/upload+det");
-    // Non-sticky: classify so a real fault never masquerades as a blank page. A degenerate
-    // INPUT (invalid dims/pitch for the GPU op, e.g. a 1x1 image) genuinely has no text →
-    // empty is the correct answer. Anything else — crucially cudaErrorMemoryAllocation (OOM
-    // on a legitimate image under VRAM pressure) — is a real failure and MUST be loud (5xx),
-    // not a silent empty 200 (no-silent-failure). The error is cleared either way so it does
-    // not poison subsequent requests.
-    const cudaError_t err = cudaGetLastError();
-    const bool degenerate_input = err == cudaErrorInvalidValue ||
-                                  err == cudaErrorInvalidPitchValue ||
-                                  err == cudaErrorInvalidConfiguration;
-    if (degenerate_input) {
-      std::cerr << "[Pipeline] degenerate input " << img.cols << "x" << img.rows
-                << " — empty result: " << e.what() << " (cuda=" << cudaGetErrorString(err)
-                << ")\n";
+    if (det_fault_is_degenerate_input(e, img.cols, img.rows,
+                                      "run_with_layout/upload+det"))
       return OcrPipelineResult{};
-    }
-    std::cerr << "[Pipeline] detection GPU fault on " << img.cols << "x" << img.rows << ": "
-              << e.what() << " (cuda=" << cudaGetErrorString(err)
-              << ") — surfacing as an inference error, not a silent blank page\n";
-    throw turbo_ocr::InferenceError(std::string("detection GPU fault: ") + e.what());
   }
 
   // Sort boxes top-to-bottom, left-to-right (in-place)
@@ -341,40 +359,8 @@ OcrPipelineResult OcrPipeline::run_with_layout(const cv::Mat &img,
     timer.gpu_stop();
   }
 
-  // Optional angle classification. Default gate: only classify boxes that
-  // look vertical (h >= w*1.5) — horizontal text (the majority) skips the
-  // classifier. CLS_ALL_BOXES=1 classifies every crop instead: geometry gives
-  // the axis but cannot detect an upside-down horizontal line, so scans with
-  // mixed per-line orientations need the flip check on all boxes.
-  if (use_cls_ && classification::cls_all_boxes_enabled()) {
-    if (!boxes.empty()) {
-      timer.gpu_start("angle_classification");
-      cls_->run(gpu_img, boxes, stream); // flips 180° boxes in place
-      timer.gpu_stop();
-    }
-  } else if (use_cls_) {
-    // Collect indices of vertical-looking boxes (h >= w*1.5)
-    vertical_box_indices_.clear();
-    for (int i = 0; i < static_cast<int>(boxes.size()); ++i) {
-      if (is_vertical_box(boxes[i]))
-        vertical_box_indices_.push_back(i);
-    }
-    if (!vertical_box_indices_.empty()) {
-      // Build subset of vertical boxes for classification
-      vertical_boxes_buf_.clear();
-      vertical_boxes_buf_.reserve(vertical_box_indices_.size());
-      for (int idx : vertical_box_indices_)
-        vertical_boxes_buf_.push_back(boxes[idx]);
-
-      timer.gpu_start("angle_classification");
-      cls_->run(gpu_img, vertical_boxes_buf_, stream);
-      timer.gpu_stop();
-
-      // Write classified boxes back
-      for (size_t j = 0; j < vertical_box_indices_.size(); ++j)
-        boxes[vertical_box_indices_[j]] = vertical_boxes_buf_[j];
-    }
-  }
+  // Optional angle classification (CLS_ALL_BOXES / vertical-only gate).
+  classify_angles_(gpu_img, boxes, stream, &timer);
 
   // Recognition — launch on dedicated rec_stream_ so the caller's stream is
   // free for the next image's upload+detection (pipeline parallelism).
@@ -395,24 +381,9 @@ OcrPipelineResult OcrPipeline::run_with_layout(const cv::Mat &img,
   CUDA_CHECK(cudaEventRecord(rec_event_, rec_stream_));
 
   // Combine (filter by drop_score, matching Python's behavior)
-  constexpr float kDropScore = turbo_ocr::kDropScore;
   OcrPipelineResult out;
-  out.results.reserve(boxes.size());
-  for (size_t i = 0; i < boxes.size(); ++i) {
-    if (i < rec_results.size()) {
-      if (rec_results[i].second < kDropScore)
-        continue;
-      if (rec_results[i].first.empty())
-        continue;
-      out.results.push_back({
-        .text = std::move(rec_results[i].first),
-        .confidence = rec_results[i].second,
-        .box = boxes[i],
-      });
-    }
-  }
-
-  detail::flag_text_degraded(out, boxes.size());
+  detail::combine_recognition(out, boxes, rec_results);
+  detail::flag_dropped_crops(out, rec_->last_dropped_crops());
 
   // Layout collect waits on d2h_event_ recorded on layout_stream_. Because
   // layout and rec run on separate streams, total wall-clock is bounded by
@@ -544,14 +515,24 @@ OcrPipelineResult OcrPipeline::run_with_layout(GpuImage gpu_img,
   timer.reset();
 
   // No image_upload stage — the image is already on the GPU.
-  // Wait for any previous recognition that might still be reading its source
+  // Wait for any previous consumers that might still be reading their source
   // image. For caller-owned GpuImage this is a correctness guard only.
-  CUDA_CHECK(cudaEventSynchronize(rec_event_));
+  wait_prior_readers_();
 
-  // Detection
-  timer.gpu_start("detection_inference");
-  std::vector<Box> boxes = det_->run(gpu_img, gpu_img.rows, gpu_img.cols, stream);
-  timer.gpu_stop();
+  // Detection — same fault taxonomy as the cv::Mat entry point: degenerate
+  // input -> empty result, everything else loud.
+  std::vector<Box> boxes;
+  try {
+    timer.gpu_start("detection_inference");
+    boxes = det_->run(gpu_img, gpu_img.rows, gpu_img.cols, stream);
+    timer.gpu_stop();
+  } catch (const turbo_ocr::CudaError &e) {
+    cudaStreamSynchronize(stream);
+    turbo_ocr::abort_on_sticky_cuda_fault("run_with_layout(GpuImage)/det");
+    if (det_fault_is_degenerate_input(e, gpu_img.cols, gpu_img.rows,
+                                      "run_with_layout(GpuImage)/det"))
+      return OcrPipelineResult{};
+  }
 
   // Sort boxes top-to-bottom, left-to-right (in-place)
   timer.cpu_start("box_postprocessing");
@@ -570,27 +551,10 @@ OcrPipelineResult OcrPipeline::run_with_layout(GpuImage gpu_img,
     timer.gpu_stop();
   }
 
-  // Optional angle classification — only classify boxes that look vertical.
-  if (use_cls_) {
-    vertical_box_indices_.clear();
-    for (int i = 0; i < static_cast<int>(boxes.size()); ++i) {
-      if (is_vertical_box(boxes[i]))
-        vertical_box_indices_.push_back(i);
-    }
-    if (!vertical_box_indices_.empty()) {
-      vertical_boxes_buf_.clear();
-      vertical_boxes_buf_.reserve(vertical_box_indices_.size());
-      for (int idx : vertical_box_indices_)
-        vertical_boxes_buf_.push_back(boxes[idx]);
-
-      timer.gpu_start("angle_classification");
-      cls_->run(gpu_img, vertical_boxes_buf_, stream);
-      timer.gpu_stop();
-
-      for (size_t j = 0; j < vertical_box_indices_.size(); ++j)
-        boxes[vertical_box_indices_[j]] = vertical_boxes_buf_[j];
-    }
-  }
+  // Optional angle classification (CLS_ALL_BOXES / vertical-only gate) —
+  // was vertical-only here while the cv::Mat path honored CLS_ALL_BOXES;
+  // the shared helper ends that drift.
+  classify_angles_(gpu_img, boxes, stream, &timer);
 
   // Recognition — use det_event_ for det→rec stream handoff.
   CUDA_CHECK(cudaEventRecord(det_event_, stream));
@@ -604,24 +568,9 @@ OcrPipelineResult OcrPipeline::run_with_layout(GpuImage gpu_img,
   CUDA_CHECK(cudaEventRecord(rec_event_, rec_stream_));
 
   // Combine (filter by drop_score)
-  constexpr float kDropScore = turbo_ocr::kDropScore;
   OcrPipelineResult out;
-  out.results.reserve(boxes.size());
-  for (size_t i = 0; i < boxes.size(); ++i) {
-    if (i < rec_results.size()) {
-      if (rec_results[i].second < kDropScore)
-        continue;
-      if (rec_results[i].first.empty())
-        continue;
-      out.results.push_back({
-        .text = std::move(rec_results[i].first),
-        .confidence = rec_results[i].second,
-        .box = boxes[i],
-      });
-    }
-  }
-
-  detail::flag_text_degraded(out, boxes.size());
+  detail::combine_recognition(out, boxes, rec_results);
+  detail::flag_dropped_crops(out, rec_->last_dropped_crops());
 
   // Layout collect — see run(cv::Mat, stream) above.
   if (layout_enqueued) {
@@ -687,6 +636,10 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
                              "Processing first {} only.\n", n, kMaxBatchImages, kMaxBatchImages);
   }
   const int batch_n = std::min(n, kMaxBatchImages);
+
+  // Batch buffers and the shared pinned staging buffer are reused across
+  // requests — same reuse contract as upload_image().
+  wait_prior_readers_();
 
   // --- Phase 1: Upload all images to GPU, run batched detection + cls ---
   // We need all images alive on GPU simultaneously for batched recognition.
@@ -763,34 +716,29 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
                           per_img[i].rows, per_img[i].cols});
       dims.emplace_back(per_img[i].rows, per_img[i].cols);
     }
-    all_det_boxes = det_->run_batch(gpu_imgs, dims, stream);
+    try {
+      all_det_boxes = det_->run_batch(gpu_imgs, dims, stream);
+    } catch (const turbo_ocr::CudaError &e) {
+      // A batched det fault cannot be attributed to one member image, so the
+      // degenerate-input downgrade of the single paths does not apply: sticky
+      // check, then loud for the whole batch (never a silent empty 200 x N).
+      cudaStreamSynchronize(stream);
+      turbo_ocr::abort_on_sticky_cuda_fault("run_batch_with_layout/det");
+      cudaGetLastError();
+      throw turbo_ocr::InferenceError(
+          std::string("batched detection GPU fault: ") + e.what());
+    }
   }
 
-  // Assign detection results and run angle classification per-image.
+  // Assign detection results and run angle classification per-image
+  // (CLS_ALL_BOXES / vertical-only gate, same policy as the single paths —
+  // the batch path previously ignored CLS_ALL_BOXES entirely).
   for (int i = 0; i < batch_n; i++) {
     per_img[i].boxes = std::move(all_det_boxes[i]);
     sorted_boxes(per_img[i].boxes);
-
-    if (use_cls_) {
-      vertical_box_indices_.clear();
-      for (int vi = 0; vi < static_cast<int>(per_img[i].boxes.size()); ++vi) {
-        if (is_vertical_box(per_img[i].boxes[vi]))
-          vertical_box_indices_.push_back(vi);
-      }
-      if (!vertical_box_indices_.empty()) {
-        vertical_boxes_buf_.clear();
-        vertical_boxes_buf_.reserve(vertical_box_indices_.size());
-        for (int idx : vertical_box_indices_)
-          vertical_boxes_buf_.push_back(per_img[i].boxes[idx]);
-
-        GpuImage gpu_img{per_img[i].d_buf, per_img[i].pitch,
-                          per_img[i].rows, per_img[i].cols};
-        cls_->run(gpu_img, vertical_boxes_buf_, stream);
-
-        for (size_t j = 0; j < vertical_box_indices_.size(); ++j)
-          per_img[i].boxes[vertical_box_indices_[j]] = vertical_boxes_buf_[j];
-      }
-    }
+    GpuImage gpu_img{per_img[i].d_buf, per_img[i].pitch,
+                     per_img[i].rows, per_img[i].cols};
+    classify_angles_(gpu_img, per_img[i].boxes, stream, nullptr);
   }
 
   // --- Phase 2: Batched recognition across ALL images ---
@@ -809,31 +757,13 @@ std::vector<OcrPipelineResult> OcrPipeline::run_batch_with_layout(
   // so no additional cudaStreamSynchronize needed here.
 
   // --- Phase 3: Combine results and filter by drop_score ---
-  constexpr float kDropScore = turbo_ocr::kDropScore;
   std::vector<OcrPipelineResult> all_results(batch_n);
-
+  const auto &dropped = rec_->last_dropped_per_image();
   for (int i = 0; i < batch_n; i++) {
-    const auto &boxes = image_crops[i].boxes;
-    auto &rec_results = all_rec_results[i];
-    auto &final_results = all_results[i].results;
-    final_results.reserve(boxes.size());
-
-    for (size_t j = 0; j < boxes.size(); ++j) {
-      if (j < rec_results.size()) {
-        if (rec_results[j].second < kDropScore)
-          continue;
-        if (rec_results[j].first.empty())
-          continue;
-        final_results.push_back({
-          .text = std::move(rec_results[j].first),
-          .confidence = rec_results[j].second,
-          .box = boxes[j],
-        });
-      }
-    }
-    // Same no-silent-failure signal the single-image path sets: boxes detected but
-    // recognition produced nothing usable -> text_degraded (was missing on /ocr/batch).
-    detail::flag_text_degraded(all_results[i], boxes.size());
+    detail::combine_recognition(all_results[i], image_crops[i].boxes,
+                                all_rec_results[i]);
+    if (static_cast<size_t>(i) < dropped.size())
+      detail::flag_dropped_crops(all_results[i], dropped[i]);
   }
 
   // --- Phase 4 (opt-in): layout + CUA router (table/formula) per page ---

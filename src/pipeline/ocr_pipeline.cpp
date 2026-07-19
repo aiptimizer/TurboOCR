@@ -318,6 +318,52 @@ void OcrPipeline::warmup_gpu(cudaStream_t stream) {
   }
 }
 
+void OcrPipeline::wait_prior_readers_() {
+  CUDA_CHECK(cudaEventSynchronize(rec_event_));
+  // Table/formula backends read the image buffer on their own streams. The
+  // local backends host-sync inside run(), so these waits complete instantly
+  // today — they exist to make buffer reuse safe even for a backend that
+  // returns with device work still in flight. Null until the lazy stream
+  // setup runs (no table/formula backend configured).
+  if (table_done_event_)
+    CUDA_CHECK(cudaEventSynchronize(table_done_event_));
+  if (formula_done_event_)
+    CUDA_CHECK(cudaEventSynchronize(formula_done_event_));
+}
+
+void OcrPipeline::classify_angles_(const GpuImage &img, std::vector<Box> &boxes,
+                                   cudaStream_t stream, PipelineTimer *timer) {
+  if (!use_cls_ || boxes.empty()) return;
+  // Default gate: only classify boxes that look vertical (h >= w*1.5) —
+  // horizontal text (the majority) skips the classifier. CLS_ALL_BOXES=1
+  // classifies every crop instead: geometry gives the axis but cannot detect
+  // an upside-down horizontal line, so scans with mixed per-line orientations
+  // need the flip check on all boxes.
+  if (classification::cls_all_boxes_enabled()) {
+    if (timer) timer->gpu_start("angle_classification");
+    cls_->run(img, boxes, stream); // flips 180° boxes in place
+    if (timer) timer->gpu_stop();
+    return;
+  }
+  vertical_box_indices_.clear();
+  for (int i = 0; i < static_cast<int>(boxes.size()); ++i) {
+    if (is_vertical_box(boxes[i]))
+      vertical_box_indices_.push_back(i);
+  }
+  if (vertical_box_indices_.empty()) return;
+  vertical_boxes_buf_.clear();
+  vertical_boxes_buf_.reserve(vertical_box_indices_.size());
+  for (int idx : vertical_box_indices_)
+    vertical_boxes_buf_.push_back(boxes[idx]);
+
+  if (timer) timer->gpu_start("angle_classification");
+  cls_->run(img, vertical_boxes_buf_, stream);
+  if (timer) timer->gpu_stop();
+
+  for (size_t j = 0; j < vertical_box_indices_.size(); ++j)
+    boxes[vertical_box_indices_[j]] = vertical_boxes_buf_[j];
+}
+
 GpuImage OcrPipeline::upload_image(const cv::Mat &img, cudaStream_t stream,
                                    PipelineTimer &timer) {
   // LOAD-BEARING INVARIANT: reusing h_pinned_buf_ below is safe only because
@@ -326,7 +372,7 @@ GpuImage OcrPipeline::upload_image(const cv::Mat &img, cudaStream_t stream,
   // this buffer's H2D DMA. If rec ever becomes fully async with the event
   // recorded at issue time (not consumption), the memcpy below could clobber
   // the pinned source mid-DMA — torn image, silent garbage recognition.
-  CUDA_CHECK(cudaEventSynchronize(rec_event_));
+  wait_prior_readers_();
   cur_img_buf_ ^= 1;
   auto &buf = img_bufs_[cur_img_buf_];
 

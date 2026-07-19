@@ -50,11 +50,15 @@ bool PaddleDet::init_buffers(const DetResizeParams& resize, const DbParams& db) 
   d_batch_src_steps_ = CudaPtr<int>(kMaxBatchSize);
   d_batch_src_heights_ = CudaPtr<int>(kMaxBatchSize);
   d_batch_src_widths_ = CudaPtr<int>(kMaxBatchSize);
+  d_batch_dst_heights_ = CudaPtr<int>(kMaxBatchSize);
+  d_batch_dst_widths_ = CudaPtr<int>(kMaxBatchSize);
   // Pinned host staging for async copy (avoids pageable fallback)
   h_batch_src_ptrs_ = CudaHostPtr<void *>(kMaxBatchSize);
   h_batch_src_steps_ = CudaHostPtr<int>(kMaxBatchSize);
   h_batch_src_heights_ = CudaHostPtr<int>(kMaxBatchSize);
   h_batch_src_widths_ = CudaHostPtr<int>(kMaxBatchSize);
+  h_batch_dst_heights_ = CudaHostPtr<int>(kMaxBatchSize);
+  h_batch_dst_widths_ = CudaHostPtr<int>(kMaxBatchSize);
 
   // Bind I/O pointers once for single-image path (never change)
   engine_->bind_io(d_input_.get(), d_output_.get());
@@ -135,9 +139,12 @@ std::vector<Box>
 PaddleDet::run_gpu_ccl(const float *d_pred, const uint8_t *d_bitmap,
                         int resize_h, int resize_w,
                         int orig_h, int orig_w,
-                        cudaStream_t stream) {
-  float ratio_h = static_cast<float>(resize_h) / orig_h;
-  float ratio_w = static_cast<float>(resize_w) / orig_w;
+                        cudaStream_t stream,
+                        int content_h, int content_w) {
+  if (content_h <= 0) content_h = resize_h;
+  if (content_w <= 0) content_w = resize_w;
+  float ratio_h = static_cast<float>(content_h) / orig_h;
+  float ratio_w = static_cast<float>(content_w) / orig_w;
 
   int h_num_boxes = 0;
   turbo_ocr::kernels::cuda_gpu_ccl_detect(
@@ -260,9 +267,12 @@ std::vector<Box>
 PaddleDet::run_gpu_ccl_fast(const float *d_pred, const uint8_t *d_bitmap,
                               int resize_h, int resize_w,
                               int orig_h, int orig_w,
-                              cudaStream_t stream) {
-  float ratio_h = static_cast<float>(resize_h) / orig_h;
-  float ratio_w = static_cast<float>(resize_w) / orig_w;
+                              cudaStream_t stream,
+                              int content_h, int content_w) {
+  if (content_h <= 0) content_h = resize_h;
+  if (content_w <= 0) content_w = resize_w;
+  float ratio_h = static_cast<float>(content_h) / orig_h;
+  float ratio_w = static_cast<float>(content_w) / orig_w;
 
   // Step 1: CCL on original mask → compact IDs + original bboxes
   int h_num_boxes = 0;
@@ -365,7 +375,10 @@ std::vector<Box>
 PaddleDet::run_cpu_contours(const float *d_pred, const uint8_t *d_bitmap,
                              int resize_h, int resize_w,
                              int orig_h, int orig_w,
-                             cudaStream_t stream) {
+                             cudaStream_t stream,
+                             int content_h, int content_w) {
+  if (content_h <= 0) content_h = resize_h;
+  if (content_w <= 0) content_w = resize_w;
   // Download raw probability map for score filtering. Both D2H copies are queued
   // async and covered by a single stream sync — the minimal, and required, sync
   // for the host-side findContours below.
@@ -380,7 +393,9 @@ PaddleDet::run_cpu_contours(const float *d_pred, const uint8_t *d_bitmap,
 
   CUDA_CHECK(cudaStreamSynchronize(stream));
 
-  return extract_boxes_from_bitmap(pred_map, bitmap, orig_h, orig_w, resize_h, resize_w,
+  // extract_boxes_from_bitmap takes the map extent from the Mats; the
+  // resize params only feed the box->original ratios, so pass content dims.
+  return extract_boxes_from_bitmap(pred_map, bitmap, orig_h, orig_w, content_h, content_w,
                                    box_thresh_, unclip_ratio_ * unclip_scale_, kMinBoxSide,
                                    kMinUnclippedSide, shifted_buf_, mask_buf_, contours_buf_,
                                    hierarchy_buf_);
@@ -440,15 +455,18 @@ PaddleDet::run_batch(const std::vector<GpuImage> &gpu_imgs,
   int resize_h, resize_w;
   struct PerImgInfo {
     int orig_h, orig_w;
-    float ratio;
-    int resize_h, resize_w;
+    int resize_h, resize_w;  // letterbox content dims inside the batch canvas
   };
   std::vector<PerImgInfo> infos;
 
   // Clamp to max batch size
   batch_size = std::min(n, kMaxBatchSize);
 
-  // --- Compute unified resize dimensions (max across batch, rounded to 32) ---
+  // --- Compute unified canvas dimensions (max across batch, rounded to 32) ---
+  // Each image keeps its OWN aspect-preserving resize dims and is letterboxed
+  // into the canvas top-left; the remainder is padding. Stretching everything
+  // to the canvas dims instead (the old behavior) distorted glyphs whenever a
+  // batch mixed aspect ratios, silently degrading detection vs /ocr/raw.
   int max_resize_h = 0, max_resize_w = 0;
   infos.resize(batch_size);
 
@@ -456,8 +474,7 @@ PaddleDet::run_batch(const std::vector<GpuImage> &gpu_imgs,
     int h = orig_dims[i].first;
     int w = orig_dims[i].second;
     auto [rh, rw] = compute_det_resize(h, w, resize_);
-    float ratio = std::min(static_cast<float>(rh) / h, static_cast<float>(rw) / w);
-    infos[i] = {h, w, ratio, rh, rw};
+    infos[i] = {h, w, rh, rw};
     max_resize_h = std::max(max_resize_h, rh);
     max_resize_w = std::max(max_resize_w, rw);
   }
@@ -475,6 +492,8 @@ PaddleDet::run_batch(const std::vector<GpuImage> &gpu_imgs,
     h_batch_src_steps_.get()[i]   = static_cast<int>(gpu_imgs[i].step);
     h_batch_src_heights_.get()[i] = gpu_imgs[i].rows;
     h_batch_src_widths_.get()[i]  = gpu_imgs[i].cols;
+    h_batch_dst_heights_.get()[i] = infos[i].resize_h;
+    h_batch_dst_widths_.get()[i]  = infos[i].resize_w;
   }
 
   CUDA_CHECK(cudaMemcpyAsync(d_batch_src_ptrs_.get(), h_batch_src_ptrs_.get(),
@@ -489,11 +508,18 @@ PaddleDet::run_batch(const std::vector<GpuImage> &gpu_imgs,
   CUDA_CHECK(cudaMemcpyAsync(d_batch_src_widths_.get(), h_batch_src_widths_.get(),
                               batch_size * sizeof(int),
                               cudaMemcpyHostToDevice, stream));
+  CUDA_CHECK(cudaMemcpyAsync(d_batch_dst_heights_.get(), h_batch_dst_heights_.get(),
+                              batch_size * sizeof(int),
+                              cudaMemcpyHostToDevice, stream));
+  CUDA_CHECK(cudaMemcpyAsync(d_batch_dst_widths_.get(), h_batch_dst_widths_.get(),
+                              batch_size * sizeof(int),
+                              cudaMemcpyHostToDevice, stream));
 
-  // --- 2. Batched fused resize + normalize + CHW ---
+  // --- 2. Batched fused resize + normalize + CHW (letterboxed per image) ---
   turbo_ocr::kernels::cuda_batch_fused_resize_normalize_det(
       (const void *const *)d_batch_src_ptrs_.get(), d_batch_src_steps_.get(),
       d_batch_src_heights_.get(), d_batch_src_widths_.get(),
+      d_batch_dst_heights_.get(), d_batch_dst_widths_.get(),
       d_batch_input_.get(), resize_w, resize_h, batch_size, stream);
 
   // --- 3. Single TRT inference call with batch=N ---
@@ -530,11 +556,14 @@ PaddleDet::run_batch(const std::vector<GpuImage> &gpu_imgs,
     const uint8_t *d_bitmap = d_batch_bitmap_.get() + off;
 
     if (gpu_ccl_mode_ == 2) {
-      all_boxes[i] = run_gpu_ccl_fast(d_pred, d_bitmap, resize_h, resize_w, orig_h, orig_w, stream);
+      all_boxes[i] = run_gpu_ccl_fast(d_pred, d_bitmap, resize_h, resize_w, orig_h, orig_w, stream,
+                                      infos[i].resize_h, infos[i].resize_w);
     } else if (gpu_ccl_mode_ == 1) {
-      all_boxes[i] = run_gpu_ccl(d_pred, d_bitmap, resize_h, resize_w, orig_h, orig_w, stream);
+      all_boxes[i] = run_gpu_ccl(d_pred, d_bitmap, resize_h, resize_w, orig_h, orig_w, stream,
+                                 infos[i].resize_h, infos[i].resize_w);
     } else {
-      all_boxes[i] = run_cpu_contours(d_pred, d_bitmap, resize_h, resize_w, orig_h, orig_w, stream);
+      all_boxes[i] = run_cpu_contours(d_pred, d_bitmap, resize_h, resize_w, orig_h, orig_w, stream,
+                                      infos[i].resize_h, infos[i].resize_w);
     }
   }
 

@@ -8,6 +8,7 @@
 
 #include "turbo_ocr/engine/cpu_engine.h"
 #include "turbo_ocr/common/box.h"
+#include "turbo_ocr/recognition/rec_geometry.h"
 
 namespace turbo_ocr::recognition {
 
@@ -47,7 +48,7 @@ private:
 
   std::unique_ptr<engine::CpuEngine> engine_;
 
-  static constexpr int kMaxRecWidth = 4000;
+  // kMaxRecWidth lives in rec_geometry.h (shared with the TRT recognizer).
 
   // Probed after load via probe_output_dims. The initializers are placeholders
   // only: actual_num_classes_ must stay >= the widest tier (medium/small CTC

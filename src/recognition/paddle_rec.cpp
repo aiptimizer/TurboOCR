@@ -213,6 +213,8 @@ PaddleRec::run(const GpuImage &img, const std::vector<Box> &boxes,
     return results;
 
   allocate_buffers();
+  dropped_crops_ = 0;
+  dropped_per_image_.clear();
 
   int total_boxes = static_cast<int>(boxes.size());
   results.resize(total_boxes);
@@ -221,25 +223,12 @@ PaddleRec::run(const GpuImage &img, const std::vector<Box> &boxes,
   crops_buf_.resize(total_boxes);
   auto &crops = crops_buf_;
 
+  // Snap each INDIVIDUAL crop width to a bucket (see rec_geometry.h for the
+  // width math and the known recall ceiling of the kMaxRecWidth cap).
+  // Minimum 32px, NOT forced to 320.
   for (int i = 0; i < total_boxes; i++) {
-    const auto &box = boxes[i];
-    float w = std::sqrt(((box[0][0] - box[1][0]) * (box[0][0] - box[1][0])) +
-                        ((box[0][1] - box[1][1]) * (box[0][1] - box[1][1])));
-    float h = std::sqrt(((box[0][0] - box[3][0]) * (box[0][0] - box[3][0])) +
-                        ((box[0][1] - box[3][1]) * (box[0][1] - box[3][1])));
-    float ar = (h > 0) ? (w / h) : 0;
-
-    // Snap the INDIVIDUAL crop width to a bucket. KNOWN RECALL CEILING: the
-    // kMaxRecWidth cap horizontally compresses any line with aspect ratio
-    // beyond kMaxRecWidth/rec_image_h (4000/48 ≈ 83:1 — e.g. a full-width
-    // 2000px line under ~24px tall), squashing glyphs below the CTC receptive
-    // field. Inherent CRNN limit, rare on document lines at det scale; the
-    // mitigation (split over-long crops and stitch the transcripts) is an
-    // accuracy-gated experiment, not a local fix.
-    int crop_imgW = std::min(static_cast<int>(std::ceil(rec_image_h_ * ar)), kMaxRecWidth);
-    crop_imgW = std::max(crop_imgW, 32); // minimum 32px, NOT forced to 320
-    int bucket = *std::lower_bound(kWidthBuckets.begin(), kWidthBuckets.end(), crop_imgW);
-
+    const int bucket = snap_width_bucket(
+        natural_rec_width(box_aspect(boxes[i]), rec_image_h_, 32));
     crops[i] = {i, bucket};
   }
 
@@ -312,6 +301,9 @@ PaddleRec::run(const GpuImage &img, const std::vector<Box> &boxes,
     infer_bucket(cur_batch, imgW, stream, seq_len, num_classes);
 
     if (seq_len > actual_seq_len_ || num_classes > actual_num_classes_) {
+      // Counted so the pipeline can flag text_degraded: these crops return
+      // empty, which must never pass as a page that simply had less text.
+      dropped_crops_ += cur_batch;
       std::cerr << std::format("[PaddleRec] WARNING: output dims (seq_len={}, num_classes={}) "
                                "exceed buffer (seq_len={}, num_classes={}), skipping batch\n",
                                seq_len, num_classes, actual_seq_len_, actual_num_classes_);
@@ -359,6 +351,8 @@ PaddleRec::run_multi(const std::vector<ImageCrops> &image_crops,
     return all_results;
 
   allocate_buffers();
+  dropped_crops_ = 0;
+  dropped_per_image_.assign(num_images, 0);
 
   // Flatten all crops with (img_idx, box_idx) tracking
   struct MultiCropInfo {
@@ -372,17 +366,8 @@ PaddleRec::run_multi(const std::vector<ImageCrops> &image_crops,
   for (int i = 0; i < num_images; i++) {
     const auto &boxes = image_crops[i].boxes;
     for (int b = 0; b < static_cast<int>(boxes.size()); b++) {
-      const auto &box = boxes[b];
-      float w = std::sqrt(((box[0][0] - box[1][0]) * (box[0][0] - box[1][0])) +
-                          ((box[0][1] - box[1][1]) * (box[0][1] - box[1][1])));
-      float h = std::sqrt(((box[0][0] - box[3][0]) * (box[0][0] - box[3][0])) +
-                          ((box[0][1] - box[3][1]) * (box[0][1] - box[3][1])));
-      float ar = (h > 0) ? (w / h) : 0;
-
-      int crop_imgW = std::min(static_cast<int>(std::ceil(rec_image_h_ * ar)), kMaxRecWidth);
-      crop_imgW = std::max(crop_imgW, 32);
-      int bucket = *std::lower_bound(kWidthBuckets.begin(),
-                                     kWidthBuckets.end(), crop_imgW);
+      const int bucket = snap_width_bucket(
+          natural_rec_width(box_aspect(boxes[b]), rec_image_h_, 32));
       crops.push_back({i, b, bucket});
     }
   }
@@ -472,6 +457,9 @@ PaddleRec::run_multi(const std::vector<ImageCrops> &image_crops,
     infer_bucket(cur_batch, imgW, stream, seq_len, num_classes);
 
     if (seq_len > actual_seq_len_ || num_classes > actual_num_classes_) {
+      dropped_crops_ += cur_batch;  // -> text_degraded, same as run()
+      for (int k = beg; k < end; ++k)
+        dropped_per_image_[crops[k].img_idx]++;
       std::cerr << std::format("[PaddleRec] WARNING: output dims (seq_len={}, num_classes={}) "
                                "exceed buffer (seq_len={}, num_classes={}), skipping batch\n",
                                seq_len, num_classes, actual_seq_len_, actual_num_classes_);

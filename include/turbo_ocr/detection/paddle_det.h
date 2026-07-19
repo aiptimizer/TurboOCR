@@ -89,17 +89,23 @@ private:
   CudaPtr<float> d_batch_output_;
   CudaPtr<uint8_t> d_batch_bitmap_;
 
-  // Device-side arrays for batched kernel launch params (RAII)
+  // Device-side arrays for batched kernel launch params (RAII).
+  // dst_heights/dst_widths are each image's aspect-preserving letterbox
+  // content dims inside the unified batch canvas.
   CudaPtr<void *> d_batch_src_ptrs_;
   CudaPtr<int> d_batch_src_steps_;
   CudaPtr<int> d_batch_src_heights_;
   CudaPtr<int> d_batch_src_widths_;
+  CudaPtr<int> d_batch_dst_heights_;
+  CudaPtr<int> d_batch_dst_widths_;
 
   // Pinned host staging for batch metadata (RAII)
   CudaHostPtr<void *> h_batch_src_ptrs_;
   CudaHostPtr<int> h_batch_src_steps_;
   CudaHostPtr<int> h_batch_src_heights_;
   CudaHostPtr<int> h_batch_src_widths_;
+  CudaHostPtr<int> h_batch_dst_heights_;
+  CudaHostPtr<int> h_batch_dst_widths_;
 
   // Pre-allocated bitmap buffer (RAII)
   CudaPtr<uint8_t> d_bitmap_buf_;
@@ -155,11 +161,18 @@ private:
   // the helpers still write shared instance scratch (h_ccl_boxes_, ccl_contour_buf_,
   // d_jfa_*, ...), so one instance serves one worker thread (the pool contract).
 
+  // resize_h/resize_w are the probability-map extents (the batch canvas for
+  // run_batch slices). content_h/content_w are the letterboxed extent the
+  // image actually occupies inside that canvas — the box→original mapping
+  // divides by content/orig, never canvas/orig. -1 (single-image callers)
+  // means content == canvas.
+
   // GPU CCL path: returns boxes from GPU + per-ROI findContours (accurate)
   [[nodiscard]] std::vector<Box> run_gpu_ccl(const float *d_pred, const uint8_t *d_bitmap,
                                               int resize_h, int resize_w,
                                               int orig_h, int orig_w,
-                                              cudaStream_t stream);
+                                              cudaStream_t stream,
+                                              int content_h = -1, int content_w = -1);
 
   // GPU CCL fast (GPU_CCL=2): all-GPU JFA per-component Euclidean unclip.
   // Matches CPU CCL=1 word-F1 within run-to-run noise (~0.900 vs 0.902 on
@@ -167,13 +180,15 @@ private:
   [[nodiscard]] std::vector<Box> run_gpu_ccl_fast(const float *d_pred, const uint8_t *d_bitmap,
                                                     int resize_h, int resize_w,
                                                     int orig_h, int orig_w,
-                                                    cudaStream_t stream);
+                                                    cudaStream_t stream,
+                                                    int content_h = -1, int content_w = -1);
 
   // CPU fallback path (original findContours)
   [[nodiscard]] std::vector<Box> run_cpu_contours(const float *d_pred, const uint8_t *d_bitmap,
                                                    int resize_h, int resize_w,
                                                    int orig_h, int orig_w,
-                                                   cudaStream_t stream);
+                                                   cudaStream_t stream,
+                                                   int content_h = -1, int content_w = -1);
 
 };
 
