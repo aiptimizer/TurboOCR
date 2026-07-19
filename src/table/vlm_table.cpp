@@ -301,6 +301,15 @@ std::string otsl_to_html(const std::string &otsl_in) {
 
   auto rows = split_rows(elems);
   if (rows.empty()) return "";
+
+  // Cap the padded grid BEFORE pad_rows materializes it: model output fully
+  // controls row count and max row width, and a sparse OTSL (one wide row +
+  // many 1-cell rows) otherwise expands quadratically during padding.
+  constexpr size_t kMaxTableCells = 1u << 16;
+  size_t max_w = 0;
+  for (const auto &r : rows) max_w = std::max(max_w, r.cells.size());
+  if (max_w == 0 || rows.size() > kMaxTableCells / max_w) return "";
+
   pad_rows(rows);
 
   const size_t nrows = rows.size();

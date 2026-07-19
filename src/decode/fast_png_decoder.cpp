@@ -22,6 +22,13 @@ namespace {
   return len >= 26 && data[24] == 16;
 }
 
+// IHDR width/height (big-endian u32 at offsets 16/20), for cap enforcement on
+// paths that bypass the Wuffs config probe.
+[[nodiscard]] uint32_t png_be32(const unsigned char *p) noexcept {
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) |
+         uint32_t(p[3]);
+}
+
 // OpenCV fallback for inputs the BGR-8 Wuffs fast path can't represent
 // losslessly (16-bit depth). cv::imdecode(IMREAD_COLOR) routes through libpng,
 // which strips 16->8 bit and emits an 8-bit BGR Mat just like the 8-bit path.
@@ -37,9 +44,20 @@ namespace {
 cv::Mat FastPngDecoder::decode(const unsigned char *data, std::size_t len) {
   // 16-bit-depth PNGs can't be decoded by the BGR-8 Wuffs fast path below
   // (it produces a blank Mat that would silently pass the empty() guard).
-  // Route them through OpenCV/libpng, which downconverts 16->8 correctly.
-  if (png_is_16bit(data, len))
+  // Route them through OpenCV/libpng, which downconverts 16->8 correctly —
+  // but only after the same per-side and pixel-area caps the Wuffs path
+  // enforces, read straight from the IHDR; otherwise a crafted 16-bit PNG
+  // allocates its full declared raster inside cv::imdecode.
+  if (png_is_16bit(data, len)) {
+    const uint32_t w = png_be32(data + 16);
+    const uint32_t h = png_be32(data + 20);
+    const uint32_t cap = static_cast<uint32_t>(decode::max_image_dim());
+    if (w == 0 || h == 0 || w > cap || h > cap)
+      return {};
+    if (decode::exceeds_pixel_cap(w, h))
+      return {};
     return opencv_png_decode(data, len);
+  }
 
   // 1. Initialize Wuffs PNG decoder
   wuffs_png__decoder dec;

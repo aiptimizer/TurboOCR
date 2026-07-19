@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -415,6 +416,22 @@ struct SigpipeBlocker {
     pthread_sigmask(SIG_SETMASK, &old_set, nullptr);
   }
 };
+
+// Parse the page count out of a daemon "OK <n>" reply. A wedged or killed
+// child can hand back arbitrary bytes; that must surface as PdfRenderError,
+// not as std::invalid_argument escaping the error taxonomy.
+[[nodiscard]] int parse_daemon_page_count(const std::string &resp) {
+  if (!resp.starts_with("OK ")) return 0;
+  constexpr int kMaxDaemonPages = 100000;
+  int n = 0;
+  const char *first = resp.data() + 3;
+  const char *last = resp.data() + resp.size();
+  auto [ptr, ec] = std::from_chars(first, last, n);
+  if (ec != std::errc{} || ptr == first || n < 0 || n > kMaxDaemonPages)
+    throw turbo_ocr::PdfRenderError(
+        std::format("PDF daemon returned malformed page count: {}", resp));
+  return n;
+}
 } // namespace
 
 // Single write+read round-trip to the daemon. Returns false (not throws) on a
@@ -506,9 +523,7 @@ std::vector<cv::Mat> PdfRenderer::render(const uint8_t *data, size_t len,
   if (!resp.starts_with("OK"))
     throw turbo_ocr::PdfRenderError(std::format("PDF render failed: {}", resp));
 
-  int num_pages = 0;
-  if (resp.starts_with("OK "))
-    num_pages = std::stoi(resp.substr(3));
+  const int num_pages = parse_daemon_page_count(resp);
 
   // Read PPM files — parallel for multi-page PDFs (each read_ppm is
   // independent: thread-safe fopen/fread, creates its own cv::Mat).
@@ -689,9 +704,7 @@ PdfRenderer::render_streamed(const uint8_t *data, size_t len, int dpi,
     throw turbo_ocr::PdfRenderError(
         std::format("PDF render failed: {}", render_resp));
 
-  int num_pages = 0;
-  if (render_resp.starts_with("OK "))
-    num_pages = std::stoi(render_resp.substr(3));
+  const int num_pages = parse_daemon_page_count(render_resp);
 
   // Safety net: deliver any pages missed by inotify (race, coalesced events).
   // The daemon may respond "OK N" before its forked workers finish writing

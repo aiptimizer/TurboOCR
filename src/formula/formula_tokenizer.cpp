@@ -324,41 +324,55 @@ std::optional<FormulaTokenizer> FormulaTokenizer::load(const std::string& json_p
 
     FormulaTokenizer tok;
 
-    // Build id -> token from model.vocab (token -> id). Resize as we go.
-    if (!j.contains("model") || !j["model"].contains("vocab")) return std::nullopt;
-    const auto& vocab = j["model"]["vocab"];
-    if (!vocab.is_object()) return std::nullopt;
+    // id_to_token_ is sized from ids read out of the file, so a single
+    // corrupt/hostile id (e.g. 2^32-1) would force a multi-GB allocation.
+    // Real BPE vocabularies are well under this cap.
+    constexpr std::size_t kMaxTokenId = 1u << 20;
 
-    std::size_t max_id = 0;
-    for (auto it = vocab.begin(); it != vocab.end(); ++it) {
-        std::size_t id = it.value().get<std::size_t>();
-        if (id > max_id) max_id = id;
-    }
+    try {
+        // Build id -> token from model.vocab (token -> id). Resize as we go.
+        if (!j.contains("model") || !j["model"].contains("vocab")) return std::nullopt;
+        const auto& vocab = j["model"]["vocab"];
+        if (!vocab.is_object()) return std::nullopt;
 
-    // Added/special tokens may extend the id space.
-    if (j.contains("added_tokens") && j["added_tokens"].is_array()) {
-        for (const auto& at : j["added_tokens"]) {
-            if (at.contains("id")) {
-                std::size_t id = at["id"].get<std::size_t>();
-                if (id > max_id) max_id = id;
+        std::size_t max_id = 0;
+        for (auto it = vocab.begin(); it != vocab.end(); ++it) {
+            std::size_t id = it.value().get<std::size_t>();
+            if (id > kMaxTokenId) return std::nullopt;
+            if (id > max_id) max_id = id;
+        }
+
+        // Added/special tokens may extend the id space.
+        if (j.contains("added_tokens") && j["added_tokens"].is_array()) {
+            for (const auto& at : j["added_tokens"]) {
+                if (at.contains("id")) {
+                    std::size_t id = at["id"].get<std::size_t>();
+                    if (id > kMaxTokenId) return std::nullopt;
+                    if (id > max_id) max_id = id;
+                }
             }
         }
-    }
 
-    tok.id_to_token_.assign(max_id + 1, std::string{});
-    for (auto it = vocab.begin(); it != vocab.end(); ++it) {
-        std::size_t id = it.value().get<std::size_t>();
-        tok.id_to_token_[id] = it.key();
-    }
-    if (j.contains("added_tokens") && j["added_tokens"].is_array()) {
-        for (const auto& at : j["added_tokens"]) {
-            std::size_t id = at["id"].get<std::size_t>();
-            std::string content = at.value("content", std::string{});
-            tok.id_to_token_[id] = content;
-            bool is_special = at.value("special", false);
-            if (is_special) tok.special_ids_.insert(static_cast<int64_t>(id));
-            if (content == "</s>") tok.eos_id_ = static_cast<int64_t>(id);
+        tok.id_to_token_.assign(max_id + 1, std::string{});
+        for (auto it = vocab.begin(); it != vocab.end(); ++it) {
+            std::size_t id = it.value().get<std::size_t>();
+            tok.id_to_token_[id] = it.key();
         }
+        if (j.contains("added_tokens") && j["added_tokens"].is_array()) {
+            for (const auto& at : j["added_tokens"]) {
+                if (!at.contains("id")) continue;
+                std::size_t id = at["id"].get<std::size_t>();
+                std::string content = at.value("content", std::string{});
+                tok.id_to_token_[id] = content;
+                bool is_special = at.value("special", false);
+                if (is_special) tok.special_ids_.insert(static_cast<int64_t>(id));
+                if (content == "</s>") tok.eos_id_ = static_cast<int64_t>(id);
+            }
+        }
+    } catch (const std::exception&) {
+        // Type-mismatch throws from nlohmann (non-numeric id, wrong shapes)
+        // are a malformed tokenizer file, not a crash.
+        return std::nullopt;
     }
 
     return tok;
