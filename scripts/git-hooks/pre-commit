@@ -31,10 +31,15 @@ staged() { git show ":$1" 2>/dev/null; }
 
 # ---- 1. Console logging bypasses the structured logger -----------------
 # src/ library code must log through logger.h (level control + rate limits).
-# tools/, tests/, benchmarks and the CLI keep plain streams.
+# tools/, tests/, benchmarks and the CLI (src/cli/ — stdout IS its product)
+# keep plain streams.
 for f in "${cxx_files[@]:-}"; do
   [ -n "$f" ] || continue
-  case "$f" in src/*) ;; *) continue ;; esac
+  case "$f" in
+    src/cli/*) continue ;;   # CLI: stdout is the deliverable, not diagnostics
+    src/*) ;;
+    *) continue ;;
+  esac
   if staged "$f" | grep -nE '(std::)?(cerr|cout) *<<' | grep -vq 'pre-commit-allow-stream'; then
     say "pre-commit: $f writes to std::cout/std::cerr — use TOCR_LOG_* (logger.h)."
     say "           (append // pre-commit-allow-stream on the line for a deliberate exception)"
@@ -103,8 +108,11 @@ done
 # ---- 5. cppcheck on STAGED content (time-boxed) ------------------------
 # The staged blob is what gets committed, so that is what gets checked —
 # a partially-staged file must be judged on its index version, not the
-# dirty worktree. Blobs are materialized into a temp tree preserving
-# relative paths (so file-relative includes still resolve).
+# dirty worktree. Staged .cpp blobs are materialized into a temp tree
+# preserving relative paths; the repo's include/ and root are passed via -I
+# so `#include "turbo_ocr/..."` and file-relative headers resolve (headers
+# themselves come from the worktree, which is correct for cross-TU type info).
+repo_root=$(git rev-parse --show-toplevel)
 if command -v cppcheck >/dev/null 2>&1 && [ ${#cxx_files[@]} -gt 0 ]; then
   left=$(budget_left)
   if [ "$left" -ge 5 ]; then
@@ -125,6 +133,7 @@ if command -v cppcheck >/dev/null 2>&1 && [ ${#cxx_files[@]} -gt 0 ]; then
       cppcheck_out=$(timeout "$left" cppcheck --quiet --error-exitcode=1 \
              --enable=warning,performance,portability \
              --suppress=missingIncludeSystem --inline-suppr \
+             -I "$repo_root/include" -I "$repo_root" \
              -j"$(nproc)" "${cpp_only[@]}" 2>&1)
       rc=$?
       if [ "$rc" = "124" ]; then
