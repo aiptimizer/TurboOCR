@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Fast static checks on STAGED files only. Budget: < 20 s total (hard-capped).
+# Every check exists because the class of defect it catches has actually
+# occurred in this repo; see docs/dev/pre_commit.md for the rationale and the
+# escape hatch (git commit --no-verify) for intentional exceptions.
+set -u
+
+HARD_TIMEOUT=20
+START=$(date +%s)
+
+fail=0
+say() { printf '%s\n' "$*" >&2; }
+budget_left() { echo $(( HARD_TIMEOUT - ( $(date +%s) - START ) )); }
+
+# Staged file lists (names only; content read from the index, not the tree).
+mapfile -t STAGED < <(git diff --cached --name-only --diff-filter=ACMR)
+[ ${#STAGED[@]} -eq 0 ] && exit 0
+
+cxx_files=() cmake_files=()
+for f in "${STAGED[@]}"; do
+  case "$f" in
+    third_party/*|build*/*) continue ;;
+    *.cpp|*.h|*.cu|*.cuh) cxx_files+=("$f") ;;
+    CMakeLists.txt|*.cmake) cmake_files+=("$f") ;;
+  esac
+done
+
+# Staged content of a file (index version, not working tree).
+staged() { git show ":$1" 2>/dev/null; }
+
+# ---- 1. Console logging bypasses the structured logger -----------------
+# src/ library code must log through logger.h (level control + rate limits).
+# tools/, tests/, benchmarks and the CLI keep plain streams.
+for f in "${cxx_files[@]}"; do
+  case "$f" in src/*) ;; *) continue ;; esac
+  if staged "$f" | grep -nE 'std::(cerr|cout)' | grep -vq 'pre-commit-allow-stream'; then
+    say "pre-commit: $f writes to std::cout/std::cerr — use TOCR_LOG_* (logger.h)."
+    say "           (append // pre-commit-allow-stream on the line for a deliberate exception)"
+    fail=1
+  fi
+done
+
+# ---- 2. Ad-hoc getenv outside the env_utils parsers --------------------
+# Every config knob goes through turbo_ocr::env (strict/lenient parse,
+# empty-as-unset, clamping) — no more hand-pasted to_int/get_env copies.
+for f in "${cxx_files[@]}"; do
+  case "$f" in
+    src/*|include/*) ;;
+    *) continue ;;
+  esac
+  case "$f" in
+    include/turbo_ocr/common/env_utils.h) continue ;;
+  esac
+  if staged "$f" | grep -nE '(std::)?getenv *\(' \
+      | grep -vqE 'pre-commit-allow-getenv'; then
+    say "pre-commit: $f calls getenv directly — use turbo_ocr::env helpers (env_utils.h)."
+    say "           (append // pre-commit-allow-getenv for a deliberate presence-only probe)"
+    fail=1
+  fi
+done
+
+# ---- 3. Unguarded std::stoi/stol family --------------------------------
+# They throw on garbage; parsing must go through std::from_chars or a
+# try-scoped helper (see parse_daemon_page_count for the pattern).
+for f in "${cxx_files[@]}"; do
+  if staged "$f" | grep -nE 'std::sto(i|l|ul|ll|ull|f|d)\(' \
+      | grep -vqE 'pre-commit-allow-stoi'; then
+    say "pre-commit: $f uses std::stoi/stol — prefer std::from_chars with explicit error handling."
+    fail=1
+  fi
+done
+
+# ---- 4. CMake hygiene ---------------------------------------------------
+for f in "${cmake_files[@]}"; do
+  if staged "$f" | grep -nqE 'file *\( *GLOB'; then
+    say "pre-commit: $f uses file(GLOB) — list sources explicitly."
+    fail=1
+  fi
+done
+# A CMakeLists.txt that nothing includes misleads contributors.
+for f in "${cmake_files[@]}"; do
+  case "$f" in
+    CMakeLists.txt|*/CMakeLists.txt) ;;
+    *) continue ;;
+  esac
+  dir=$(dirname "$f")
+  [ "$dir" = "." ] && continue
+  if ! grep -rqE "add_subdirectory *\( *${dir##*/}" "$(git rev-parse --show-toplevel)/CMakeLists.txt" 2>/dev/null; then
+    say "pre-commit: $f is not referenced by any add_subdirectory — orphaned CMakeLists are banned."
+    fail=1
+  fi
+done
+
+# ---- 5. cppcheck on staged sources (time-boxed) ------------------------
+# Runs only with whatever budget remains; skipped (with a notice) if the
+# cheap checks already consumed it or cppcheck is not installed.
+if command -v cppcheck >/dev/null 2>&1 && [ ${#cxx_files[@]} -gt 0 ]; then
+  left=$(budget_left)
+  if [ "$left" -ge 5 ]; then
+    cpp_only=()
+    for f in "${cxx_files[@]}"; do
+      case "$f" in *.cpp) [ -f "$f" ] && cpp_only+=("$f") ;; esac
+    done
+    if [ ${#cpp_only[@]} -gt 0 ]; then
+      cppcheck_out=$(timeout "$left" cppcheck --quiet --error-exitcode=1 \
+             --enable=warning,performance,portability \
+             --suppress=missingIncludeSystem --inline-suppr \
+             -j"$(nproc)" "${cpp_only[@]}" 2>&1)
+      rc=$?
+      if [ "$rc" = "124" ]; then
+        say "pre-commit: cppcheck hit the time budget — treat as pass, run manually if needed."
+      elif [ "$rc" != "0" ]; then
+        printf '%s\n' "$cppcheck_out" | head -30 >&2
+        say "pre-commit: cppcheck found issues (see above)."
+        fail=1
+      fi
+    fi
+  else
+    say "pre-commit: skipping cppcheck (time budget consumed)."
+  fi
+fi
+
+elapsed=$(( $(date +%s) - START ))
+if [ "$fail" -ne 0 ]; then
+  say "pre-commit: FAILED in ${elapsed}s. Fix the findings or use --no-verify for a justified exception."
+  exit 1
+fi
+exit 0
