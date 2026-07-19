@@ -639,7 +639,8 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
       return;
     }
     if (reject_unknown_query_params(
-            req, {"layout", "reading_order", "as_blocks", "tables", "formulas"}, callback))
+            req, {"layout", "reading_order", "as_blocks", "tables", "formulas",
+                  "text"}, callback))
       return;
     // Layout-only (?text=0) is a single-image feature; the batched det/rec
     // path has no layout-only equivalent. Reject instead of silently running

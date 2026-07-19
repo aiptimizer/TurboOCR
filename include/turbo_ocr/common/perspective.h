@@ -19,9 +19,9 @@ struct CropTransform {
 /// (0,0)-(resize_w, target_h) back to the quadrilateral defined by @p box in
 /// the source image.  The destination width is clamped to [1, max_width].
 ///
-/// This is the single source of truth for the transform logic previously
-/// duplicated across PaddleRec::run, PaddleRec::run_multi, PaddleCls::run,
-/// and crop_utils::get_rotate_crop_image.
+/// The single source of truth for crop-transform logic: both recognizers
+/// (TRT warp kernel, ORT cv::warpPerspective), both classifiers, and
+/// rec_input_width all derive their geometry from this function.
 inline CropTransform compute_crop_transform(const Box &box, int target_h,
                                             int max_width) {
   auto f = [](int v) { return static_cast<float>(v); };
@@ -64,50 +64,6 @@ inline CropTransform compute_crop_transform(const Box &box, int target_h,
   ct.vertical = vertical;
   compute_perspective_inv(dst_f, src_f, ct.M_inv);
   return ct;
-}
-
-/// Compute the raw crop dimensions (width, height) and source points for a
-/// box, handling vertical rotation.  Used by get_rotate_crop_image which needs
-/// the un-clamped dimensions and OpenCV src/dst points rather than the inverse
-/// perspective matrix.
-struct CropGeometry {
-  float src_pts[8]; // 4 source points (x0,y0, x1,y1, x2,y2, x3,y3)
-  int dst_w;
-  int dst_h;
-  bool vertical;
-};
-
-inline CropGeometry compute_crop_geometry(const Box &box) {
-  auto f = [](int v) { return static_cast<float>(v); };
-  float bx0 = f(box[0][0]), by0 = f(box[0][1]);
-  float bx1 = f(box[1][0]), by1 = f(box[1][1]);
-  float bx2 = f(box[2][0]), by2 = f(box[2][1]);
-  float bx3 = f(box[3][0]), by3 = f(box[3][1]);
-
-  float crop_w =
-      std::sqrt((bx0 - bx1) * (bx0 - bx1) + (by0 - by1) * (by0 - by1));
-  float crop_h =
-      std::sqrt((bx0 - bx3) * (bx0 - bx3) + (by0 - by3) * (by0 - by3));
-
-  CropGeometry cg{};
-  cg.vertical = (crop_h >= crop_w * kVerticalAspectRatio);
-
-  if (cg.vertical) {
-    cg.src_pts[0] = bx3; cg.src_pts[1] = by3;
-    cg.src_pts[2] = bx0; cg.src_pts[3] = by0;
-    cg.src_pts[4] = bx1; cg.src_pts[5] = by1;
-    cg.src_pts[6] = bx2; cg.src_pts[7] = by2;
-    std::swap(crop_w, crop_h);
-  } else {
-    cg.src_pts[0] = bx0; cg.src_pts[1] = by0;
-    cg.src_pts[2] = bx1; cg.src_pts[3] = by1;
-    cg.src_pts[4] = bx2; cg.src_pts[5] = by2;
-    cg.src_pts[6] = bx3; cg.src_pts[7] = by3;
-  }
-
-  cg.dst_w = std::max(static_cast<int>(std::round(crop_w)), 1);
-  cg.dst_h = std::max(static_cast<int>(std::round(crop_h)), 1);
-  return cg;
 }
 
 } // namespace turbo_ocr

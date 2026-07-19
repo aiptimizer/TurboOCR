@@ -19,34 +19,30 @@ Box axis_aligned_box(int x, int y, int w, int h) {
 
 } // namespace
 
-TEST_CASE("box_aspect uses edge lengths, not the AABB", "[rec_geometry]") {
-  CHECK(box_aspect(axis_aligned_box(0, 0, 100, 50)) == Catch::Approx(2.0f));
-  CHECK(box_aspect(axis_aligned_box(10, 20, 48, 48)) == Catch::Approx(1.0f));
-
-  // 3-4-5 rotated rectangle: width edge (30,40) has length 50, height edge
-  // (-8,6) has length 10 -> aspect 5.
-  Box rot{};
-  rot[0] = {0, 0};
-  rot[1] = {30, 40};
-  rot[2] = {22, 46};
-  rot[3] = {-8, 6};
-  CHECK(box_aspect(rot) == Catch::Approx(5.0f));
+TEST_CASE("rec_input_width clamps to [kMinRecWidth, kMaxRecWidth]",
+          "[rec_geometry]") {
+  // 100x50 box at h=48 -> ceil(48 * 2) = 96
+  CHECK(rec_input_width(axis_aligned_box(0, 0, 100, 50), 48) == 96);
+  // Degenerate (zero-area) box -> the kMinRecWidth floor, not width 1.
+  // Non-degenerate boxes can't go below the floor: horizontal means
+  // w/h > 1/kVerticalAspectRatio, so ceil(48 * w/h) >= 32 by geometry —
+  // the floor exists to keep degenerate quads off sub-minimum tensors.
+  CHECK(rec_input_width(axis_aligned_box(0, 0, 0, 0), 48) == kMinRecWidth);
+  // Extreme aspect -> capped at kMaxRecWidth
+  CHECK(rec_input_width(axis_aligned_box(0, 0, 100000, 20), 48) ==
+        kMaxRecWidth);
 }
 
-TEST_CASE("box_aspect degenerate height yields zero", "[rec_geometry]") {
-  CHECK(box_aspect(axis_aligned_box(0, 0, 100, 0)) == 0.0f);
-}
-
-TEST_CASE("natural_rec_width clamps to [floor, kMaxRecWidth]", "[rec_geometry]") {
-  // aspect 2 at h=48 -> 96
-  CHECK(natural_rec_width(2.0f, 48, 32) == 96);
-  // below the floor -> floor
-  CHECK(natural_rec_width(0.1f, 48, 32) == 32);
-  CHECK(natural_rec_width(0.1f, 48, 320) == 320);
-  // beyond the ceiling -> kMaxRecWidth
-  CHECK(natural_rec_width(1000.0f, 48, 32) == kMaxRecWidth);
-  // exactly at the ceiling
-  CHECK(natural_rec_width(kMaxRecWidth / 48.0f, 48, 32) == kMaxRecWidth);
+TEST_CASE("rec_input_width sizes vertical boxes by the SWAPPED aspect",
+          "[rec_geometry]") {
+  // 20x200 vertical column: the crop transform swaps it upright, so the
+  // recognizer input width is ceil(48 * 200/20) = 480 — NOT the 32px floor
+  // the raw (unswapped) 0.1 edge aspect would produce. Bucketing from the
+  // unswapped aspect clamped the warp to a smaller canvas and compressed
+  // vertical text horizontally.
+  CHECK(rec_input_width(axis_aligned_box(0, 0, 20, 200), 48) == 480);
+  CHECK(snap_width_bucket(rec_input_width(axis_aligned_box(0, 0, 20, 200),
+                                          48)) == 480);
 }
 
 TEST_CASE("snap_width_bucket picks the smallest covering bucket", "[rec_geometry]") {
@@ -86,14 +82,12 @@ TEST_CASE("snap_width_step pads at most step-1 and never shrinks", "[rec_geometr
   }
 }
 
-TEST_CASE("kMinRecWidth floors tiny crops without stretching", "[rec_geometry]") {
-  // A 4:12 single-character box has natural width ceil(48*4/12) = 16; the
-  // recognizer input must floor at kMinRecWidth (pad, never stretch). The
-  // regression this guards: flooring at the 320px model probe width stretched
-  // tiny glyphs ~10x horizontally and dropped them from recognition entirely.
-  CHECK(natural_rec_width(4.0f / 12.0f, 48, kMinRecWidth) == kMinRecWidth);
-  // A crop already wider than the floor keeps its natural width.
-  CHECK(natural_rec_width(10.0f / 12.0f, 48, kMinRecWidth) == 40);
+TEST_CASE("kMinRecWidth keeps tiny crops near natural width", "[rec_geometry]") {
+  // A 10x12 single-character box renders at its natural ceil(48*10/12) = 40px
+  // — never stretched wider. The regression this guards: flooring the input
+  // width at the 320px model probe width stretched tiny glyphs ~8x
+  // horizontally and dropped them from recognition entirely.
+  CHECK(rec_input_width(axis_aligned_box(0, 0, 10, 12), 48) == 40);
   // The floor must never exceed the smallest TRT bucket, or bucket snapping
   // could not represent floored widths.
   static_assert(kMinRecWidth <= kRecWidthBuckets.front());

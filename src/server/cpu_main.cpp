@@ -332,7 +332,8 @@ int main(int argc, char **argv) try {
         }
         if (cpu_reject_unknown_query_params(
                 req, {"layout", "reading_order", "as_blocks", "tables",
-                      "formulas", "width", "height", "channels"}, callback))
+                      "formulas", "text", "width", "height", "channels"},
+                callback))
           return;
         if (auto r = turbo_ocr::server::check_structure_backends(
                 opts, table_available, formula_available);
@@ -432,7 +433,7 @@ int main(int argc, char **argv) try {
         }
         if (cpu_reject_unknown_query_params(
                 req, {"layout", "reading_order", "as_blocks", "tables",
-                      "formulas"}, callback))
+                      "formulas", "text"}, callback))
           return;
         if (auto r = turbo_ocr::server::check_structure_backends(
                 opts, table_available, formula_available);

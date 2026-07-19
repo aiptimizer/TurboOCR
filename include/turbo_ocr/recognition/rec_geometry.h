@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 
+#include "turbo_ocr/common/perspective.h"
 #include "turbo_ocr/common/types.h"
 
 // Crop-width geometry shared by the TRT and ORT recognizers. The width math
@@ -35,23 +36,18 @@ inline constexpr std::array kRecWidthBuckets = {320, 480, 800, 1200,
 static_assert(kRecWidthBuckets.back() == kMaxRecWidth,
               "bucket table must cover the full clamped width range");
 
-// Aspect ratio of a (possibly rotated) detection quad: edge lengths, not AABB.
-[[nodiscard]] inline float box_aspect(const Box &box) {
-  const float w = std::sqrt(((box[0][0] - box[1][0]) * (box[0][0] - box[1][0])) +
-                            ((box[0][1] - box[1][1]) * (box[0][1] - box[1][1])));
-  const float h = std::sqrt(((box[0][0] - box[3][0]) * (box[0][0] - box[3][0])) +
-                            ((box[0][1] - box[3][1]) * (box[0][1] - box[3][1])));
-  return (h > 0) ? (w / h) : 0.0f;
-}
-
-// Natural crop width at the recognizer input height, clamped to
-// [floor_w, kMaxRecWidth]. floor_w differs by backend: the TRT path allows
-// down to 32px, the ORT path floors at its model input width.
-[[nodiscard]] inline int natural_rec_width(float aspect, int rec_image_h,
-                                           int floor_w) {
-  const int w = std::min(static_cast<int>(std::ceil(rec_image_h * aspect)),
-                         kMaxRecWidth);
-  return std::max(w, floor_w);
+// Recognizer input width for a detection quad: the SWAPPED natural content
+// width from compute_crop_transform — the same transform the warp itself
+// evaluates — floored at kMinRecWidth (capped at kMaxRecWidth inside the
+// transform). The single width source for BOTH the TRT and ORT recognizers.
+// Deriving it from the raw edge aspect instead (box_aspect) under-sizes
+// vertical boxes: their bucket then clamps the swapped width and the rendered
+// text gets compressed horizontally.
+[[nodiscard]] inline int rec_input_width(const turbo_ocr::Box &box,
+                                         int rec_image_h) {
+  const auto ct = turbo_ocr::compute_crop_transform(box, rec_image_h,
+                                                    kMaxRecWidth);
+  return std::max(ct.crop_width, kMinRecWidth);
 }
 
 // TRT policy: snap to the fixed bucket table (matches the engine profiles).

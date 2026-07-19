@@ -849,8 +849,17 @@ void register_ocr_stream_route_gpu(server::WorkPool &pool,
 
     pdf::PdfMode req_mode = default_pdf_mode;
     auto mode_str = req->getParameter("mode");
-    if (!mode_str.empty())
+    if (!mode_str.empty()) {
+      // Same contract as /ocr/pdf (parse_pdf_request): an explicit but
+      // unrecognized mode is a 400, never a silent fall-back to the default.
+      if (!pdf::is_valid_pdf_mode(mode_str)) {
+        callback(server::error_response(
+            drogon::k400BadRequest, "INVALID_PARAMETER",
+            "mode must be one of ocr, geometric, auto, auto_verified"));
+        return;
+      }
       req_mode = pdf::parse_pdf_mode(mode_str.c_str(), default_pdf_mode);
+    }
 
     PdfImageMode image_mode;
     pdf::EncodeOptions encode_opts;
@@ -975,7 +984,9 @@ void register_ocr_stream_route_gpu(server::WorkPool &pool,
                   : job.status == PdfJobStatus::Dropped    ? "SERVER_BUSY"
                   : job.status == PdfJobStatus::TimedOut   ? "INFERENCE_TIMEOUT"
                   : job.status == PdfJobStatus::EmptyPdf   ? "EMPTY_PDF"
-                                                           : "PAGE_FAILED";
+                  : job.status == PdfJobStatus::DecodeFailed
+                      ? "PAGE_DECODE_FAILED"
+                      : "PAGE_FAILED";
               state->send_line(std::format(
                   "{{\"event\":\"error\",\"code\":\"{}\"}}", code));
             }
@@ -1018,9 +1029,16 @@ void register_ocr_stream_route_gpu(server::WorkPool &pool,
           const int kMaxImageDim = decode::max_image_dim();
           if (img.empty() || img.cols > kMaxImageDim || img.rows > kMaxImageDim ||
               decode::exceeds_pixel_cap(img.cols, img.rows)) {
-            state->send_line(img.empty()
-                ? "{\"event\":\"error\",\"code\":\"IMAGE_DECODE_FAILED\"}"
-                : "{\"event\":\"error\",\"code\":\"DIMENSIONS_TOO_LARGE\"}");
+            // Same three-way split as every other image route: decode failure,
+            // per-side dimension cap, and pixel-AREA cap each keep their own
+            // code so clients can tell which limit they hit.
+            const char *code =
+                img.empty() ? "IMAGE_DECODE_FAILED"
+                : (img.cols > kMaxImageDim || img.rows > kMaxImageDim)
+                    ? "DIMENSIONS_TOO_LARGE"
+                    : "PIXELS_TOO_LARGE";
+            state->send_line(std::format(
+                "{{\"event\":\"error\",\"code\":\"{}\"}}", code));
             state->finish();
             return;
           }

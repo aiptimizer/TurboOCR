@@ -11,8 +11,8 @@ namespace turbo_ocr::formula {
 // a CPU session — matches the session's MemoryInfo). i64=true for int64 inputs
 // (tokens/pos), false for float32.
 struct OrtTensor {
-  const char *name;
-  void *data;                 // device (CUDA session) or host (CPU session) pointer
+  const char *name = nullptr;
+  void *data = nullptr;       // device (CUDA session) or host (CPU session) pointer
   std::vector<int64_t> shape;
   bool i64 = false;
 };

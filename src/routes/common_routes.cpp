@@ -206,10 +206,19 @@ void register_health_route(std::function<bool()> readiness_check,
           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
         const bool has_check = static_cast<bool>(*ready_check);
         if (pool && has_check) {
-          server::submit_work(*pool, std::move(callback),
-              [ready_check, respond](server::DrogonCallback &cb) {
-            respond(cb, (*ready_check)());
-          });
+          // Not submit_work: its pool-exhaustion arm answers 503 SERVER_BUSY,
+          // which a readiness prober reads as not-ready and pulls a loaded but
+          // healthy pod out of rotation — the exact flap the probe's own
+          // last-verdict logic exists to prevent. A full queue means busy,
+          // not broken: answer ready without running the probe.
+          auto cb = std::make_shared<server::DrogonCallback>(std::move(callback));
+          try {
+            pool->submit([cb, ready_check, respond]() {
+              respond(*cb, (*ready_check)());
+            });
+          } catch (const turbo_ocr::PoolExhaustedError &) {
+            (*cb)(server::make_response(drogon::k200OK, "ok"));
+          }
           return;
         }
         // No pool (cheap CPU check) or no check configured: run inline.

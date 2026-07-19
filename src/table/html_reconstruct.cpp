@@ -88,6 +88,10 @@ std::string sanitize_tag(std::string_view inner) {
 std::string sanitize_table_html(const std::string& html) {
   std::string out;
   out.reserve(html.size());
+  // Lower-cased ONCE for the close-tag scans: recomputing it per
+  // <script>/<style> element made an input of many such elements O(n²) —
+  // a CPU-DoS lever on this semi-trusted (VLM-produced) input.
+  const std::string html_lower = ascii_lower(html);
   size_t i = 0, n = html.size();
   while (i < n) {
     if (html[i] != '<') { out += html[i++]; continue; }
@@ -103,7 +107,7 @@ std::string sanitize_table_html(const std::string& html) {
     if (lower.rfind("script", 0) == 0 || lower.rfind("style", 0) == 0) {
       // skip to matching close tag (or end)
       std::string close = lower.rfind("script", 0) == 0 ? "</script" : "</style";
-      size_t c = ascii_lower(html).find(close, end);
+      size_t c = html_lower.find(close, end);
       i = (c == std::string::npos) ? n : html.find('>', c);
       i = (i == std::string::npos) ? n : i + 1;
       continue;

@@ -8,6 +8,7 @@
 #include <limits>
 #include <mutex>
 #include <semaphore>
+#include <stdexcept>
 #include <string_view>
 
 #include <grpcpp/grpcpp.h>
@@ -717,6 +718,12 @@ public:
           // here (the device decoder rejects it). Tag it like the single
           // Recognize path does, not the generic INFERENCE_ERROR.
           mark_empty_slot(entries[i], "IMAGE_TOO_LARGE");
+        } catch (const turbo_ocr::TimeoutError &) {
+          // get_with_timeout expired mid-slot: same condition as the
+          // deadline-already-elapsed arm above, so it must carry the same
+          // tag — two timed-out slots in one batch reporting different codes
+          // would misattribute the timeout to an inference fault.
+          mark_empty_slot(entries[i], "INFERENCE_TIMEOUT");
         } catch (const std::exception &e) {
           TOCR_LOG_ERROR_RL("gRPC batch image error", "index", i, "error", e.what());
           mark_empty_slot(entries[i], "INFERENCE_ERROR");
@@ -768,9 +775,14 @@ public:
           if (held) extra_worker_permits.release();
         }
       };
-      std::vector<std::jthread> workers;
+      // permits BEFORE workers: destruction runs in reverse declaration
+      // order, so the jthreads join first and the permits release only after
+      // every worker has exited. Declared the other way round, the permits
+      // would return to the global pool while these workers still run,
+      // letting a concurrent RPC oversubscribe the worker bound.
       std::vector<Permit> permits(static_cast<size_t>(
           std::max(0, num_workers - 1)));
+      std::vector<std::jthread> workers;
       workers.reserve(static_cast<size_t>(num_workers));
       workers.emplace_back(worker_fn);  // guaranteed worker, no permit
       for (int w = 1; w < num_workers; ++w) {
@@ -1133,6 +1145,14 @@ inline GrpcHandle launch_grpc_server(std::shared_ptr<OCRServiceImpl> service,
   builder.AddChannelArgument(GRPC_ARG_MINIMAL_STACK, 1);
 
   auto server = builder.BuildAndStart();
+  // BuildAndStart returns null when the listener fails (port in use,
+  // permission denied). Throw so main()'s startup catch turns it into a
+  // logged clean exit — otherwise the Wait() thread dereferences null and
+  // the process dies by segfault with a misleading "listening" log line.
+  if (!server)
+    throw std::runtime_error(std::format(
+        "gRPC server failed to bind {} (port in use or permission denied)",
+        address));
   std::cout << std::format("gRPC server listening on {} (max_body_mb={})\n",
                             address, max_body_mb);
 

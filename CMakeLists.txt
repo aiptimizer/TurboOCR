@@ -238,7 +238,6 @@ add_library(turbo_ocr_common STATIC
     src/detection/det_postprocess.cpp
     src/formula/cjk_stats.cpp
     src/formula/latex_extract.cpp
-    src/recognition/crop_utils.cpp
     src/recognition/ctc_decode.cpp
     src/decode/fast_png_decoder.cpp
     src/layout/reading_order.cpp

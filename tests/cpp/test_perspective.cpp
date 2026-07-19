@@ -4,7 +4,6 @@
 
 using turbo_ocr::Box;
 using turbo_ocr::compute_crop_transform;
-using turbo_ocr::compute_crop_geometry;
 using turbo_ocr::compute_perspective_inv;
 
 TEST_CASE("compute_crop_transform horizontal box", "[perspective]") {
@@ -49,25 +48,6 @@ TEST_CASE("compute_crop_transform minimum width is 1", "[perspective]") {
   auto ct = compute_crop_transform(box, 48, 4000);
 
   CHECK(ct.crop_width >= 1);
-}
-
-TEST_CASE("compute_crop_geometry horizontal box", "[perspective]") {
-  Box box{{{{{10, 20}}, {{110, 20}}, {{110, 50}}, {{10, 50}}}}};
-  auto cg = compute_crop_geometry(box);
-
-  CHECK_FALSE(cg.vertical);
-  CHECK(cg.dst_w == 100);
-  CHECK(cg.dst_h == 30);
-}
-
-TEST_CASE("compute_crop_geometry vertical box rotates", "[perspective]") {
-  // width=20, height=100 -> after rotation dst_w=100, dst_h=20
-  Box box{{{{{0, 0}}, {{20, 0}}, {{20, 100}}, {{0, 100}}}}};
-  auto cg = compute_crop_geometry(box);
-
-  CHECK(cg.vertical);
-  CHECK(cg.dst_w == 100);
-  CHECK(cg.dst_h == 20);
 }
 
 TEST_CASE("compute_perspective_inv identity-like transform", "[perspective]") {

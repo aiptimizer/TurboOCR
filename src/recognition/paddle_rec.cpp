@@ -224,10 +224,9 @@ PaddleRec::run(const GpuImage &img, const std::vector<Box> &boxes,
 
   // Snap each INDIVIDUAL crop width to a bucket (see rec_geometry.h for the
   // width math and the known recall ceiling of the kMaxRecWidth cap).
-  // Minimum 32px, NOT forced to 320.
   for (int i = 0; i < total_boxes; i++) {
-    const int bucket = snap_width_bucket(
-        natural_rec_width(box_aspect(boxes[i]), rec_image_h_, kMinRecWidth));
+    const int bucket =
+        snap_width_bucket(rec_input_width(boxes[i], rec_image_h_));
     crops[i] = {i, bucket};
   }
 
@@ -365,8 +364,8 @@ PaddleRec::run_multi(const std::vector<ImageCrops> &image_crops,
   for (int i = 0; i < num_images; i++) {
     const auto &boxes = image_crops[i].boxes;
     for (int b = 0; b < static_cast<int>(boxes.size()); b++) {
-      const int bucket = snap_width_bucket(
-          natural_rec_width(box_aspect(boxes[b]), rec_image_h_, kMinRecWidth));
+      const int bucket =
+          snap_width_bucket(rec_input_width(boxes[b], rec_image_h_));
       crops.push_back({i, b, bucket});
     }
   }

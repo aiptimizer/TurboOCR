@@ -380,9 +380,7 @@ bool PdfRenderer::respawn_daemon(Daemon &d) {
 
 PdfRenderer::PdfRenderer(int pool_size, int workers_per_render)
     : pool_size_(pool_size), workers_per_render_(workers_per_render),
-      daemons_(pool_size) {
-  binary_path_ = find_binary();
-
+      binary_path_(find_binary()), daemons_(pool_size) {
   for (int i = 0; i < pool_size_; ++i)
     spawn_daemon(daemons_[i]);
 
@@ -473,12 +471,17 @@ struct SigpipeBlocker {
   }
 };
 
+// Upper bound on any page number the fastpdf2png daemon can legitimately
+// produce. Shared by the "OK <n>" reply parser and the inotify filename
+// parser so neither can be driven past it into a huge allocation or (in the
+// filename case) signed-int overflow while accumulating digits.
+constexpr int kMaxDaemonPages = 100000;
+
 // Parse the page count out of a daemon "OK <n>" reply. A wedged or killed
 // child can hand back arbitrary bytes; that must surface as PdfRenderError,
 // not as std::invalid_argument escaping the error taxonomy.
 [[nodiscard]] int parse_daemon_page_count(const std::string &resp) {
   if (!resp.starts_with("OK ")) return 0;
-  constexpr int kMaxDaemonPages = 100000;
   int n = 0;
   const char *first = resp.data() + 3;
   const char *last = resp.data() + resp.size();
@@ -718,10 +721,13 @@ PdfRenderer::render_streamed(const uint8_t *data, size_t len, int dpi,
         auto num_part = name.substr(2, name.size() - 6);
         int page_num = 0;
         for (char c : num_part) {
-          if (c < '0' || c > '9') { page_num = -1; break; }
+          if (c < '0' || c > '9' || page_num > kMaxDaemonPages) {
+            page_num = -1;
+            break;
+          }
           page_num = page_num * 10 + (c - '0');
         }
-        if (page_num <= 0) continue;
+        if (page_num <= 0 || page_num > kMaxDaemonPages) continue;
 
         int page_idx = page_num - 1; // 0-based
         if (page_idx >= static_cast<int>(delivered.size()))

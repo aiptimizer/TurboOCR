@@ -59,9 +59,7 @@ bool CpuPaddleRec::load_dict(const std::string &dict_path) {
 }
 
 int CpuPaddleRec::rec_target_width(const Box &box) const {
-  const auto ct =
-      turbo_ocr::compute_crop_transform(box, rec_image_h_, kMaxRecWidth);
-  return std::max(ct.crop_width, kMinRecWidth);
+  return rec_input_width(box, rec_image_h_);
 }
 
 void CpuPaddleRec::preprocess_box(const cv::Mat &img, const Box &box,
