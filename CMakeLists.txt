@@ -280,7 +280,16 @@ add_executable(turbo_ocr_tests
     tests/cpp/test_dict_resolution.cpp
     tests/cpp/test_gpu_safety.cpp
     tests/cpp/test_routing_config.cpp
+    tests/cpp/test_rec_geometry.cpp
+    tests/cpp/test_env_utils.cpp
+    tests/cpp/test_html_reconstruct.cpp
+    tests/cpp/test_formula_tokenizer.cpp
+    tests/cpp/test_png_guards.cpp
+    tests/cpp/test_pipeline_detail.cpp
+    tests/cpp/test_pdf_mode_strict.cpp
     src/render/pdf_renderer.cpp
+    src/table/html_reconstruct.cpp
+    src/formula/formula_tokenizer.cpp
     third_party/catch2/catch_amalgamated.cpp
 )
 target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_common)
