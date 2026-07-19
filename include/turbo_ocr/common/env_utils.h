@@ -87,9 +87,10 @@ namespace turbo_ocr::env {
   char *end = nullptr;
   errno = 0;
   float val = std::strtof(v, &end);
-  // NaN passes both range comparisons below (all NaN compares are false),
-  // so it must be rejected as malformed explicitly.
-  if (end == v || *end != '\0' || std::isnan(val)) {
+  // Reject non-finite explicitly: NaN passes every range comparison (all NaN
+  // compares are false), and inf would pass an unbounded range — no config
+  // knob ever wants either, so treat both as malformed independent of range.
+  if (end == v || *end != '\0' || !std::isfinite(val)) {
     errors.push_back(std::string(name) + "=\"" + v +
                      "\" is not a valid number");
     return def;

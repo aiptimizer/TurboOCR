@@ -154,7 +154,14 @@ std::vector<Row> parse_rows(std::string_view html) {
 
 // Grid width accounting for colspan/rowspan. `blocked_until[c]` is the first row
 // index at which column c is free again — a single vector, no per-cell sets.
+//
+// blocked_until grows to the running SUM of colspans, so many cells each near
+// the per-cell kMaxSpan cap would otherwise amplify into a multi-GB resize on
+// adversarial model HTML (the per-cell clamp bounds one span, not the total).
+// Cap the grid width — a real table never approaches it — mirroring the OTSL
+// path's kMaxTableCells guard; past it, stop widening and return the cap.
 int calc_total_columns(const std::vector<Row>& rows) {
+  constexpr int kMaxGridColumns = 4096;
   int max_cols = 0;
   std::vector<int> blocked_until;
   for (std::size_t r = 0; r < rows.size(); ++r) {
@@ -163,12 +170,13 @@ int calc_total_columns(const std::vector<Row>& rows) {
     for (const Cell& cell : rows[r]) {
       while (col < static_cast<int>(blocked_until.size()) && blocked_until[col] > row)
         ++col;
-      const int end = col + cell.colspan;
+      const int end = std::min(col + cell.colspan, kMaxGridColumns);
       if (end > static_cast<int>(blocked_until.size())) blocked_until.resize(end, 0);
       const int free_row = row + cell.rowspan;
       for (int c = col; c < end; ++c) blocked_until[c] = free_row;
       col = end;
       max_cols = std::max(max_cols, col);
+      if (max_cols >= kMaxGridColumns) return kMaxGridColumns;
     }
   }
   return max_cols;

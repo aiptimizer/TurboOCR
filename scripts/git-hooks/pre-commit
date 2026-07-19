@@ -72,7 +72,7 @@ done
 # try-scoped helper (see parse_daemon_page_count for the pattern).
 for f in "${cxx_files[@]:-}"; do
   [ -n "$f" ] || continue
-  if staged "$f" | grep -nE '(std::)?\bsto(i|l|ul|ll|ull|f|d)\(' \
+  if staged "$f" | grep -nE '(std::)?\bsto(i|l|ul|ll|ull|f|d|ld)\(' \
       | grep -vqE 'pre-commit-allow-stoi'; then
     say "pre-commit: $f uses std::stoi/stol — prefer std::from_chars with explicit error handling."
     fail=1
@@ -87,9 +87,13 @@ for f in "${cmake_files[@]:-}"; do
     fail=1
   fi
 done
-# A CMakeLists.txt that nothing includes misleads contributors. Matched by
-# FULL repo-relative dir against the STAGED top-level CMakeLists (a rename
-# staged in the same commit must count), tolerating quotes.
+# A CMakeLists.txt that no other CMakeLists includes misleads contributors.
+# add_subdirectory() references a child by the path relative to the INCLUDING
+# file, so a nested foo/bar/CMakeLists is referenced as `add_subdirectory(bar)`
+# in foo/CMakeLists — match either the full repo-relative dir OR the leaf name,
+# across ALL tracked CMakeLists (not just the top one), with regex metachars
+# escaped so a dir like `a.b` can't match loosely.
+re_escape() { printf '%s' "$1" | sed 's/[][\\.^$*+?(){}|/]/\\&/g'; }
 for f in "${cmake_files[@]:-}"; do
   [ -n "$f" ] || continue
   case "$f" in
@@ -98,9 +102,12 @@ for f in "${cmake_files[@]:-}"; do
     *) continue ;;
   esac
   dir=$(dirname "$f")
-  if ! { staged CMakeLists.txt 2>/dev/null || cat CMakeLists.txt; } \
-      | grep -qE "add_subdirectory *\( *\"?${dir}\"?" ; then
-    say "pre-commit: $f is not referenced by add_subdirectory(${dir}) in the top CMakeLists — orphaned CMakeLists are banned."
+  esc_dir=$(re_escape "$dir")
+  esc_leaf=$(re_escape "$(basename "$dir")")
+  pat="add_subdirectory *\\( *\"?(${esc_dir}|${esc_leaf})\"?"
+  if ! git ls-files -- '*CMakeLists.txt' 2>/dev/null \
+       | xargs -r grep -lE "$pat" 2>/dev/null | grep -q .; then
+    say "pre-commit: $f is not referenced by any add_subdirectory(${dir}) — orphaned CMakeLists are banned."
     fail=1
   fi
 done

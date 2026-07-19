@@ -122,3 +122,16 @@ TEST_CASE("sanitize_table_html keeps a clean table byte-safe", "[html_reconstruc
   CHECK(out.find("a") != std::string::npos);
   CHECK(out.find("b") != std::string::npos);
 }
+
+TEST_CASE("sanitize_table_html does not confuse valign with align",
+          "[html_reconstruct][sanitize]") {
+  const auto out = sanitize_table_html(
+      "<table><tr><td valign=\"middle\">x</td></tr></table>");
+  // valign is preserved; a spurious standalone align must NOT appear.
+  CHECK(out.find("valign=\"middle\"") != std::string::npos);
+  // exactly one occurrence of `align=` (the one inside valign=), no extra
+  const std::string needle = "align=\"middle\"";
+  size_t first = out.find(needle);
+  REQUIRE(first != std::string::npos);
+  CHECK(out.find(needle, first + 1) == std::string::npos);
+}

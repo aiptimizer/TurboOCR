@@ -291,11 +291,18 @@ add_executable(turbo_ocr_tests
     tests/cpp/test_serialization_escape.cpp
     tests/cpp/test_logger_bounds.cpp
     tests/cpp/test_latex_extract.cpp
-    src/render/pdf_renderer.cpp
-    src/table/html_reconstruct.cpp
-    src/formula/formula_tokenizer.cpp
     third_party/catch2/catch_amalgamated.cpp
 )
+# These three TUs are not in turbo_ocr_common. On the CPU build the test has no
+# other provider, so it compiles them directly. On the GPU build they come from
+# turbo_ocr_gpu (linked below); compiling them here too would double-compile
+# (static-archive dedup hides it, but it is fragile). Add them CPU-only.
+if(USE_CPU_ONLY)
+    target_sources(turbo_ocr_tests PRIVATE
+        src/render/pdf_renderer.cpp
+        src/table/html_reconstruct.cpp
+        src/formula/formula_tokenizer.cpp)
+endif()
 target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_common)
 target_include_directories(turbo_ocr_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/catch2

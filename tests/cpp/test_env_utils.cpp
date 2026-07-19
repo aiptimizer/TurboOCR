@@ -157,6 +157,14 @@ TEST_CASE("env_float_strict rejects NaN and range violations", "[env_utils]") {
   }
   errors.clear();
   {
+    // inf must be rejected as malformed (not merely by the range check), so it
+    // stays rejected even against an unbounded range.
+    ScopedEnv e(kVar, "inf");
+    CHECK(env_float_strict(kVar, 1.0f, -1e30f, 1e30f, errors) == 1.0f);
+    CHECK(errors.size() == 1);
+  }
+  errors.clear();
+  {
     ScopedEnv e(kVar, "2.5");
     CHECK(env_float_strict(kVar, 1.0f, 0.0f, 1.0f, errors) == 1.0f);
     CHECK(errors.size() == 1);

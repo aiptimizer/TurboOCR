@@ -439,9 +439,13 @@ void argmax_kernel(const float *input_probs, int *output_indices,
   s_idxs[tid] = local_idx;
   __syncthreads();
 
+  // Every reduction breaks an exact-value tie toward the LOWER class index
+  // (not the lower thread id), so the GPU argmax is deterministic and matches
+  // the CPU/AVX2 CTC reference (ctc_decode.cpp), which keeps the lowest index.
   for (int stride = block_size / 2; stride > 32; stride >>= 1) {
     if (tid < stride) {
-      if (s_vals[tid + stride] > s_vals[tid]) {
+      if (s_vals[tid + stride] > s_vals[tid] ||
+          (s_vals[tid + stride] == s_vals[tid] && s_idxs[tid + stride] < s_idxs[tid])) {
         s_vals[tid] = s_vals[tid + stride];
         s_idxs[tid] = s_idxs[tid + stride];
       }
@@ -454,13 +458,18 @@ void argmax_kernel(const float *input_probs, int *output_indices,
     // Load from shared to registers
     float wval = s_vals[tid];
     int widx = s_idxs[tid];
-    if (s_vals[tid + 32] > wval) { wval = s_vals[tid + 32]; widx = s_idxs[tid + 32]; }
+    if (s_vals[tid + 32] > wval ||
+        (s_vals[tid + 32] == wval && s_idxs[tid + 32] < widx)) {
+      wval = s_vals[tid + 32]; widx = s_idxs[tid + 32];
+    }
 
     // Warp shuffle reduction
     for (int offset = 16; offset > 0; offset >>= 1) {
       float other_val = __shfl_down_sync(0xffffffff, wval, offset);
       int other_idx = __shfl_down_sync(0xffffffff, widx, offset);
-      if (other_val > wval) { wval = other_val; widx = other_idx; }
+      if (other_val > wval || (other_val == wval && other_idx < widx)) {
+        wval = other_val; widx = other_idx;
+      }
     }
 
     if (tid == 0) {

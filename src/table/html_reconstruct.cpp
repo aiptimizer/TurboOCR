@@ -47,10 +47,20 @@ std::string sanitize_tag(std::string_view inner) {
     static constexpr std::array<std::string_view, 4> kAttrs = {
         "colspan", "rowspan", "align", "valign"};
     std::string_view attrs = body.substr(sp);
+    const std::string lowattrs = ascii_lower(attrs);
     for (std::string_view a : kAttrs) {
       const std::string needle = std::string(a) + "=";
-      const std::string lowattrs = ascii_lower(attrs);
-      size_t p = lowattrs.find(needle);
+      // Match the attribute only at a token boundary so `align=` doesn't
+      // substring-match inside `valign=` and emit a spurious duplicate.
+      size_t p = std::string::npos;
+      for (size_t i = lowattrs.find(needle); i != std::string::npos;
+           i = lowattrs.find(needle, i + 1)) {
+        if (i == 0 || std::isspace((unsigned char)lowattrs[i - 1]) ||
+            lowattrs[i - 1] == '"' || lowattrs[i - 1] == '\'') {
+          p = i;
+          break;
+        }
+      }
       if (p == std::string::npos) continue;
       p += needle.size();
       // value: quoted or bare up to whitespace
