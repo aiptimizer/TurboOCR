@@ -182,9 +182,20 @@ split_projection_profile_pmr(const std::pmr::vector<int> &projection,
 void recursive_xy_cut_impl(const std::vector<std::array<int, 4>> &rects,
                            const std::pmr::vector<int> &indices,
                            std::vector<int> &res, int min_gap,
-                           std::pmr::memory_resource *mr) {
+                           std::pmr::memory_resource *mr, int depth = 0) {
   if (indices.empty()) return;
   if (indices.size() == 1) { res.push_back(indices.front()); return; }
+
+  // Deep alternating H/V nesting would grow the monotonic pool super-linearly
+  // (each frame keeps its scratch until the top-level call returns) and
+  // recurse unbounded. Real layouts nest a handful of levels; past the cap,
+  // emit the remaining boxes in their current (x-then-y sorted) order — a
+  // stable fallback, same spirit as the "no progress" bail below.
+  constexpr int kMaxXyCutDepth = 64;
+  if (depth >= kMaxXyCutDepth) {
+    for (int idx : indices) res.push_back(idx);
+    return;
+  }
 
   // Build the local view (rects subset for this recursion frame).
   std::pmr::vector<std::array<int, 4>> subset(mr);
@@ -303,7 +314,7 @@ void recursive_xy_cut_impl(const std::vector<std::array<int, 4>> &rects,
         for (int idx : row_indices) res.push_back(idx);
         continue;
       }
-      recursive_xy_cut_impl(rects, row_indices, res, min_gap, mr);
+      recursive_xy_cut_impl(rects, row_indices, res, min_gap, mr, depth + 1);
     }
   }
 }

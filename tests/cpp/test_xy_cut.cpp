@@ -5,6 +5,8 @@
 // columns, header + two columns, single box, and empty input.
 
 #include <catch_amalgamated.hpp>
+#include <algorithm>
+#include <vector>
 
 #include "turbo_ocr/common/serialization.h"
 #include "turbo_ocr/layout/child_blocks.h"
@@ -1206,4 +1208,28 @@ TEST_CASE("results_with_blocks: escapes JSON-special chars in content",
   auto json = turbo_ocr::results_with_blocks(results, layout, reading_order);
   CHECK(json.find("\"content\":\"with \\\"quotes\\\" and \\\\backslash\"")
         != std::string::npos);
+}
+
+TEST_CASE("recursive_xy_cut terminates and returns every box under deep nesting",
+          "[xy_cut][depth]") {
+  // A tall stack of well-separated single-box rows forces maximal alternating
+  // H/V recursion. The depth cap must keep it terminating and lossless (every
+  // input index appears exactly once in the output).
+  const int N = 500;
+  std::vector<std::array<int, 4>> rects;
+  rects.reserve(N);
+  for (int i = 0; i < N; ++i) {
+    const int y = i * 100;  // large vertical gaps -> deep row recursion
+    rects.push_back({0, y, 50, y + 10});
+  }
+  std::vector<int> indices(N);
+  for (int i = 0; i < N; ++i) indices[i] = i;
+
+  std::vector<int> order;
+  recursive_xy_cut(rects, indices, order);
+
+  REQUIRE(order.size() == static_cast<size_t>(N));
+  std::vector<int> sorted = order;
+  std::sort(sorted.begin(), sorted.end());
+  for (int i = 0; i < N; ++i) CHECK(sorted[i] == i);  // permutation, no loss
 }
