@@ -38,7 +38,7 @@ Parsed by `server::parse_query_options()` in
     emitted only when non-empty — text-only pages produce a response
     indistinguishable from the pre-feature shape. See
     `emit_pipeline_result_json` in
-    `include/turbo_ocr/common/serialization.h:567`.
+    `include/turbo_ocr/common/serialization/serialization_emit.h`.
 
 !!! warning "LAYOUT_DISABLED"
     Requesting `layout=1`, `reading_order=1`, `as_blocks=1`, `tables=1`,
@@ -515,9 +515,12 @@ counterpart of PP-StructureV3 `save_to_markdown`. See
 [Faithful Markdown export](../output_markdown.md) for the serialization rules.
 
 - **Body**: raw image bytes (same decoders as `/ocr/raw`).
-- **`embed` query** (default `true`): `embed=1` inlines figure/chart crops as
-  base64 `data:` URIs (self-contained `.md`); `embed=0` emits
-  `![](assets/blockN.png)` file-reference links (write the crops yourself).
+- **`embed` query** (default `true`): figure/chart crops are always inlined as
+  base64 `data:` URIs (self-contained `.md`). `embed=1` is accepted explicitly;
+  `embed=0` (file-reference links) is **rejected with
+  `400 INVALID_PARAMETER`** — the asset PNGs would be written to the server's
+  filesystem where an HTTP client cannot retrieve them. File-reference export
+  is available to library consumers via `render_markdown_with_assets`.
 - **Requires layout**: against a server started with `DISABLE_LAYOUT=1` the
   request returns `400 LAYOUT_DISABLED`.
 - **Response**: `text/markdown; charset=utf-8`.
@@ -525,9 +528,6 @@ counterpart of PP-StructureV3 `save_to_markdown`. See
 ```bash
 # self-contained markdown (images inline as data URIs)
 curl --data-binary @page.png http://localhost:8000/ocr/markdown > page.md
-
-# file-reference image links
-curl --data-binary @page.png 'http://localhost:8000/ocr/markdown?embed=0'
 ```
 
 Error codes: `EMPTY_BODY`, `LAYOUT_DISABLED`, `IMAGE_DECODE_FAILED`,

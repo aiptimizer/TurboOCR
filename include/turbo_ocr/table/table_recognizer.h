@@ -9,12 +9,12 @@
 
 #include <cuda_runtime.h>
 
-#include "turbo_ocr/common/box.h"
+#include "turbo_ocr/common/geometry/box.h"
 #include "turbo_ocr/common/types.h"        // OCRResultItem
 #include "turbo_ocr/decode/gpu_image.h"
 #include "turbo_ocr/router/router_types.h" // router::TableResult
 
-namespace turbo_ocr::routing { struct BackendSpec; }
+namespace turbo_ocr::backend_routing { struct BackendSpec; }
 namespace turbo_ocr::recognition { class PaddleRec; }
 
 namespace turbo_ocr::table {
@@ -87,8 +87,8 @@ public:
 //   "vlm"      — OpenAI-compatible vLLM endpoint (OTSL->HTML), env-configured
 std::unique_ptr<ITableRecognizer> make_table_recognizer(std::string_view backend);
 
-// Overload from a resolved routing::BackendSpec: kind==Openai -> the generic
+// Overload from a resolved backend_routing::BackendSpec: kind==Openai -> the generic
 // OpenAIEndpoint; kind==Local -> the engine-keyed factory above.
-std::unique_ptr<ITableRecognizer> make_table_recognizer(const routing::BackendSpec &spec);
+std::unique_ptr<ITableRecognizer> make_table_recognizer(const backend_routing::BackendSpec &spec);
 
 } // namespace turbo_ocr::table

@@ -1,7 +1,7 @@
 #include "turbo_ocr/lang_cls/script_id.h"
 
 #include "turbo_ocr/common/errors.h"
-#include "turbo_ocr/common/perspective.h"
+#include "turbo_ocr/common/geometry/perspective.h"
 #include "turbo_ocr/kernels/kernels.h"
 
 #include <algorithm>

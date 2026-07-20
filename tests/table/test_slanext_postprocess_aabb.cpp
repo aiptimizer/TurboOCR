@@ -3,8 +3,8 @@
 #include <cmath>
 #include <vector>
 
-#include "turbo_ocr/table/slanext_dict.h"
-#include "turbo_ocr/table/slanext_postprocess.h"
+#include "turbo_ocr/table/slanext/slanext_dict.h"
+#include "turbo_ocr/table/slanext/slanext_postprocess.h"
 #include "turbo_ocr/table/table_types.h"
 
 using turbo_ocr::table::CharDict;
@@ -27,7 +27,7 @@ void write_probs(std::vector<float>& probs, std::size_t step,
 }
 
 void write_quad(std::vector<float>& loc, std::size_t step,
-                std::array<float, 8> q) {
+                const std::array<float, 8> &q) {
     for (std::size_t k = 0; k < 8; ++k) loc[step * 8 + k] = q[k];
 }
 

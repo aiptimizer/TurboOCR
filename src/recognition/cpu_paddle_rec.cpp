@@ -1,19 +1,19 @@
 #include "turbo_ocr/recognition/cpu_paddle_rec.h"
-#include "turbo_ocr/recognition/crop_utils.h"
 #include "turbo_ocr/recognition/ctc_decode.h"
 
 #include "turbo_ocr/common/errors.h"
+#include "turbo_ocr/common/env_utils.h"
+#include "turbo_ocr/common/log/logger.h"
+#include "turbo_ocr/common/geometry/perspective.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <format>
-#include <iostream>
 #include <mutex>
 #include <opencv2/imgproc.hpp>
 
-#include "turbo_ocr/common/stage_profiler.h"
+#include "turbo_ocr/common/log/stage_profiler.h"
 
 using namespace turbo_ocr::recognition;
 using turbo_ocr::engine::CpuEngine;
@@ -21,20 +21,11 @@ using turbo_ocr::Box;
 
 CpuPaddleRec::CpuPaddleRec() {
   label_list_.push_back("blank");
-  if (const char *env = std::getenv("REC_BATCH_N")) {
-    int n = std::atoi(env);
-    if (n > 1)
-      rec_batch_num_ = n;
-  }
-  if (const char *env = std::getenv("REC_BUCKET_STEP")) {
-    int s = std::atoi(env);
-    if (s >= 1)
-      rec_bucket_step_ = s;
-  }
-  if (const char *env = std::getenv("REC_ZEROCOPY"))
-    rec_zerocopy_ = (std::strcmp(env, "0") != 0);
-  if (const char *env = std::getenv("REC_SELFTEST"))
-    rec_selftest_ = (std::strcmp(env, "1") == 0);
+  rec_batch_num_ = turbo_ocr::env::env_int("REC_BATCH_N", rec_batch_num_, 1, 256);
+  rec_bucket_step_ =
+      turbo_ocr::env::env_int("REC_BUCKET_STEP", rec_bucket_step_, 1, kMaxRecWidth);
+  rec_zerocopy_ = turbo_ocr::env::env_or("REC_ZEROCOPY", "1") != "0";
+  rec_selftest_ = turbo_ocr::env::env_enabled("REC_SELFTEST");
 }
 
 bool CpuPaddleRec::load_model(const std::string &model_path) {
@@ -46,8 +37,8 @@ bool CpuPaddleRec::load_model(const std::string &model_path) {
   std::vector<int64_t> probe_shape = {1, 3, static_cast<int64_t>(rec_image_h_),
                                        static_cast<int64_t>(kMaxRecWidth)};
   engine_->probe_output_dims(probe_shape, actual_seq_len_, actual_num_classes_);
-  std::cout << std::format("[CpuPaddleRec] Output dims: seq_len={} num_classes={}",
-                          actual_seq_len_, actual_num_classes_) << '\n';
+  TOCR_LOG_INFO("CpuPaddleRec output dims probed", "seq_len", actual_seq_len_,
+                "num_classes", actual_num_classes_);
   return true;
 }
 
@@ -67,29 +58,47 @@ bool CpuPaddleRec::load_dict(const std::string &dict_path) {
   return true;
 }
 
-void CpuPaddleRec::preprocess_crop(const cv::Mat &crop, int target_w,
-                                    std::vector<float> &buffer) {
-  // Resize to (rec_image_h_, target_w)
-  cv::Mat resized;
-  cv::resize(crop, resized, cv::Size(target_w, rec_image_h_));
+int CpuPaddleRec::rec_target_width(const Box &box) const {
+  return rec_input_width(box, rec_image_h_);
+}
 
-  // Convert to float, normalize to [-1, 1]: pixel/127.5 - 1.0
-  cv::Mat float_img;
-  resized.convertTo(float_img, CV_32F, 1.0 / 127.5, -1.0);
+void CpuPaddleRec::preprocess_box(const cv::Mat &img, const Box &box,
+                                  int target_w, std::vector<float> &buffer) {
+  // target_w >= the natural content width by construction (rec_target_width),
+  // so ct.crop_width here is that same content width.
+  const auto ct =
+      turbo_ocr::compute_crop_transform(box, rec_image_h_, target_w);
+  const int content_w = ct.crop_width;
 
-  // Convert BGR to RGB and to NCHW layout
-  int plane_size = rec_image_h_ * target_w;
-  buffer.resize(3 * plane_size);
+  // Single warp from the ORIGINAL image to the recognizer input size — the
+  // same dst->src mapping the GPU batch_roi_warp kernel evaluates.
+  // WARP_INVERSE_MAP: ct.M_inv maps destination pixels back to source
+  // coordinates; BORDER_REPLICATE == the kernel's source clamp.
+  const cv::Matx33f m_inv(ct.M_inv[0], ct.M_inv[1], ct.M_inv[2],
+                          ct.M_inv[3], ct.M_inv[4], ct.M_inv[5],
+                          ct.M_inv[6], ct.M_inv[7], ct.M_inv[8]);
+  cv::warpPerspective(img, warped_, m_inv, cv::Size(content_w, rec_image_h_),
+                      cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
+                      cv::BORDER_REPLICATE);
 
+  // Normalize to [-1, 1]: pixel/127.5 - 1.0
+  warped_.convertTo(float_crop_, CV_32F, 1.0 / 127.5, -1.0);
+
+  // NCHW RGB planes of width target_w; columns [content_w, target_w) stay 0
+  // (mid-gray in normalized space), matching the GPU kernel's padding.
+  const size_t plane = static_cast<size_t>(rec_image_h_) * target_w;
+  buffer.assign(3 * plane, 0.0f);
   cv::Mat channels[3];
-  cv::split(float_img, channels);
-
+  cv::split(float_crop_, channels);
   // RGB order (R=channels[2], G=channels[1], B=channels[0])
-  std::memcpy(buffer.data(), channels[2].data, plane_size * sizeof(float));
-  std::memcpy(buffer.data() + plane_size, channels[1].data,
-              plane_size * sizeof(float));
-  std::memcpy(buffer.data() + 2 * plane_size, channels[0].data,
-              plane_size * sizeof(float));
+  for (int c = 0; c < 3; ++c) {
+    const cv::Mat &src = channels[2 - c];
+    for (int r = 0; r < rec_image_h_; ++r)
+      std::memcpy(buffer.data() + c * plane +
+                      static_cast<size_t>(r) * target_w,
+                  src.ptr<float>(r),
+                  static_cast<size_t>(content_w) * sizeof(float));
+  }
 }
 
 std::vector<std::pair<std::string, float>>
@@ -112,16 +121,8 @@ CpuPaddleRec::run(const cv::Mat &img, const std::vector<Box> &boxes) {
     int target_w;
     {
       prof::Scope _s(prof::REC_PRE);
-      cv::Mat cropped = get_rotate_crop_image(img, boxes[i]);
-
-      float ar = (cropped.rows > 0)
-                     ? static_cast<float>(cropped.cols) / cropped.rows
-                     : 0;
-      target_w =
-          std::min(static_cast<int>(std::ceil(rec_image_h_ * ar)), kMaxRecWidth);
-      target_w = std::max(target_w, rec_image_w_);
-
-      preprocess_crop(cropped, target_w, input_buf);
+      target_w = rec_target_width(boxes[i]);
+      preprocess_box(img, boxes[i], target_w, input_buf);
     }
 
     input_shape[3] = static_cast<int64_t>(target_w);
@@ -159,12 +160,9 @@ CpuPaddleRec::run_batched(const cv::Mat &img, const std::vector<Box> &boxes) {
   if (rec_selftest_) {
     static std::once_flag selftest_flag;
     std::call_once(selftest_flag, [&] {
-      cv::Mat c0 = get_rotate_crop_image(img, boxes[0]);
-      float ar = (c0.rows > 0) ? static_cast<float>(c0.cols) / c0.rows : 0;
-      int tw = std::min(static_cast<int>(std::ceil(rec_image_h_ * ar)), kMaxRecWidth);
-      tw = std::max(tw, rec_image_w_);
+      int tw = rec_target_width(boxes[0]);
       std::vector<float> one;
-      preprocess_crop(c0, tw, one);
+      preprocess_box(img, boxes[0], tw, one);
       const size_t re = static_cast<size_t>(3) * rec_image_h_ * tw;
       std::vector<float> two(2 * re);
       std::memcpy(two.data(), one.data(), re * sizeof(float));
@@ -175,10 +173,9 @@ CpuPaddleRec::run_batched(const cv::Mat &img, const std::vector<Box> &boxes) {
         const size_t ro = static_cast<size_t>(sl) * nc;
         auto r0 = ctc_greedy_decode_raw(base, sl, nc, label_list_);
         auto r1 = ctc_greedy_decode_raw(base + ro, sl, nc, label_list_);
-        std::cout << std::format("[SELFTEST] {} row0='{}' row1='{}' {}", tag,
-                                 r0.first, r1.first,
-                                 r0.first == r1.first ? "MATCH" : "MISMATCH")
-                  << '\n';
+        TOCR_LOG_INFO("rec selftest", "path", tag, "row0", r0.first, "row1",
+                      r1.first, "verdict",
+                      r0.first == r1.first ? "MATCH" : "MISMATCH");
       };
       auto v = engine_->infer_batch_view(two.data(), sh);
       if (v.shape.size() >= 3)
@@ -191,8 +188,8 @@ CpuPaddleRec::run_batched(const cv::Mat &img, const std::vector<Box> &boxes) {
     });
   }
 
-  // Phase 1: crop each box once, compute its natural target width (identical
-  // math to the scalar path) and snap it UP to a fine width bucket
+  // Phase 1: compute each box's natural target width (identical math to the
+  // scalar path) and snap it UP to a fine width bucket
   // (ceil(target_w / step) * step). Crops are grouped strictly by bucket so a
   // batch only ever holds crops within one step of each other -> padding per
   // crop is at most step-1, regardless of the global width distribution. (A
@@ -203,26 +200,14 @@ CpuPaddleRec::run_batched(const cv::Mat &img, const std::vector<Box> &boxes) {
     int orig_idx = 0;
     int target_w = 0;
     int bucket_w = 0;
-    cv::Mat crop;
   };
   std::vector<BatchCrop> crops(total);
   {
     prof::Scope _s(prof::REC_PRE);
     for (int i = 0; i < total; i++) {
-      cv::Mat cropped = get_rotate_crop_image(img, boxes[i]);
-      float ar = (cropped.rows > 0)
-                     ? static_cast<float>(cropped.cols) / cropped.rows
-                     : 0;
-      int target_w =
-          std::min(static_cast<int>(std::ceil(rec_image_h_ * ar)), kMaxRecWidth);
-      target_w = std::max(target_w, rec_image_w_);
-      int bucket_w = target_w;
-      if (rec_bucket_step_ > 1)
-        bucket_w = ((target_w + rec_bucket_step_ - 1) / rec_bucket_step_) *
-                   rec_bucket_step_;
-      bucket_w = std::min(bucket_w, kMaxRecWidth);
-      bucket_w = std::max(bucket_w, target_w);
-      crops[i] = {i, target_w, bucket_w, std::move(cropped)};
+      int target_w = rec_target_width(boxes[i]);
+      int bucket_w = snap_width_step(target_w, rec_bucket_step_);
+      crops[i] = {i, target_w, bucket_w};
     }
   }
 
@@ -250,7 +235,7 @@ CpuPaddleRec::run_batched(const cv::Mat &img, const std::vector<Box> &boxes) {
       batch_buf_.assign(static_cast<size_t>(cur) * row_elems, 0.0f);
       for (int j = 0; j < cur; j++) {
         const auto &bc = crops[beg + j];
-        preprocess_crop(bc.crop, bc.target_w, scratch_chw_);
+        preprocess_box(img, boxes[bc.orig_idx], bc.target_w, scratch_chw_);
         float *dst = batch_buf_.data() + static_cast<size_t>(j) * row_elems;
         const float *src = scratch_chw_.data();
         const size_t copy_bytes = static_cast<size_t>(bc.target_w) * sizeof(float);

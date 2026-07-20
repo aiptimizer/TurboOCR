@@ -1,39 +1,52 @@
 #include "turbo_ocr/classification/cpu_paddle_cls.h"
-#include "turbo_ocr/recognition/crop_utils.h"
+#include "turbo_ocr/common/env_utils.h"
+#include "turbo_ocr/common/geometry/perspective.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <opencv2/imgproc.hpp>
 
 using namespace turbo_ocr::classification;
 using turbo_ocr::engine::CpuEngine;
 using turbo_ocr::Box;
-using turbo_ocr::recognition::get_rotate_crop_image;
 
 namespace {
-// Pack one BGR crop into the NCHW RGB float plane at `dst` (3*plane floats):
-// resize to (W,H), normalize pixel/127.5-1.0, split, RGB order. Matches the
-// scalar path exactly so batched and per-crop inference are bit-identical.
-inline void pack_cls_crop(const cv::Mat &crop, int H, int W, float *dst) {
-  cv::Mat resized;
-  cv::resize(crop, resized, cv::Size(W, H));
+// Warp one detection quad from the FULL image into the NCHW RGB float plane
+// at `dst` (3*H*W floats): content rendered at its natural width by a single
+// perspective warp, remaining columns zero (mid-gray) — the same geometry
+// cuda_batch_roi_warp gives the GPU classifier. A crop-then-resize here would
+// both resample twice and stretch narrow crops across the full canvas,
+// diverging from the GPU's padded layout.
+inline void pack_cls_box(const cv::Mat &img, const Box &box, int H, int W,
+                         float *dst) {
+  const auto ct = turbo_ocr::compute_crop_transform(box, H, W);
+  const int content_w = ct.crop_width;
+  const cv::Matx33f m_inv(ct.M_inv[0], ct.M_inv[1], ct.M_inv[2],
+                          ct.M_inv[3], ct.M_inv[4], ct.M_inv[5],
+                          ct.M_inv[6], ct.M_inv[7], ct.M_inv[8]);
+  cv::Mat warped;
+  cv::warpPerspective(img, warped, m_inv, cv::Size(content_w, H),
+                      cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
+                      cv::BORDER_REPLICATE);
   cv::Mat float_img;
-  resized.convertTo(float_img, CV_32F, 1.0 / 127.5, -1.0);
-  const int plane = H * W;
+  warped.convertTo(float_img, CV_32F, 1.0 / 127.5, -1.0);
+  const size_t plane = static_cast<size_t>(H) * W;
+  std::fill(dst, dst + 3 * plane, 0.0f);
   cv::Mat channels[3];
   cv::split(float_img, channels);
-  std::memcpy(dst, channels[2].data, plane * sizeof(float));
-  std::memcpy(dst + plane, channels[1].data, plane * sizeof(float));
-  std::memcpy(dst + 2 * plane, channels[0].data, plane * sizeof(float));
+  // RGB order (R=channels[2], G=channels[1], B=channels[0])
+  for (int c = 0; c < 3; ++c) {
+    const cv::Mat &src = channels[2 - c];
+    for (int r = 0; r < H; ++r)
+      std::memcpy(dst + c * plane + static_cast<size_t>(r) * W,
+                  src.ptr<float>(r),
+                  static_cast<size_t>(content_w) * sizeof(float));
+  }
 }
 
 inline bool cls_batch_enabled() {
-  static const bool e = [] {
-    const char *v = std::getenv("CLS_BATCH");
-    return v && v[0] == '1';
-  }();
+  static const bool e = turbo_ocr::env::env_enabled("CLS_BATCH");
   return e;
 }
 } // namespace
@@ -56,9 +69,8 @@ void CpuPaddleCls::run(const cv::Mat &img, std::vector<Box> &boxes) {
     const int n = static_cast<int>(boxes.size());
     std::vector<float> input_buf(static_cast<size_t>(n) * 3 * plane);
     for (int i = 0; i < n; ++i) {
-      cv::Mat crop = get_rotate_crop_image(img, boxes[i]);
-      pack_cls_crop(crop, kClsImageH, kClsImageW,
-                    input_buf.data() + static_cast<size_t>(i) * 3 * plane);
+      pack_cls_box(img, boxes[i], kClsImageH, kClsImageW,
+                   input_buf.data() + static_cast<size_t>(i) * 3 * plane);
     }
     const std::vector<int64_t> shape = {n, 3, kClsImageH, kClsImageW};
     auto result = engine_->infer_batch(input_buf.data(), shape);
@@ -78,8 +90,7 @@ void CpuPaddleCls::run(const cv::Mat &img, std::vector<Box> &boxes) {
   std::vector<float> input_buf(3 * plane);
   const std::vector<int64_t> input_shape = {1, 3, kClsImageH, kClsImageW};
   for (size_t i = 0; i < boxes.size(); ++i) {
-    cv::Mat crop = get_rotate_crop_image(img, boxes[i]);
-    pack_cls_crop(crop, kClsImageH, kClsImageW, input_buf.data());
+    pack_cls_box(img, boxes[i], kClsImageH, kClsImageW, input_buf.data());
     auto result = engine_->infer(input_buf.data(), input_shape);
     if (result.data.size() >= 2) {
       float score_0 = result.data[0];

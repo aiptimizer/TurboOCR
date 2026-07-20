@@ -17,9 +17,18 @@ namespace {
 // The IHDR bit-depth byte lives at a fixed offset: 8-byte PNG signature +
 // 4-byte chunk length + 4-byte "IHDR" type + 4-byte width + 4-byte height,
 // i.e. offset 24 (color type follows at 25). A 16-bit-depth PNG (PIL mode
-// 'I;16' grayscale, or 16-bit RGB/RGBA) reports bit_depth == 16 here.
+// 'I;16' grayscale, or 16-bit RGB/RGBA) reports bit_depth == 16 here. The
+// signature check makes offset 24 meaningful for a non-PNG blob whose byte
+// 24 happens to be 16 (self-contained; callers also gate on is_png).
 [[nodiscard]] bool png_is_16bit(const unsigned char *data, std::size_t len) noexcept {
-  return len >= 26 && data[24] == 16;
+  return len >= 26 && FastPngDecoder::is_png(data, len) && data[24] == 16;
+}
+
+// IHDR width/height (big-endian u32 at offsets 16/20), for cap enforcement on
+// paths that bypass the Wuffs config probe.
+[[nodiscard]] uint32_t png_be32(const unsigned char *p) noexcept {
+  return (uint32_t(p[0]) << 24) | (uint32_t(p[1]) << 16) | (uint32_t(p[2]) << 8) |
+         uint32_t(p[3]);
 }
 
 // OpenCV fallback for inputs the BGR-8 Wuffs fast path can't represent
@@ -37,9 +46,20 @@ namespace {
 cv::Mat FastPngDecoder::decode(const unsigned char *data, std::size_t len) {
   // 16-bit-depth PNGs can't be decoded by the BGR-8 Wuffs fast path below
   // (it produces a blank Mat that would silently pass the empty() guard).
-  // Route them through OpenCV/libpng, which downconverts 16->8 correctly.
-  if (png_is_16bit(data, len))
+  // Route them through OpenCV/libpng, which downconverts 16->8 correctly —
+  // but only after the same per-side and pixel-area caps the Wuffs path
+  // enforces, read straight from the IHDR; otherwise a crafted 16-bit PNG
+  // allocates its full declared raster inside cv::imdecode.
+  if (png_is_16bit(data, len)) {
+    const uint32_t w = png_be32(data + 16);
+    const uint32_t h = png_be32(data + 20);
+    const uint32_t cap = static_cast<uint32_t>(decode::max_image_dim());
+    if (w == 0 || h == 0 || w > cap || h > cap)
+      return {};
+    if (decode::exceeds_pixel_cap(w, h))
+      return {};
     return opencv_png_decode(data, len);
+  }
 
   // 1. Initialize Wuffs PNG decoder
   wuffs_png__decoder dec;

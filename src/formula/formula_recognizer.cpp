@@ -3,11 +3,11 @@
 #include <iostream>
 #include <memory>
 
-#include "turbo_ocr/backends/openai_endpoint.h"
-#include "turbo_ocr/formula/auto_cjk_formula.h"
-#include "turbo_ocr/formula/ppformulanet_ort.h"
-#include "turbo_ocr/formula/vlm_formula.h"
-#include "turbo_ocr/routing/routing_config.h"
+#include "turbo_ocr/vlm/openai_endpoint.h"
+#include "turbo_ocr/formula/routing/auto_cjk_formula.h"
+#include "turbo_ocr/formula/ppformulanet/ppformulanet_ort.h"
+#include "turbo_ocr/formula/vlm/vlm_formula.h"
+#include "turbo_ocr/backend_routing/routing_config.h"
 
 namespace turbo_ocr::formula {
 
@@ -38,9 +38,9 @@ make_formula_recognizer(std::string_view backend) {
 }
 
 std::unique_ptr<IFormulaRecognizer>
-make_formula_recognizer(const routing::BackendSpec &spec) {
-  if (spec.kind == routing::Kind::Openai)
-    return std::make_unique<backends::OpenAIEndpoint>(spec);
+make_formula_recognizer(const backend_routing::BackendSpec &spec) {
+  if (spec.kind == backend_routing::Kind::Openai)
+    return std::make_unique<vlm::OpenAIEndpoint>(spec);
   return make_formula_recognizer(std::string_view{spec.engine});
 }
 

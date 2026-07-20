@@ -14,7 +14,7 @@
 #include <limits>
 #include <vector>
 
-#include "turbo_ocr/formula/ppformulanet_preprocess.h"
+#include "turbo_ocr/formula/ppformulanet/ppformulanet_preprocess.h"
 
 using turbo_ocr::formula::formula_preprocess_one;
 using turbo_ocr::formula::kFormulaInputSize;

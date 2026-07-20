@@ -423,7 +423,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
 
 Create `tests/fuzz/fuzz_json_serializer.cpp`:
 ```cpp
-#include "turbo_ocr/common/serialization.h"
+#include "turbo_ocr/common/serialization/serialization.h"
 #include "turbo_ocr/common/types.h"
 #include <cstddef>
 #include <cstdint>
@@ -766,7 +766,7 @@ BENCHMARK_MAIN();
 **Example benchmark (`tests/cpp_bench/bench_json_serializer.cpp`):**
 ```cpp
 #include <benchmark/benchmark.h>
-#include "turbo_ocr/common/serialization.h"
+#include "turbo_ocr/common/serialization/serialization.h"
 #include "turbo_ocr/common/types.h"
 #include <vector>
 
@@ -821,7 +821,7 @@ at the hot-path functions:
 | Function | Location | Why benchmark |
 |---|---|---|
 | `base64_decode()` | `common/encoding.h` | Every /ocr request |
-| `results_to_json()` | `common/serialization.h` | Every response |
+| `results_to_json()` | `common/serialization/serialization.h` | Every response |
 | `det_postprocess` | `detection/det_postprocess.cpp` | Post-inference CPU work |
 | `ctc_greedy_decode()` | `recognition/ctc_decode.cpp` | Per-batch CPU decode |
 | `get_rotate_crop_image()` | `recognition/crop_utils.cpp` | CPU crop path |

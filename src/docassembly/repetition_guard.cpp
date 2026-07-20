@@ -1,3 +1,4 @@
+#include "turbo_ocr/common/string_utils.h"
 #include "turbo_ocr/docassembly/repetition_guard.h"
 
 #include <optional>
@@ -10,12 +11,6 @@ namespace turbo_ocr::docassembly {
 
 namespace {
 
-std::string strip(const std::string& s) {
-  std::size_t b = s.find_first_not_of(" \t\r\n\f\v");
-  if (b == std::string::npos) return {};
-  std::size_t e = s.find_last_not_of(" \t\r\n\f\v");
-  return s.substr(b, e - b + 1);
-}
 
 // Shortest unit u such that u repeated fills the whole string (e.g. "abab" → "ab").
 std::optional<std::string> find_shortest_repeating_substring(const std::string& s) {
@@ -68,13 +63,22 @@ std::string truncate_repetitive_content(const std::string& content,
                                         int min_count) {
   if (static_cast<int>(content.size()) < min_count) return content;
 
-  const std::string stripped = strip(content);
+  const std::string stripped = turbo_ocr::trim(content);
   if (stripped.empty()) return content;
 
   const bool single_line = stripped.find('\n') == std::string::npos;
 
+  // The two single-line passes below are O(n^2) in the line length. Untrusted
+  // OCR can collapse a whole page into one multi-MB line, which would spin the
+  // quadratic scan into a per-page hang — so skip them above a bound. A real
+  // hallucinated-repetition tail is caught long before this; 64 KB is orders
+  // of magnitude past any genuine document line.
+  constexpr std::size_t kMaxSingleLineScan = 64 * 1024;
+  const bool scannable_single_line =
+      single_line && stripped.size() <= kMaxSingleLineScan;
+
   // Priority 1: phrase-level suffix repetition in long single lines.
-  if (single_line && stripped.size() > 100) {
+  if (scannable_single_line && stripped.size() > 100) {
     if (auto m = find_repeating_suffix(stripped, 8, 5)) {
       const auto& [prefix, unit, count] = *m;
       if (static_cast<double>(unit.size()) * count >
@@ -85,7 +89,7 @@ std::string truncate_repetitive_content(const std::string& content,
   }
 
   // Priority 2: full-string character-level repetition (e.g. 'ababab').
-  if (single_line && static_cast<int>(stripped.size()) > min_len) {
+  if (scannable_single_line && static_cast<int>(stripped.size()) > min_len) {
     if (auto unit = find_shortest_repeating_substring(stripped)) {
       int count = static_cast<int>(stripped.size() / unit->size());
       if (count >= char_threshold) return *unit;
@@ -100,7 +104,7 @@ std::string truncate_repetitive_content(const std::string& content,
       std::size_t nl = content.find('\n', pos);
       std::string line =
           content.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
-      std::string t = strip(line);
+      std::string t = turbo_ocr::trim(line);
       if (!t.empty()) lines.push_back(std::move(t));
       if (nl == std::string::npos) break;
       pos = nl + 1;

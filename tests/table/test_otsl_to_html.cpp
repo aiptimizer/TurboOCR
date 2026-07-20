@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
 
-#include "turbo_ocr/table/vlm_table.h"
+#include "turbo_ocr/table/vlm/vlm_table.h"
 
 using turbo_ocr::table::otsl_to_html;
 

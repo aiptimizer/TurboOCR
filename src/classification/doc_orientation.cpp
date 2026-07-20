@@ -4,7 +4,7 @@
 #include <iostream>
 
 #include "turbo_ocr/classification/doc_orientation_common.h"
-#include "turbo_ocr/common/cuda_check.h"
+#include "turbo_ocr/common/cuda/cuda_check.h"
 
 using namespace turbo_ocr::classification;
 using turbo_ocr::engine::TrtEngine;

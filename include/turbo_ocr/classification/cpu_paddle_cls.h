@@ -7,7 +7,7 @@
 #include <opencv2/core.hpp>
 
 #include "turbo_ocr/engine/cpu_engine.h"
-#include "turbo_ocr/common/box.h"
+#include "turbo_ocr/common/geometry/box.h"
 
 namespace turbo_ocr::classification {
 

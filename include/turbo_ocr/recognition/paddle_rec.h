@@ -6,11 +6,12 @@
 #include <vector>
 
 #include "turbo_ocr/decode/gpu_image.h"
-#include "turbo_ocr/engine/rec_graph_profiles.h"
-#include "turbo_ocr/engine/trt_engine.h"
-#include "turbo_ocr/common/box.h"
-#include "turbo_ocr/common/cuda_check.h"
-#include "turbo_ocr/common/cuda_ptr.h"
+#include "turbo_ocr/engine/trt/rec_graph_profiles.h"
+#include "turbo_ocr/engine/trt/trt_engine.h"
+#include "turbo_ocr/common/geometry/box.h"
+#include "turbo_ocr/common/cuda/cuda_check.h"
+#include "turbo_ocr/common/cuda/cuda_ptr.h"
+#include "turbo_ocr/recognition/rec_geometry.h"
 
 namespace turbo_ocr::recognition {
 
@@ -51,16 +52,40 @@ public:
   // cached engine predates the static profiles or graphs are disabled.
   void bake_graphs(cudaStream_t stream);
 
+  // Crops skipped by the most recent run()/run_multi() because an engine
+  // output exceeded the preallocated decode buffers. The pipeline reads this
+  // to flag text_degraded — a partial drop must never look like a page that
+  // simply had less text. last_dropped_per_image() attributes run_multi()
+  // drops to their source image (empty after run()).
+  [[nodiscard]] int last_dropped_crops() const { return dropped_crops_; }
+  [[nodiscard]] const std::vector<int> &last_dropped_per_image() const {
+    return dropped_per_image_;
+  }
+
 private:
+  // The multi-slot deferred-sync queue loop shared by run() and run_multi():
+  // group sorted crops by width bucket, queue warp+infer+argmax+D2H per slot,
+  // drain on slot exhaustion, then one final sync + CTC decode. The callers
+  // differ only in how a crop index maps to its box/source image and where a
+  // result lands — expressed via the callbacks (documented at the definition
+  // in paddle_rec.cpp). Instantiated only inside that TU.
+  template <typename BucketAt, typename BoxAt, typename Warp, typename OnDrop,
+            typename Emit>
+  void run_queue_loop_(int total_boxes, const BucketAt &bucket_at,
+                       const BoxAt &box_at, const Warp &warp,
+                       const OnDrop &on_drop, const Emit &emit_result,
+                       cudaStream_t stream);
+
   std::vector<std::string> label_list_;
   int rec_batch_num_ = 32;
   int rec_image_h_ = 48;
   int rec_image_w_ = 320;
+  int dropped_crops_ = 0;
+  std::vector<int> dropped_per_image_;
 
   std::unique_ptr<engine::TrtEngine> engine_;
-
-  static constexpr int kMaxRecWidth = 4000;
-  static constexpr std::array kWidthBuckets = {320, 480, 800, 1200, 1600, 2000, 2500, 3200, 4000};
+  // Crop-width constants live in rec_geometry.h (shared with the ORT
+  // recognizer and the engine profiles).
 
   struct BakedSlot {
     int slot = -1;

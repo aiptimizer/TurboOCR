@@ -50,7 +50,7 @@ jobs:
           cmake --build build-cpu --target turboocr-cpu-server -j"$(nproc)"
       - name: Endpoint matrix smoke test
         run: |
-          HTTP_PORT=18080 GRPC_PORT=18051 HOST=127.0.0.1 OCR_MODEL=tiny \
+          PORT=18080 GRPC_PORT=18051 BIND_HOST=127.0.0.1 OCR_MODEL=tiny \
             ./build-cpu/turboocr-cpu-server &
           SERVER_PID=$!
           for i in $(seq 1 60); do

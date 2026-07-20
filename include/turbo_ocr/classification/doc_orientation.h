@@ -6,8 +6,8 @@
 #include <cuda_runtime.h>
 #include <opencv2/core.hpp>
 
-#include "turbo_ocr/common/cuda_ptr.h"
-#include "turbo_ocr/engine/trt_engine.h"
+#include "turbo_ocr/common/cuda/cuda_ptr.h"
+#include "turbo_ocr/engine/trt/trt_engine.h"
 
 namespace turbo_ocr::classification {
 

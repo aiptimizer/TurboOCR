@@ -71,20 +71,36 @@ def main():
         ordered = [s for s in ["unit", "cpp", "integration", "regression", "accuracy", "stress", "benchmark"]
                    if s in suites_req]
 
-    # Handle the C++ suite separately (ctest, not pytest).
+    # Handle the C++ suite separately (ctest, not pytest). Its exit code
+    # must survive into the final status regardless of --exitfirst — a red
+    # C++ suite exiting green here would be a false-pass gate.
+    cpp_rc = 0
     if "cpp" in ordered:
         ordered.remove("cpp")
         print("=== cpp suite (ctest) ===")
+        import shutil
         import subprocess
         build_dir = TESTS_DIR.parent / "build"
-        rc = subprocess.call(["ctest", "--output-on-failure"], cwd=build_dir)
-        if rc != 0 and args.exitfirst:
-            sys.exit(rc)
+        if not build_dir.is_dir():
+            print(f"cpp suite: build dir {build_dir} not found — "
+                  f"configure & build first (cmake -B build ...)")
+            cpp_rc = 1
+        elif shutil.which("ctest") is None:
+            print("cpp suite: ctest not on PATH — install CMake")
+            cpp_rc = 1
+        else:
+            # --no-tests=error so a zero-registered suite fails instead of
+            # silently passing (the false-green the add_test comment warns of).
+            cpp_rc = subprocess.call(
+                ["ctest", "--output-on-failure", "--no-tests=error"],
+                cwd=build_dir)
+        if cpp_rc != 0 and args.exitfirst:
+            sys.exit(cpp_rc)
 
     dirs = [SUITES[s] for s in ordered if SUITES[s].exists()]
     if not dirs:
         print("no python suites selected")
-        sys.exit(0)
+        sys.exit(cpp_rc)
 
     pytest_args = [str(d) for d in dirs]
     pytest_args.extend([
@@ -122,7 +138,8 @@ def main():
     print(f"gRPC:   {args.grpc_target}")
     print()
 
-    sys.exit(pytest.main(pytest_args))
+    py_rc = int(pytest.main(pytest_args))
+    sys.exit(py_rc if py_rc != 0 else cpp_rc)
 
 
 if __name__ == "__main__":

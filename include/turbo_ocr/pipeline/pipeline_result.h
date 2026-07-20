@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "turbo_ocr/common/box.h"
+#include "turbo_ocr/common/geometry/box.h"
 #include "turbo_ocr/common/types.h"
 #include "turbo_ocr/layout/layout_types.h"
 #include "turbo_ocr/router/router_types.h"

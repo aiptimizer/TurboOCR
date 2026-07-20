@@ -5,12 +5,12 @@
 #include <string>
 #include <vector>
 
-#include "turbo_ocr/common/box.h"
-#include "turbo_ocr/common/cuda_check.h"
-#include "turbo_ocr/common/cuda_ptr.h"
+#include "turbo_ocr/common/geometry/box.h"
+#include "turbo_ocr/common/cuda/cuda_check.h"
+#include "turbo_ocr/common/cuda/cuda_ptr.h"
 #include "turbo_ocr/decode/gpu_image.h"
-#include "turbo_ocr/engine/trt_engine.h"
-#include "turbo_ocr/script_id/script_id_types.h"
+#include "turbo_ocr/engine/trt/trt_engine.h"
+#include "turbo_ocr/lang_cls/script_id_types.h"
 
 namespace turbo_ocr::lang_cls {
 

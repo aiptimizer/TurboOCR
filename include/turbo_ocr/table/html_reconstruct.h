@@ -18,4 +18,15 @@ std::string reconstruct_html(
     const std::vector<MatchedCell>& cells,
     const std::vector<std::string>& ocr_texts);
 
+// Sanitize model-produced table HTML before it flows into an output document.
+// A VLM given an adversarial page image can be induced to emit
+// `<table>…<script>…</script>…` (or `onerror=`/`javascript:` attributes),
+// which becomes live markup if the surrounding Markdown/HTML is rendered
+// downstream — a stored-XSS-class vector. Drops <script>/<style> elements
+// (including their content), strips on*= event-handler attributes and
+// javascript: URIs, and removes any other non-table-structural tags while
+// keeping their text. Table-structural tags (table/thead/tbody/tr/td/th/
+// col/colgroup/caption/b/i) and their span/align attributes pass through.
+std::string sanitize_table_html(const std::string& html);
+
 } // namespace turbo_ocr::table

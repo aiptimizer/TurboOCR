@@ -1,6 +1,6 @@
 """Unit tests for JSON response format.
 
-Verifies that the server's fast JSON serializer (results_to_json in common/serialization.h)
+Verifies that the server's fast JSON serializer (results_to_json in common/serialization/serialization.h)
 produces valid JSON with the correct schema. Also tests special character
 escaping in text fields.
 """

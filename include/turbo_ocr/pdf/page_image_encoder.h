@@ -18,6 +18,10 @@ enum class PageImageFormat {
 /// Parse format string (case-insensitive). Returns Png on unknown.
 PageImageFormat parse_page_image_format(const char *s) noexcept;
 
+/// Strict request-parsing companion: true iff `s` names a supported format.
+/// Route handlers 400 on explicit unknown values instead of coercing to Png.
+bool is_valid_page_image_format(const char *s) noexcept;
+
 /// Human-readable format name used in Content-Type and URL paths.
 const char *page_image_format_name(PageImageFormat fmt) noexcept;
 const char *page_image_content_type(PageImageFormat fmt) noexcept;

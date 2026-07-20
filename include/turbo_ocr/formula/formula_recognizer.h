@@ -10,10 +10,10 @@
 
 #include <cuda_runtime.h>
 
-#include "turbo_ocr/common/box.h"
+#include "turbo_ocr/common/geometry/box.h"
 #include "turbo_ocr/decode/gpu_image.h"
 
-namespace turbo_ocr::routing { struct BackendSpec; }
+namespace turbo_ocr::backend_routing { struct BackendSpec; }
 
 namespace turbo_ocr::formula {
 
@@ -112,9 +112,9 @@ public:
 std::unique_ptr<IFormulaRecognizer>
 make_formula_recognizer(std::string_view backend);
 
-// Overload from a resolved routing::BackendSpec: kind==Openai -> the generic
+// Overload from a resolved backend_routing::BackendSpec: kind==Openai -> the generic
 // OpenAIEndpoint; kind==Local -> the engine-keyed factory above.
 std::unique_ptr<IFormulaRecognizer>
-make_formula_recognizer(const routing::BackendSpec &spec);
+make_formula_recognizer(const backend_routing::BackendSpec &spec);
 
 } // namespace turbo_ocr::formula

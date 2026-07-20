@@ -3,10 +3,10 @@
 #include <iostream>
 #include <memory>
 
-#include "turbo_ocr/backends/openai_endpoint.h"
-#include "turbo_ocr/routing/routing_config.h"
-#include "turbo_ocr/table/slanext_table_recognizer.h"
-#include "turbo_ocr/table/vlm_table_recognizer.h"
+#include "turbo_ocr/vlm/openai_endpoint.h"
+#include "turbo_ocr/backend_routing/routing_config.h"
+#include "turbo_ocr/table/slanext/slanext_table_recognizer.h"
+#include "turbo_ocr/table/vlm/vlm_table_recognizer.h"
 
 namespace turbo_ocr::table {
 
@@ -19,9 +19,9 @@ std::unique_ptr<ITableRecognizer> make_table_recognizer(std::string_view backend
 }
 
 std::unique_ptr<ITableRecognizer>
-make_table_recognizer(const routing::BackendSpec &spec) {
-  if (spec.kind == routing::Kind::Openai)
-    return std::make_unique<backends::OpenAIEndpoint>(spec);
+make_table_recognizer(const backend_routing::BackendSpec &spec) {
+  if (spec.kind == backend_routing::Kind::Openai)
+    return std::make_unique<vlm::OpenAIEndpoint>(spec);
   return make_table_recognizer(std::string_view{spec.engine});
 }
 

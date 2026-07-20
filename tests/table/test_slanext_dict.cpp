@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
 
-#include "turbo_ocr/table/slanext_dict.h"
+#include "turbo_ocr/table/slanext/slanext_dict.h"
 #include "turbo_ocr/table/table_types.h"
 
 using turbo_ocr::table::CharDict;

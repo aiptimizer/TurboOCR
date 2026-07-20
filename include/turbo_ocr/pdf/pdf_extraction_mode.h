@@ -52,6 +52,13 @@ constexpr PdfMode parse_pdf_mode(std::string_view s,
   return fallback;
 }
 
+// Strict variant for request parsing: an explicit unknown value is the
+// caller's error and must 400, never silently coerce to a default (that is
+// the same contract bad dpi/quality values already get).
+constexpr bool is_valid_pdf_mode(std::string_view s) noexcept {
+  return s == "ocr" || s == "geometric" || s == "auto" || s == "auto_verified";
+}
+
 // Per-page resolution result for Auto / AutoVerified (where the effective
 // mode may differ from the requested mode). Emitted in the response so
 // clients can see which path ran on each page.
