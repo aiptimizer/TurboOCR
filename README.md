@@ -53,7 +53,7 @@ on receipts** (one RTX 5090), and full structured parsing (layout + tables + for
 at **~20 pages/s** — where VLM document parsers like PaddleOCR-VL run ~1 page/s. On
 forms and receipts it is accurate and 15–90× faster than classic OCR engines.
 
-- 🚀 **Up to 559 img/s** (receipts) / **520 img/s** (forms) on one RTX 5090, fastest by default
+- 🚀 **559 img/s (receipts) · 520 (forms) · 200+ (dense docs) on one RTX 5090 — fastest by default
 - 🎯 **Accurate on forms & receipts** &mdash; competitive with PaddleOCR-VL, PaddleOCR-Python, RapidOCR, EasyOCR and Tesseract ([benchmarks](#benchmarks))
 - 🧠 **PP-OCRv6** &mdash; one model covers Latin + Chinese + Japanese; pick `tiny` (default) / `small` / `medium`
 - 🌐 **More scripts** &mdash; Arabic, Cyrillic, Korean, Thai, Greek via retained PP-OCRv5 recognizers
