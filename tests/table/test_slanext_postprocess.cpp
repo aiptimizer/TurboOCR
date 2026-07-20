@@ -4,8 +4,8 @@
 
 #include "turbo_ocr/table/cell_matcher.h"
 #include "turbo_ocr/table/html_reconstruct.h"
-#include "turbo_ocr/table/slanext_dict.h"
-#include "turbo_ocr/table/slanext_postprocess.h"
+#include "turbo_ocr/table/slanext/slanext_dict.h"
+#include "turbo_ocr/table/slanext/slanext_postprocess.h"
 #include "turbo_ocr/table/table_types.h"
 
 using turbo_ocr::table::CharDict;

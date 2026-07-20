@@ -3,13 +3,11 @@
 #include <cstdint>
 #include <vector>
 
-#include "turbo_ocr/common/box.h"
+#include "turbo_ocr/common/geometry/box.h"
 #include "turbo_ocr/layout/layout_types.h"
-#include "turbo_ocr/router/formula_pipeline.h"
 #include "turbo_ocr/router/router_destination.h"
 #include "turbo_ocr/router/router_types.h"
 #include "turbo_ocr/router/routing_plan.h"
-#include "turbo_ocr/router/table_pipeline.h"
 
 namespace turbo_ocr::router {
 
@@ -25,8 +23,6 @@ class CuaRouter {
   CuaRouter(const CuaRouter &) = delete;
   CuaRouter &operator=(const CuaRouter &) = delete;
 
-  void set_table_pipeline(TablePipeline *p) noexcept { table_ = p; }
-  void set_formula_pipeline(FormulaPipeline *p) noexcept { formula_ = p; }
 
   void set_config(const RouterConfig &cfg) noexcept { cfg_ = cfg; }
   [[nodiscard]] const RouterConfig &config() const noexcept { return cfg_; }
@@ -39,22 +35,12 @@ class CuaRouter {
                 const std::vector<turbo_ocr::layout::LayoutBox> &layout,
                 RoutingPlan &plan) const;
 
-  // Dispatch stubs. Bodies wait on TablePipeline / FormulaPipeline
-  // landing in T18/T16 — kept here so the router compile target gives
-  // us a stable surface for the pipeline integration task (T19).
-  void dispatch_tables(const std::vector<turbo_ocr::layout::LayoutBox> &layout,
-                       const RoutingPlan &plan) const noexcept;
-  void dispatch_formulas(const std::vector<turbo_ocr::layout::LayoutBox> &layout,
-                         const RoutingPlan &plan) const noexcept;
-
   // Per-page decisions for inspection / debugging / bench. Lives on the
   // router so it survives across classify() calls (cleared each call).
   [[nodiscard]] const std::vector<RouterDecision> &
   last_decisions() const noexcept { return decisions_; }
 
  private:
-  TablePipeline *table_ = nullptr;
-  FormulaPipeline *formula_ = nullptr;
   RouterConfig cfg_ = RouterConfig::defaults();
 
   // Reusable scratch — kept on the router instance so classify() does
@@ -119,12 +105,6 @@ RouterDecision apply_verify_result(RouterDecision d,
                                    TableClsVerdict v) noexcept;
 
 // --- region_features.cpp helpers (used by build_overlap_stats) ---
-
-// Mean axis-aligned aspect ratio (w/h) of the det boxes whose centroid
-// falls inside `layout_aabb`. Returns 0 when no det box matches.
-[[nodiscard]] float region_aspect_ratio_hint(
-    const std::array<int, 4> &layout_aabb,
-    const std::vector<turbo_ocr::Box> &det_boxes) noexcept;
 
 // Heuristic for "how many small symbols per unit area" — proxies for
 // formula density. Currently: clamped det-count / log-scaled

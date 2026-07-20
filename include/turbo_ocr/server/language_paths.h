@@ -5,7 +5,7 @@
 #include <string_view>
 #include <vector>
 
-#include "turbo_ocr/server/env_utils.h"
+#include "turbo_ocr/common/env_utils.h"
 #include "turbo_ocr/server/model_catalog.h"
 
 namespace turbo_ocr::server {
@@ -107,13 +107,13 @@ inline const ModelEntry& lang_alias_entry(const std::string& lang) {
 
   // An explicit DET override supplies a detector outside the registry, so its
   // per-model config no longer applies — fall back to the official defaults.
-  const bool det_overridden = env_present(det_env);
+  const bool det_overridden = env::env_present(det_env);
 
   return ResolvedModel{
       .name = std::string(entry->name),
-      .rec = env_or(rec_env, entry->rec_path),
-      .dict = env_or(dict_env, entry->dict_path),
-      .det = env_or(det_env, model_det_path(*entry)),
+      .rec = env::env_or(rec_env, entry->rec_path),
+      .dict = env::env_or(dict_env, entry->dict_path),
+      .det = env::env_or(det_env, model_det_path(*entry)),
       .det_cfg = det_overridden
                      ? DetInferConfig{detection::kDetResizeDefault, detection::kDbDefaults}
                      : entry->det_cfg,

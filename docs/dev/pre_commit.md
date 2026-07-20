@@ -25,3 +25,11 @@ Deliberate exceptions are annotated in-line
 (`// pre-commit-allow-stream`, `// pre-commit-allow-getenv`,
 `// pre-commit-allow-stoi`) or, for a one-off commit, `git commit --no-verify`
 with the reason in the commit message.
+
+## File-length ratchet (max 500 lines)
+
+Any staged `.cpp/.h/.cu/.cuh` over 500 lines fails the commit. The limit is a
+ratchet: pre-existing oversized files trip it the first time they are touched,
+which is when they get split. Escape hatch for the rare genuinely-unsplittable
+file: `// pre-commit-allow-length` within the first 5 lines, next to a short
+justification.

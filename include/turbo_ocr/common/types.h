@@ -1,6 +1,6 @@
 #pragma once
 
-#include "turbo_ocr/common/box.h"
+#include "turbo_ocr/common/geometry/box.h"
 #include <string>
 
 namespace turbo_ocr {

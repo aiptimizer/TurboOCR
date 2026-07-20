@@ -1,3 +1,4 @@
+#include "turbo_ocr/common/string_utils.h"
 #include "turbo_ocr/docassembly/repetition_guard.h"
 
 #include <optional>
@@ -10,12 +11,6 @@ namespace turbo_ocr::docassembly {
 
 namespace {
 
-std::string strip(const std::string& s) {
-  std::size_t b = s.find_first_not_of(" \t\r\n\f\v");
-  if (b == std::string::npos) return {};
-  std::size_t e = s.find_last_not_of(" \t\r\n\f\v");
-  return s.substr(b, e - b + 1);
-}
 
 // Shortest unit u such that u repeated fills the whole string (e.g. "abab" → "ab").
 std::optional<std::string> find_shortest_repeating_substring(const std::string& s) {
@@ -68,7 +63,7 @@ std::string truncate_repetitive_content(const std::string& content,
                                         int min_count) {
   if (static_cast<int>(content.size()) < min_count) return content;
 
-  const std::string stripped = strip(content);
+  const std::string stripped = turbo_ocr::trim(content);
   if (stripped.empty()) return content;
 
   const bool single_line = stripped.find('\n') == std::string::npos;
@@ -109,7 +104,7 @@ std::string truncate_repetitive_content(const std::string& content,
       std::size_t nl = content.find('\n', pos);
       std::string line =
           content.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
-      std::string t = strip(line);
+      std::string t = turbo_ocr::trim(line);
       if (!t.empty()) lines.push_back(std::move(t));
       if (nl == std::string::npos) break;
       pos = nl + 1;

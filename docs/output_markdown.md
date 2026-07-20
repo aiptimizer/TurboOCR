@@ -137,11 +137,20 @@ void register_ocr_markdown_route_gpu(server::WorkPool &pool,
               "DISABLE_LAYOUT=1)"));
           return;
         }
-        // ?embed=0 -> file-ref image links (assets written by an out-of-band
-        // exporter); default true -> self-contained base64 data: URIs.
-        bool embed = true;
-        if (auto p = req->getParameter("embed"); p == "0" || p == "false")
-          embed = false;
+        // HTTP is always self-contained base64 data: URIs. The file-ref mode
+        // (embed_images=false) writes asset PNGs to the SERVER's filesystem —
+        // unreachable for an HTTP client — so ?embed=0 is rejected with a loud
+        // 400 INVALID_PARAMETER instead of being silently overridden. File-ref
+        // markdown remains available to library/CLI consumers of
+        // render_markdown_with_assets.
+        if (auto p = req->getParameter("embed"); p == "0" || p == "false") {
+          callback(server::error_response(
+              drogon::k400BadRequest, "INVALID_PARAMETER",
+              "embed=0 (file-ref markdown) is not supported over HTTP; "
+              "assets are always embedded as data: URIs"));
+          return;
+        }
+        const bool embed = true;
 
         server::submit_work(pool, std::move(callback),
             [req, &dispatcher, &decode, embed](server::DrogonCallback &cb) {

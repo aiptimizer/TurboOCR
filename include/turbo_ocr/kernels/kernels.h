@@ -6,7 +6,7 @@
 
 #include <cuda_runtime.h>
 
-#include "turbo_ocr/common/perspective_math.h"
+#include "turbo_ocr/common/geometry/perspective_math.h"
 #include "turbo_ocr/decode/gpu_image.h"
 
 namespace turbo_ocr::kernels {

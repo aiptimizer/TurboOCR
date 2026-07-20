@@ -4,7 +4,7 @@
 #include <cmath>
 #include <iostream>
 
-#include "turbo_ocr/common/cuda_check.h"
+#include "turbo_ocr/common/cuda/cuda_check.h"
 #include "turbo_ocr/kernels/kernels.h"
 
 namespace turbo_ocr::table {

@@ -4,7 +4,7 @@
 #include <array>
 #include <cmath>
 
-#include "turbo_ocr/common/perspective.h"
+#include "turbo_ocr/common/geometry/perspective.h"
 #include "turbo_ocr/common/types.h"
 
 // Crop-width geometry shared by the TRT and ORT recognizers. The width math

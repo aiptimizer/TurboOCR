@@ -254,7 +254,7 @@ measured reason.
 | `NVJPEG_DEVICE_COPY` | `1` | nvJPEG page-image encode keeps data device-side. |
 | `LAYOUT_KEEP_NESTED_CHILDREN` | `0` | Keep child layout blocks nested inside their parents. |
 | `TURBO_LAYOUT_DEBUG` | `0` | Verbose layout-stage debug output. |
-| `TURBO_OCR_STRICT_QUERY_PARAMS` | `1` | Reject unknown query parameters with 400 (set `0` to ignore them). |
+| `TURBO_OCR_STRICT_QUERY_PARAMS` | `0` | Opt-in: set `1` to reject with 400 any unknown parameter AND any known parameter the endpoint does not support. Default tolerates both (v3.4-compatible) — DEPRECATED: tolerated requests get an `X-Ignored-Params` + `X-Deprecation` response header and v4 rejects them with 400. Routing overrides, `text=0`, and `embed=0` on endpoints that cannot honor them are ALWAYS a 400 — ignoring those would falsify the response. |
 | `TURBO_OCR_DISABLE_MALLOC_REAPER` | `0` | Disable the periodic malloc_trim reaper thread. |
 | `ENABLE_TIMING` / `PROFILE_STAGES` | `0` | Per-stage timing output / CPU-path stage profiler. |
 | `TOCR_LOG_RATELIMIT` | `10:1000` | Per-call-site log rate limit `N[:WINDOW_MS]`; `0` disables. |

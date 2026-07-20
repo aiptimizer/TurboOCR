@@ -2,7 +2,7 @@
 #include "turbo_ocr/detection/det_config.h"
 #include "turbo_ocr/detection/det_postprocess.h"
 #include "turbo_ocr/common/env_utils.h"
-#include "turbo_ocr/common/stage_profiler.h"
+#include "turbo_ocr/common/log/stage_profiler.h"
 
 #include <opencv2/imgproc.hpp>
 

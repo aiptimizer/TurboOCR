@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "turbo_ocr/common/box.h"
+#include "turbo_ocr/common/geometry/box.h"
 #include "turbo_ocr/router/router_destination.h"
 
 namespace turbo_ocr::router {
@@ -112,7 +112,7 @@ struct PageStats {
 
 // Per-region decoded outputs produced by the table / formula stages.
 // Surfaced on OcrPipelineResult and serialized as "tables" / "formulas"
-// JSON arrays — see common/serialization.h.
+// JSON arrays — see common/serialization/serialization.h.
 struct TableResult {
   int         layout_id = -1;
   std::string html;

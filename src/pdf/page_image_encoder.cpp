@@ -12,7 +12,7 @@
 #include <turbojpeg.h>
 
 #ifndef USE_CPU_ONLY
-#include "turbo_ocr/encode/nvjpeg_encoder.h"
+#include "turbo_ocr/pdf/nvjpeg_encoder.h"
 #endif
 
 namespace turbo_ocr::pdf {

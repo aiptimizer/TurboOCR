@@ -6,7 +6,7 @@
 #include <catch_amalgamated.hpp>
 
 #include "turbo_ocr/lang_cls/script_id.h"
-#include "turbo_ocr/script_id/script_id_types.h"
+#include "turbo_ocr/lang_cls/script_id_types.h"
 
 using turbo_ocr::lang_cls::ScriptIdEngine;
 using turbo_ocr::lang_cls::ScriptIdResult;

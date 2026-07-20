@@ -2,7 +2,7 @@
 #include "turbo_ocr/kernels/kernels.h"
 
 #include "turbo_ocr/common/errors.h"
-#include "turbo_ocr/common/perspective.h"
+#include "turbo_ocr/common/geometry/perspective.h"
 
 #include <algorithm>
 #include <cmath>

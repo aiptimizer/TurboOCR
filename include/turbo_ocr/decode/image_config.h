@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "turbo_ocr/server/env_utils.h"
+#include "turbo_ocr/common/env_utils.h"
 
 namespace turbo_ocr::decode {
 
@@ -11,7 +11,7 @@ namespace turbo_ocr::decode {
 // image-accepting route (HTTP /ocr, /ocr/raw, /ocr/batch, /ocr/pixels and
 // gRPC Recognize/RecognizeBatch) so operators have one knob.
 [[nodiscard]] inline int max_image_dim() {
-  static const int v = server::env_int("MAX_IMAGE_DIM", 16384, 64, 65535);
+  static const int v = env::env_int("MAX_IMAGE_DIM", 16384, 64, 65535);
   return v;
 }
 
@@ -27,7 +27,7 @@ namespace turbo_ocr::decode {
 // range [1, 4096]. Same knob across every image-accepting route.
 [[nodiscard]] inline int64_t max_image_pixels() {
   static const int64_t v =
-      static_cast<int64_t>(server::env_int("MAX_IMAGE_PIXELS_MP", 128, 1, 4096)) *
+      static_cast<int64_t>(env::env_int("MAX_IMAGE_PIXELS_MP", 128, 1, 4096)) *
       1000000;
   return v;
 }
@@ -53,7 +53,7 @@ namespace turbo_ocr::decode {
 [[nodiscard]] inline int64_t max_batch_pixels() {
   static const int64_t v =
       static_cast<int64_t>(
-          server::env_int("MAX_BATCH_PIXELS_MP", 2048, 16, 1048576)) *
+          env::env_int("MAX_BATCH_PIXELS_MP", 2048, 16, 1048576)) *
       1000000;
   return v;
 }

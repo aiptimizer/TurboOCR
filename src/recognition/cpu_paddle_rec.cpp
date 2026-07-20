@@ -3,8 +3,8 @@
 
 #include "turbo_ocr/common/errors.h"
 #include "turbo_ocr/common/env_utils.h"
-#include "turbo_ocr/common/logger.h"
-#include "turbo_ocr/common/perspective.h"
+#include "turbo_ocr/common/log/logger.h"
+#include "turbo_ocr/common/geometry/perspective.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,7 +13,7 @@
 #include <mutex>
 #include <opencv2/imgproc.hpp>
 
-#include "turbo_ocr/common/stage_profiler.h"
+#include "turbo_ocr/common/log/stage_profiler.h"
 
 using namespace turbo_ocr::recognition;
 using turbo_ocr::engine::CpuEngine;

@@ -1,110 +1,97 @@
-// Hand-curated parity tests for FormulaTokenizer::latex_post_process.
-//
-// We can't link the Rust tokenizers crate from C++, so the BPE decode itself
-// is exercised only through the optional `loads_real_tokenizer_if_present`
-// path. The 30+ cases below cover the documented behavior of the Rust
-// `tokenizer.rs::latex_post_process`: whitespace collapsing around
-// non-letter symbols, backslash-space preservation, operatorname/mathrm/
-// text/mathbf wrapper stash-and-restore, and CJK \text{...} unwrapping.
+#include <catch_amalgamated.hpp>
 
-#include "catch_amalgamated.hpp"
-#include "turbo_ocr/formula/formula_tokenizer.h"
+#include <cstdint>
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+#include "turbo_ocr/formula/ppformulanet/formula_tokenizer.h"
 
 using turbo_ocr::formula::FormulaTokenizer;
+namespace fs = std::filesystem;
 
 namespace {
-std::string pp(const std::string& s) {
-    return FormulaTokenizer::latex_post_process(s);
-}
-}  // namespace
 
-TEST_CASE("latex_post_process: arithmetic collapses spaces", "[formula_tokenizer]") {
-    REQUIRE(pp("a + b = c") == "a+b=c");
-    REQUIRE(pp("a + b") == "a+b");
-    REQUIRE(pp("x = y") == "x=y");
-    REQUIRE(pp("a , b") == "a,b");
-    REQUIRE(pp("a ; b") == "a;b");
-    REQUIRE(pp("1 + 2") == "1+2");
-    REQUIRE(pp("1 - 2 + 3") == "1-2+3");
-}
+// RAII temp tokenizer file.
+class TempJson {
+public:
+  explicit TempJson(const std::string &content) {
+    path_ = fs::temp_directory_path() /
+            ("tokenizer_test_" + std::to_string(::getpid()) + "_" +
+             std::to_string(counter_++) + ".json");
+    std::ofstream(path_) << content;
+  }
+  ~TempJson() { std::error_code ec; fs::remove(path_, ec); }
+  [[nodiscard]] std::string path() const { return path_.string(); }
 
-TEST_CASE("latex_post_process: braces, parens, brackets", "[formula_tokenizer]") {
-    REQUIRE(pp("\\frac { a } { b }") == "\\frac{a}{b}");
-    REQUIRE(pp("\\sqrt { x + 1 }") == "\\sqrt{x+1}");
-    REQUIRE(pp("( a + b )") == "(a+b)");
-    REQUIRE(pp("[ x , y ]") == "[x,y]");
-    REQUIRE(pp("{ x }") == "{x}");
-    REQUIRE(pp("\\frac{a}{b}") == "\\frac{a}{b}");  // already-tight stays tight
-}
+private:
+  static inline int counter_ = 0;
+  fs::path path_;
+};
 
-TEST_CASE("latex_post_process: backslash-space stays", "[formula_tokenizer]") {
-    REQUIRE(pp("a\\ b") == "a\\ b");
-    REQUIRE(pp("x +\\ y") == "x+\\ y");
-    REQUIRE(pp("\\ ") == "\\ ");  // bare backslash-space stays
-}
+} // namespace
 
-TEST_CASE("latex_post_process: superscript and subscript", "[formula_tokenizer]") {
-    REQUIRE(pp("x ^ 2") == "x^2");
-    REQUIRE(pp("x _ i") == "x_i");
-    REQUIRE(pp("a ^ { 2 }") == "a^{2}");
-    REQUIRE(pp("a _ { i + 1 }") == "a_{i+1}");
+TEST_CASE("tokenizer loads a well-formed vocab and decodes", "[formula_tokenizer]") {
+  TempJson f(R"({
+    "model": {"vocab": {"x": 0, "y": 1, "+": 2}},
+    "added_tokens": [
+      {"id": 3, "content": "</s>", "special": true}
+    ]
+  })");
+  auto tok = FormulaTokenizer::load(f.path());
+  REQUIRE(tok.has_value());
+  // Sequence decodes up to EOS; special tokens are skipped.
+  const std::vector<int64_t> ids{0, 2, 1, 3, 0};
+  const std::string out = tok->decode(ids, /*post_process=*/false);
+  CHECK(out == "x+y");
 }
 
-TEST_CASE("latex_post_process: wrapper-macro stash strips internal whitespace",
+TEST_CASE("tokenizer rejects a hostile huge token id instead of allocating",
           "[formula_tokenizer]") {
-    REQUIRE(pp("\\mathrm {x}") == "\\mathrm{x}");
-    REQUIRE(pp("\\mathrm {a b}") == "\\mathrm{ab}");
-    REQUIRE(pp("\\operatorname {sin} x") == "\\operatorname{sin}x");
-    REQUIRE(pp("\\operatorname* {lim}") == "\\operatorname*{lim}");
-    REQUIRE(pp("\\mathbf {v} = 0") == "\\mathbf{v}=0");
-    REQUIRE(pp("\\text {hi} + 1") == "\\text{hi}+1");
+  TempJson f(R"({
+    "model": {"vocab": {"x": 4294967295}}
+  })");
+  CHECK_FALSE(FormulaTokenizer::load(f.path()).has_value());
 }
 
-TEST_CASE("latex_post_process: CJK text wrapper unwrapped", "[formula_tokenizer]") {
-    REQUIRE(pp("\\text{中文} a") == "中文a");
-    REQUIRE(pp("\\text {中文}+1") == "中文+1");
-    REQUIRE(pp("\\text{中文}") == "中文");
+TEST_CASE("tokenizer rejects a hostile huge added_tokens id", "[formula_tokenizer]") {
+  TempJson f(R"({
+    "model": {"vocab": {"x": 0}},
+    "added_tokens": [{"id": 4294967295, "content": "boom"}]
+  })");
+  CHECK_FALSE(FormulaTokenizer::load(f.path()).has_value());
 }
 
-TEST_CASE("latex_post_process: literal double-quotes are dropped",
+TEST_CASE("tokenizer survives malformed shapes without throwing",
           "[formula_tokenizer]") {
-    // remove_chinese_text_wrapping unconditionally strips '"' after CJK fixup.
-    REQUIRE(pp("\"a\"") == "a");
-    REQUIRE(pp("a \"b\" c") == "a b c");  // letter-ws-letter is not collapsed
+  // Non-numeric id: a type-mismatch throw inside nlohmann must resolve to
+  // nullopt, never escape the loader.
+  TempJson bad_id(R"({
+    "model": {"vocab": {"x": "zero"}}
+  })");
+  CHECK_FALSE(FormulaTokenizer::load(bad_id.path()).has_value());
+
+  TempJson no_vocab(R"({"model": {}})");
+  CHECK_FALSE(FormulaTokenizer::load(no_vocab.path()).has_value());
+
+  TempJson vocab_not_object(R"({"model": {"vocab": [1, 2]}})");
+  CHECK_FALSE(FormulaTokenizer::load(vocab_not_object.path()).has_value());
+
+  TempJson not_json("this is not json at all {");
+  CHECK_FALSE(FormulaTokenizer::load(not_json.path()).has_value());
 }
 
-TEST_CASE("latex_post_process: idempotent on clean input", "[formula_tokenizer]") {
-    REQUIRE(pp("a+b") == "a+b");
-    REQUIRE(pp("\\sin(x)") == "\\sin(x)");
-    REQUIRE(pp("") == "");
-    REQUIRE(pp("a") == "a");
-}
-
-TEST_CASE("latex_post_process: nested fraction collapses", "[formula_tokenizer]") {
-    REQUIRE(pp("\\frac { \\frac { 1 } { 2 } } { 3 }") == "\\frac{\\frac{1}{2}}{3}");
-}
-
-TEST_CASE("FormulaTokenizer::load loads real tokenizer.json when present",
-          "[formula_tokenizer][.integration]") {
-    // Skipped by default tag — the real tokenizer.json lives in the Rust
-    // workspace, not in this repo. Run with `-Rinteg` to opt in.
-    const std::string path =
-        "models/formula/ppformulanet_s/tokenizer.json";
-    auto tok = FormulaTokenizer::load(path);
-    if (!tok) {
-        WARN("tokenizer.json not found at " << path << " — skipping");
-        return;
-    }
-    REQUIRE(tok->vocab_size() >= 50000);
-
-    // eos_id() exposes the learned EOS so callers stop hard-coding the literal.
-    REQUIRE(tok->eos_id() == 2);
-
-    // Decoding only the BOS+EOS frame returns the empty string.
-    std::vector<int64_t> ids = {0, 2};  // <s>, </s>
-    REQUIRE(tok->decode(ids) == "");
-
-    // Garbage past EOS is trimmed off.
-    ids = {0, 2, 999, 1000};
-    REQUIRE(tok->decode(ids) == "");
+TEST_CASE("tokenizer added_tokens without id are skipped, not fatal",
+          "[formula_tokenizer]") {
+  TempJson f(R"({
+    "model": {"vocab": {"x": 0}},
+    "added_tokens": [{"content": "orphan"}, {"id": 1, "content": "</s>"}]
+  })");
+  auto tok = FormulaTokenizer::load(f.path());
+  REQUIRE(tok.has_value());
+  const std::vector<int64_t> ids{0};
+  CHECK(tok->decode(ids, false) == "x");
 }

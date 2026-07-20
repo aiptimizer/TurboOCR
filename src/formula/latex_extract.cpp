@@ -1,3 +1,4 @@
+#include "turbo_ocr/common/string_utils.h"
 #include "turbo_ocr/formula/latex_extract.h"
 
 #include <regex>
@@ -7,13 +8,6 @@ namespace turbo_ocr::formula {
 
 namespace {
 
-std::string trim(std::string_view s) {
-  while (!s.empty() && (s.front() == ' ' || s.front() == '\n' || s.front() == '\r'))
-    s.remove_prefix(1);
-  while (!s.empty() && (s.back() == ' ' || s.back() == '\n' || s.back() == '\r'))
-    s.remove_suffix(1);
-  return std::string(s);
-}
 
 } // namespace
 

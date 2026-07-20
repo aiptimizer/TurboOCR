@@ -1,6 +1,6 @@
 """Unit tests for box sorting logic.
 
-The sorted_boxes() function in common/box.h sorts detected text boxes in
+The sorted_boxes() function in common/geometry/box.h sorts detected text boxes in
 reading order: top-to-bottom, left-to-right, using Y-quantization into
 line bands (kSameLineThreshold=10). These tests verify the ordering
 through the server by sending images with text at controlled positions.

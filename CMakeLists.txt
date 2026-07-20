@@ -172,6 +172,9 @@ if(TURBO_COVERAGE)
 endif()
 
 option(USE_CPU_ONLY "Build CPU-only mode with ONNX Runtime" OFF)
+
+include(src/http/sources.cmake)
+include(src/grpc/sources.cmake)
 option(ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(ENABLE_TSAN "Enable ThreadSanitizer" OFF)
 # When the fetched ONNX Runtime tarball has no pinned SHA256 (the aarch64 case),
@@ -236,19 +239,23 @@ endif()
 # --- Shared library: turbo_ocr_common ---
 add_library(turbo_ocr_common STATIC
     src/detection/det_postprocess.cpp
-    src/formula/cjk_stats.cpp
+    src/common/cjk_stats.cpp
     src/formula/latex_extract.cpp
     src/recognition/ctc_decode.cpp
     src/decode/fast_png_decoder.cpp
-    src/layout/reading_order.cpp
-    src/layout/match_unsorted.cpp
-    src/layout/child_blocks.cpp
-    src/layout/text_line_cluster.cpp
+    src/layout/order/reading_order.cpp
+    src/layout/order/xy_cut.cpp
+    src/layout/blocks/match_unsorted.cpp
+    src/layout/blocks/child_blocks.cpp
+    src/layout/blocks/text_line_cluster.cpp
     src/docassembly/repetition_guard.cpp
     src/docassembly/title_level.cpp
     src/docassembly/table_merge.cpp
-    src/routing/routing_config.cpp
-    src/output/markdown_export.cpp
+    src/backend_routing/routing_config.cpp
+    src/markdown/markdown_export.cpp
+    src/markdown/markdown_latex.cpp
+    src/markdown/markdown_columns.cpp
+    src/markdown/markdown_assets.cpp
     third_party/clipper/clipper.cpp
     third_party/simdutf/simdutf.cpp
 )
@@ -263,44 +270,50 @@ add_library(turbo_ocr::common ALIAS turbo_ocr_common)
 
 # --- C++ unit tests (Catch2, always built) ---
 add_executable(turbo_ocr_tests
-    tests/cpp/test_box.cpp
-    tests/cpp/test_cjk_stats.cpp
-    tests/cpp/test_encoding.cpp
-    tests/cpp/test_serialization.cpp
-    tests/cpp/test_language_paths.cpp
-    tests/cpp/test_pdf_renderer_liveness.cpp
-    tests/cpp/test_ctc_decode.cpp
-    tests/cpp/test_perspective.cpp
-    tests/cpp/test_det_postprocess.cpp
-    tests/cpp/test_image_dims.cpp
-    tests/cpp/test_xy_cut.cpp
-    tests/cpp/test_logger_ratelimit.cpp
-    tests/cpp/test_server_config.cpp
-    tests/cpp/test_docassembly.cpp
-    tests/cpp/test_dict_resolution.cpp
-    tests/cpp/test_gpu_safety.cpp
-    tests/cpp/test_routing_config.cpp
-    tests/cpp/test_rec_geometry.cpp
-    tests/cpp/test_env_utils.cpp
-    tests/cpp/test_html_reconstruct.cpp
-    tests/cpp/test_formula_tokenizer.cpp
-    tests/cpp/test_png_guards.cpp
-    tests/cpp/test_pipeline_detail.cpp
-    tests/cpp/test_pdf_mode_strict.cpp
-    tests/cpp/test_serialization_escape.cpp
-    tests/cpp/test_logger_bounds.cpp
-    tests/cpp/test_latex_extract.cpp
+    tests/common/test_box.cpp
+    tests/common/test_cjk_stats.cpp
+    tests/common/test_encoding.cpp
+    tests/common/test_serialization.cpp
+    tests/server/test_language_paths.cpp
+    tests/pdf/test_pdf_renderer_liveness.cpp
+    tests/recognition/test_ctc_decode.cpp
+    tests/common/test_perspective.cpp
+    tests/detection/test_det_postprocess.cpp
+    tests/decode/test_image_dims.cpp
+    tests/layout/test_xy_cut.cpp
+    tests/layout/test_reading_order_buckets.cpp
+    tests/layout/test_layout_blocks.cpp
+    tests/layout/test_blocks_aggregate.cpp
+    tests/common/test_logger_ratelimit.cpp
+    tests/server/test_server_config.cpp
+    tests/docassembly/test_docassembly.cpp
+    tests/server/test_dict_resolution.cpp
+    tests/pipeline/test_gpu_safety.cpp
+    tests/backend_routing/test_routing_config.cpp
+    tests/recognition/test_rec_geometry.cpp
+    tests/validation/test_request_validation.cpp
+    tests/server/test_pool_sizing.cpp
+    src/server/server_config.cpp
+    tests/common/test_env_utils.cpp
+    tests/table/test_html_reconstruct.cpp
+    tests/formula/test_formula_tokenizer.cpp
+    tests/decode/test_png_guards.cpp
+    tests/pipeline/test_pipeline_detail.cpp
+    tests/pdf/test_pdf_mode_strict.cpp
+    tests/common/test_serialization_escape.cpp
+    tests/common/test_logger_bounds.cpp
+    tests/formula/test_latex_extract.cpp
+    tests/formula/test_latex_normalize.cpp
+    tests/table/test_cell_matcher.cpp
+    tests/table/test_slanext_dict.cpp
+    tests/table/test_slanext_postprocess.cpp
+    tests/table/test_slanext_postprocess_aabb.cpp
     third_party/catch2/catch_amalgamated.cpp
 )
-# These three TUs are not in turbo_ocr_common. On the CPU build the test has no
-# other provider, so it compiles them directly. On the GPU build they come from
-# turbo_ocr_gpu (linked below); compiling them here too would double-compile
-# (static-archive dedup hides it, but it is fragile). Add them CPU-only.
+# Host-logic suites above resolve their symbols from turbo_ocr_cpu on the CPU
+# build and from turbo_ocr_gpu on the GPU build (linked below).
 if(USE_CPU_ONLY)
-    target_sources(turbo_ocr_tests PRIVATE
-        src/render/pdf_renderer.cpp
-        src/table/html_reconstruct.cpp
-        src/formula/formula_tokenizer.cpp)
+    target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_cpu)
 endif()
 target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_common)
 target_include_directories(turbo_ocr_tests PRIVATE
@@ -394,24 +407,29 @@ if(USE_CPU_ONLY)
         src/recognition/cpu_paddle_rec.cpp
         src/classification/cpu_paddle_cls.cpp
         src/classification/cpu_doc_orientation.cpp
-        src/pipeline/cpu_ocr_pipeline.cpp
+        src/pipeline/ocr/cpu_ocr_pipeline.cpp
         src/layout/cpu_paddle_layout.cpp
-        src/render/pdf_renderer.cpp
-        src/pdf/pdf_text_layer.cpp
+        src/pdf/render/pdf_renderer.cpp
+        src/pdf/render/pdf_ppm.cpp
+        src/pdf/render/pdf_daemon.cpp
+        src/pdf/text/pdf_text_layer.cpp
+        src/pdf/text/pdf_text_extract.cpp
+        src/pdf/text/pdf_text_verify.cpp
         src/pdf/page_image_encoder.cpp
         # CUDA-FREE formula (PP-FormulaNet-S fused graph on ORT-CPU) +
         # table (SLANeXt ORT-CPU encoder + host GRU decode) stages. The
         # CUDA-tied PPFormulaNetOrt/SlanextEncSplit GPU TUs are NOT built here;
         # these are their pure-C++ siblings sharing the bit-exact preprocess /
         # tokenizer / host decoder / dict / cell-matcher / html code.
-        src/formula/ort_session.cpp
-        src/formula/ppformulanet_preprocess.cpp
-        src/formula/cpu_formula_recognizer.cpp
-        src/formula/formula_tokenizer.cpp
-        src/table/cpu_slanext_table.cpp
-        src/table/slanext_host_decode.cpp
-        src/table/slanext_postprocess.cpp
-        src/table/slanext_dict.cpp
+        src/formula/ppformulanet/ort_session.cpp
+        src/formula/ppformulanet/ppformulanet_preprocess.cpp
+        src/formula/ppformulanet/cpu_formula_recognizer.cpp
+        src/formula/ppformulanet/formula_tokenizer.cpp
+        src/formula/ppformulanet/latex_normalize.cpp
+        src/table/slanext/cpu_slanext_table.cpp
+        src/table/slanext/slanext_host_decode.cpp
+        src/table/slanext/slanext_postprocess.cpp
+        src/table/slanext/slanext_dict.cpp
         src/table/cell_matcher.cpp
         src/table/html_reconstruct.cpp
     )
@@ -419,7 +437,7 @@ if(USE_CPU_ONLY)
     # compiler vectorize the dot-product reductions (FP reassociation only —
     # accuracy-neutral, verified) under the default AVX2 target. Same flags the
     # GPU build applies to slanext_enc_split.cpp.
-    set_source_files_properties(src/table/slanext_host_decode.cpp PROPERTIES
+    set_source_files_properties(src/table/slanext/slanext_host_decode.cpp PROPERTIES
         COMPILE_OPTIONS "-ffast-math;-fopenmp-simd")
     # libjpeg-turbo: fast JPEG encode for inline page-image export.
     find_library(TURBOJPEG_LIB turbojpeg REQUIRED)
@@ -433,17 +451,22 @@ if(USE_CPU_ONLY)
     target_compile_options(turbo_ocr_cpu PRIVATE ${TURBO_OCR_CXX_FLAGS})
     # USE_CPU_ONLY: existing CPU-build switch (page_image_encoder etc.).
     # TURBO_CPU_ONLY: compiles the CUDA execution provider out of the shared
-    # OrtSession TU (src/formula/ort_session.cpp) so the CUDA-free CPU library
+    # OrtSession TU (src/formula/ppformulanet/ort_session.cpp) so the CUDA-free CPU library
     # links only load_cpu() — the GPU build leaves it undefined and keeps load().
     target_compile_definitions(turbo_ocr_cpu PUBLIC USE_CPU_ONLY TURBO_CPU_ONLY)
     add_library(turbo_ocr::cpu ALIAS turbo_ocr_cpu)
 
     # CPU HTTP + gRPC server
     add_executable(turboocr-cpu-server
-        src/server/cpu_main.cpp
-        src/routes/common_routes.cpp
-        src/routes/pdf_routes.cpp
-        src/pipeline/pdf_job.cpp
+        src/server/cpu_server_main.cpp
+        src/server/server_config.cpp
+        src/server/stages_cpu.cpp
+        ${TURBO_HTTP_COMMON_SRCS}
+        ${TURBO_HTTP_CPU_SRCS}
+        ${TURBO_GRPC_SRCS}
+        src/pipeline/pdf/pdf_job.cpp
+        src/pipeline/pdf/pdf_job_pages.cpp
+        src/pipeline/pdf/pdf_job_sink.cpp
         ${PROTO_GEN_CC}
         ${GRPC_GEN_CC}
     )
@@ -551,57 +574,84 @@ else()
 
     # --- GPU library ---
     add_library(turbo_ocr_gpu STATIC
-        src/engine/trt_engine.cpp
-        src/engine/engine_cache.cpp
-        src/engine/onnx_to_trt.cpp
+        src/engine/trt/trt_engine.cpp
+        src/engine/trt/engine_loader.cpp
+        src/engine/trt/onnx_to_trt.cpp
+        src/engine/trt/trt_engine_cache.cpp
+        src/engine/trt/trt_profiles.cpp
         src/detection/paddle_det.cpp
+        src/detection/paddle_det_ccl.cpp
         src/recognition/paddle_rec.cpp
         src/classification/paddle_cls.cpp
         src/classification/doc_orientation.cpp
         src/lang_cls/script_id.cpp
         src/layout/paddle_layout.cpp
-        src/pipeline/ocr_pipeline.cpp
-        src/pipeline/ocr_pipeline_run.cpp
-        src/pipeline/ocr_pipeline_detail.cpp
-        src/pipeline/infer_one.cpp
-        src/pipeline/recognizer_registry.cpp
-        src/kernels/kernels.cu
+        src/pipeline/ocr/ocr_pipeline_runtime.cpp
+        src/pipeline/ocr/ocr_pipeline_init.cpp
+        src/pipeline/ocr/ocr_pipeline_run.cpp
+        src/pipeline/ocr/ocr_pipeline_dispatch.cpp
+        src/pipeline/ocr/ocr_pipeline_batch.cpp
+        src/pipeline/ocr/ocr_pipeline_detail.cpp
+        src/pipeline/ocr/finalize_deferred.cpp
+        src/pipeline/ocr/infer_one.cpp
+        src/pipeline/jpeg_infer.cpp
+        src/pipeline/pipeline_dispatcher.cpp
+        src/pipeline/ocr/recognizer_registry.cpp
+        src/kernels/preprocess_kernels.cu
+        src/kernels/reduce_kernels.cu
+        src/kernels/ccl_kernels.cu
         src/kernels/jfa.cu
-        src/render/pdf_renderer.cpp
-        src/pdf/pdf_text_layer.cpp
+        src/pdf/render/pdf_renderer.cpp
+        src/pdf/render/pdf_ppm.cpp
+        src/pdf/render/pdf_daemon.cpp
+        src/pdf/text/pdf_text_layer.cpp
+        src/pdf/text/pdf_text_extract.cpp
+        src/pdf/text/pdf_text_verify.cpp
         src/pdf/page_image_encoder.cpp
         # CUA router + table + formula stages (referenced by ocr_pipeline's
         # dispatch_router_). Pulled in here so turboocr-server links;
         # the operator's prior in-progress integration left these source
         # files on disk but not on the build target.
         src/router/cua_router.cpp
+        src/router/cua_router_rules.cpp
         src/router/region_features.cpp
         src/router/routing_plan.cpp
         src/table/table_cell.cpp
-        src/table/slanext_enc_split.cpp
-        src/table/slanext_dict.cpp
-        src/table/slanext_postprocess.cpp
+        src/table/slanext/slanext_enc_split.cpp
+        src/table/slanext/slanext_host_decode.cpp
+        src/table/slanext/slanext_dict.cpp
+        src/table/slanext/slanext_postprocess.cpp
         src/table/cell_matcher.cpp
         src/table/html_reconstruct.cpp
         src/table/table_recognizer.cpp
-        src/table/slanext_table_recognizer.cpp
-        src/table/vlm_table_recognizer.cpp
-        src/table/vlm_table.cpp
-        src/table/kernels/table_kernels.cu
-        src/formula/formula_tokenizer.cpp
+        src/table/slanext/slanext_table_recognizer.cpp
+        src/table/vlm/vlm_table_recognizer.cpp
+        src/table/vlm/vlm_table.cpp
+        src/table/vlm/otsl_html.cpp
+        src/table/slanext/table_kernels.cu
+        src/formula/ppformulanet/formula_tokenizer.cpp
+        src/formula/ppformulanet/latex_normalize.cpp
         src/formula/formula_recognizer.cpp
-        src/formula/auto_cjk_formula.cpp
-        src/formula/vlm_formula.cpp
-        src/formula/ppformulanet_ort.cu
-        src/formula/ppformulanet_preprocess.cpp
-        src/formula/ort_session.cpp
+        src/formula/routing/auto_cjk_formula.cpp
+        src/formula/vlm/vlm_formula.cpp
+        src/vlm/vlm_client.cpp
+        src/formula/ppformulanet/ppformulanet_ort.cu
+        src/formula/ppformulanet/ppformulanet_decode.cu
+        src/formula/ppformulanet/ppformulanet_plusm.cu
+        src/formula/ppformulanet/ppformulanet_gate_bench.cu
+        src/formula/ppformulanet/ppformulanet_preprocess.cpp
+        src/formula/ppformulanet/ort_session.cpp
         src/vlm/crop_pool.cpp
-        src/backends/openai_endpoint.cpp
+        src/vlm/crop_pool_transport.cpp
+        src/vlm/openai_endpoint.cpp
     )
     # The SLANeXt host GRU decoder is a tight scalar GEMV/attention loop; let the
     # compiler vectorize the dot-product reductions (FP reassociation only —
     # accuracy-neutral, verified) under the default AVX2 (-march=x86-64-v3) target.
-    set_source_files_properties(src/table/slanext_enc_split.cpp PROPERTIES
+    # slanext_host_decode.cpp is the ONE decode source shared with the CPU build;
+    # identical flags here keep the GPU/CPU token streams bit-identical.
+    set_source_files_properties(src/table/slanext/slanext_enc_split.cpp
+        src/table/slanext/slanext_host_decode.cpp PROPERTIES
         COMPILE_OPTIONS "-ffast-math;-fopenmp-simd")
     target_include_directories(turbo_ocr_gpu PUBLIC
         ${CUDAToolkit_INCLUDE_DIRS}
@@ -628,7 +678,7 @@ else()
     if(NOT CURL_LIB)
         message(FATAL_ERROR
             "libcurl development files not found. The VLM table/formula "
-            "clients (src/table/vlm_table.cpp, src/formula/vlm_formula.cpp) "
+            "clients (src/table/vlm/vlm_table.cpp, src/formula/vlm/vlm_formula.cpp) "
             "link libcurl unconditionally even though they are runtime-opt-in. "
             "Install it first: libcurl4-openssl-dev (Debian/Ubuntu), "
             "libcurl-devel (Fedora/RHEL), or curl (Arch).")
@@ -655,33 +705,32 @@ else()
         ${CUDAToolkit_INCLUDE_DIRS}
         ${TENSORRT_DIR}/include
     )
-    # Table/router/formula/parser unit tests resolve their symbols from
-    # turbo_ocr_gpu, so they only build in the GPU configuration (the CPU
-    # test binary links turbo_ocr_common only).
+    # These suites need symbols that exist only in turbo_ocr_gpu (CUDA/TRT or
+    # GPU-list-only TUs), so they build in the GPU configuration only.
     target_sources(turbo_ocr_tests PRIVATE
         tests/pipeline/test_finalize_deferred.cpp
         tests/pipeline/test_multi_rec.cpp
-        tests/table/test_cell_matcher.cpp
         tests/table/test_otsl_to_html.cpp
-        tests/table/test_html_reconstruct.cpp
-        tests/table/test_slanext_dict.cpp
-        tests/table/test_slanext_postprocess.cpp
-        tests/table/test_slanext_postprocess_aabb.cpp
         tests/router/test_cua_router.cpp
-        tests/formula/test_formula_tokenizer.cpp
         tests/formula/test_formula_preprocess.cpp
         tests/formula/test_formulanet_ar_loop.cpp
         tests/lang_cls/test_script_id.cpp
-        tests/cpp/test_openai_parsers.cpp
+        tests/vlm/test_openai_parsers.cpp
     )
 
     # GPU HTTP + gRPC server (shared pipeline pool)
     add_executable(turboocr-server
-        src/server/main.cpp
-        src/routes/common_routes.cpp
-        src/routes/image_routes.cpp
-        src/routes/pdf_routes.cpp
-        src/pipeline/pdf_job.cpp
+        src/server/gpu_server_main.cpp
+        src/server/server_config.cpp
+        src/server/readiness_gpu.cpp
+        src/server/stages_gpu.cpp
+        ${TURBO_HTTP_COMMON_SRCS}
+        ${TURBO_HTTP_GPU_SRCS}
+        ${TURBO_GRPC_SRCS}
+        src/pipeline/pdf/pdf_job.cpp
+        src/pipeline/pdf/pdf_job_pages.cpp
+        src/pipeline/pdf/pdf_job_sink.cpp
+        src/pipeline/pdf/pdf_job_gpu.cpp
         ${PROTO_GEN_CC}
         ${GRPC_GEN_CC}
     )

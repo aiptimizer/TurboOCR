@@ -34,4 +34,11 @@ namespace turbo_ocr {
   return base64_decode(in.data(), in.size());
 }
 
+// SIMD-accelerated base64 encoder (inverse of base64_decode).
+[[nodiscard]] inline std::string base64_encode(const void *data, size_t len) {
+  std::string out(simdutf::base64_length_from_binary(len), '\0');
+  simdutf::binary_to_base64(static_cast<const char *>(data), len, out.data());
+  return out;
+}
+
 } // namespace turbo_ocr

@@ -112,6 +112,23 @@ for f in "${cmake_files[@]:-}"; do
   fi
 done
 
+# ---- 5. File-length ratchet --------------------------------------------
+# God-files breed god-functions and silently-divergent copies (the routes/
+# grpc split of 2026-07 removed three 1000+-line files). A STAGED source file
+# may not exceed 500 lines: split it along its natural seams instead. Escape
+# hatch for genuinely unsplittable files: // pre-commit-allow-length within
+# the first 5 lines, next to a justification.
+for f in "${cxx_files[@]:-}"; do
+  [ -n "$f" ] || continue
+  n=$(staged "$f" | wc -l)
+  if [ "$n" -gt 500 ]; then
+    if ! staged "$f" | head -5 | grep -q 'pre-commit-allow-length'; then
+      say "pre-commit: $f is $n lines (max 500) — split it by responsibility, or add // pre-commit-allow-length (first 5 lines) with a justification."
+      fail=1
+    fi
+  fi
+done
+
 # ---- 5. cppcheck on STAGED content (time-boxed) ------------------------
 # The staged blob is what gets committed, so that is what gets checked —
 # a partially-staged file must be judged on its index version, not the

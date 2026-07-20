@@ -6,7 +6,7 @@
 // finished lanes with mask=false, and greedy argmax over a vocab row.
 
 #include "catch_amalgamated.hpp"
-#include "turbo_ocr/formula/formula_tokenizer.h"
+#include "turbo_ocr/formula/ppformulanet/formula_tokenizer.h"
 
 #include <vector>
 

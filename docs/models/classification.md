@@ -84,7 +84,7 @@ classDiagram
   PaddleCls --> TrtEngine
 ```
 
-`compute_crop_transform` (in `turbo_ocr/common/perspective.h`) produces the
+`compute_crop_transform` (in `turbo_ocr/common/geometry/perspective.h`) produces the
 `M_inv` 3×3 matrix that lets a single CUDA kernel (`cuda_batch_roi_warp`) warp
 the quad directly into the classifier's fixed `80×160` input slot without an
 intermediate crop allocation.

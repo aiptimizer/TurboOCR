@@ -3,8 +3,8 @@
 #include "turbo_ocr/recognition/ctc_decode.h"
 
 #include "turbo_ocr/common/errors.h"
-#include "turbo_ocr/common/logger.h"
-#include "turbo_ocr/common/perspective.h"
+#include "turbo_ocr/common/log/logger.h"
+#include "turbo_ocr/common/geometry/perspective.h"
 
 #include <algorithm>
 #include <cmath>
@@ -204,6 +204,115 @@ void PaddleRec::bake_graphs(cudaStream_t stream) {
   TOCR_LOG_INFO("PaddleRec baked CUDA graphs", "count", baked);
 }
 
+// ---- Multi-slot deferred-sync recognition ----------------------------------
+// Queue ALL batch iterations to the GPU without inter-batch synchronization.
+// Each iteration writes argmax results to its own output slot
+// (d_indices/d_scores). After all iterations are queued, a single
+// cudaStreamSynchronize retrieves all results, then CTC decode runs on CPU for
+// all iterations at once. This eliminates ~N-1 cudaEventSynchronize calls that
+// previously created GPU idle gaps (the CPU couldn't submit batch N+1 until
+// batch N was done).
+//
+// Callback contract (index = position in the CALLER's bucket-sorted order):
+//   bucket_at(i)          -> the crop's snapped width bucket
+//   box_at(i)             -> the crop's source Box
+//   warp(beg, count, imgW)-> queue the ROI warps for crops [beg, beg+count)
+//                            into d_batch_input_ (single-image: one call;
+//                            multi-image: one call per source-image run)
+//   on_drop(beg, end)     -> extra accounting for a skipped over-dim batch
+//                            (dropped_crops_ is counted here already)
+//   emit_result(i, r)     -> deliver crop i's decoded (text, score)
+template <typename BucketAt, typename BoxAt, typename Warp, typename OnDrop,
+          typename Emit>
+void PaddleRec::run_queue_loop_(int total_boxes, const BucketAt &bucket_at,
+                                const BoxAt &box_at, const Warp &warp,
+                                const OnDrop &on_drop, const Emit &emit_result,
+                                cudaStream_t stream) {
+  std::vector<BatchRecord> batch_records;
+  batch_records.reserve(16);
+
+  int beg = 0;
+  int slot = 0;
+
+  while (beg < total_boxes) {
+    int bucket_w = bucket_at(beg);
+
+    // Find end of this bucket group (or batch limit)
+    int end = beg;
+    while (end < total_boxes && end - beg < rec_batch_num_ &&
+           bucket_at(end) == bucket_w)
+      end++;
+
+    int cur_batch = end - beg;
+    int imgW = bucket_w;
+
+    // If we've exhausted our output slots, sync and decode what we have so far
+    if (slot >= kMaxSlots) {
+      CUDA_CHECK(cudaStreamSynchronize(stream));
+      decode_records(batch_records, output_slots_, label_list_, emit_result);
+      batch_records.clear();
+      slot = 0;
+    }
+
+    // Build transforms using per-slot pinned host buffers (avoids DMA race).
+    // Cache raw pinned pointers once — the inner loop is hot (called per
+    // batch × per crop) and per-iteration .get() calls add up.
+    auto &os = output_slots_[slot];
+    float *h_M_invs_ptr = os.h_M_invs.get();
+    int *h_crop_widths_ptr = os.h_crop_widths.get();
+    for (int j = 0; j < cur_batch; ++j) {
+      auto ct = turbo_ocr::compute_crop_transform(box_at(beg + j),
+                                                  rec_image_h_, imgW);
+      h_crop_widths_ptr[j] = ct.crop_width;
+      std::memcpy(h_M_invs_ptr + j * 9, ct.M_inv, 9 * sizeof(float));
+    }
+
+    // Upload + warp + infer (all async on stream)
+    CUDA_CHECK(cudaMemcpyAsync(d_M_invs_.get(), h_M_invs_ptr, cur_batch * 9 * sizeof(float),
+                                cudaMemcpyHostToDevice, stream));
+    CUDA_CHECK(cudaMemcpyAsync(d_crop_widths_.get(), h_crop_widths_ptr, cur_batch * sizeof(int),
+                                cudaMemcpyHostToDevice, stream));
+
+    warp(beg, cur_batch, imgW);
+
+    int seq_len = 0;
+    int num_classes = 0;
+    infer_bucket(cur_batch, imgW, stream, seq_len, num_classes);
+
+    if (seq_len > actual_seq_len_ || num_classes > actual_num_classes_) {
+      // Counted so the pipeline can flag text_degraded: these crops return
+      // empty, which must never pass as a page that simply had less text.
+      dropped_crops_ += cur_batch;
+      on_drop(beg, end);
+      TOCR_LOG_WARN_RL("PaddleRec output dims exceed decode buffers, skipping batch",
+                       "seq_len", seq_len, "num_classes", num_classes,
+                       "buf_seq_len", actual_seq_len_, "buf_num_classes", actual_num_classes_);
+      beg = end;
+      continue;
+    }
+
+    turbo_ocr::kernels::cuda_argmax(d_output_.get(), os.d_indices.get(), os.d_scores.get(), cur_batch,
+                             seq_len, num_classes, stream);
+
+    // Async D2H copy to this slot's host buffers (no sync needed -- each slot is independent)
+    int dl_count = cur_batch * seq_len;
+    CUDA_CHECK(cudaMemcpyAsync(os.h_indices.get(), os.d_indices.get(), dl_count * sizeof(int),
+                                cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(os.h_scores.get(), os.d_scores.get(), dl_count * sizeof(float),
+                                cudaMemcpyDeviceToHost, stream));
+
+    batch_records.push_back({beg, end, seq_len, slot});
+    slot++;
+    beg = end;
+  }
+
+  // Single sync for ALL queued batches
+  CUDA_CHECK(cudaStreamSynchronize(stream));
+
+  // CTC decode ALL batches on CPU (all D2H transfers are complete)
+  decode_records(batch_records, output_slots_, label_list_, emit_result);
+}
+
 std::vector<std::pair<std::string, float>>
 PaddleRec::run(const GpuImage &img, const std::vector<Box> &boxes,
                cudaStream_t stream) {
@@ -233,102 +342,21 @@ PaddleRec::run(const GpuImage &img, const std::vector<Box> &boxes,
   // Sort by bucket so crops with similar widths batch together
   std::ranges::sort(crops, {}, &CropInfo::bucket_w);
 
-  // ---- Multi-slot deferred-sync recognition --------------------------------
-  // Queue ALL batch iterations to the GPU without inter-batch synchronization.
-  // Each iteration writes argmax results to its own output slot (d_indices/d_scores).
-  // After all iterations are queued, a single cudaStreamSynchronize retrieves
-  // all results, then CTC decode runs on CPU for all iterations at once.
-  // This eliminates ~N-1 cudaEventSynchronize calls that previously created
-  // GPU idle gaps (the CPU couldn't submit batch N+1 until batch N was done).
-
-  std::vector<BatchRecord> batch_records;
-  batch_records.reserve(16);
-
-  // Sink for decode_records: map a crop index back to its original box slot.
-  const auto emit_result = [&](int ci, std::pair<std::string, float> &&r) {
-    results[crops[ci].orig_idx] = std::move(r);
-  };
-
-  int beg = 0;
-  int slot = 0;
-
-  while (beg < total_boxes) {
-    int bucket_w = crops[beg].bucket_w;
-
-    // Find end of this bucket group (or batch limit)
-    int end = beg;
-    while (end < total_boxes && end - beg < rec_batch_num_ && crops[end].bucket_w == bucket_w)
-      end++;
-
-    int cur_batch = end - beg;
-    int imgW = bucket_w;
-
-    // If we've exhausted our output slots, sync and decode what we have so far
-    if (slot >= kMaxSlots) {
-      CUDA_CHECK(cudaStreamSynchronize(stream));
-      decode_records(batch_records, output_slots_, label_list_, emit_result);
-      batch_records.clear();
-      slot = 0;
-    }
-
-    // Build transforms using per-slot pinned host buffers (avoids DMA race).
-    // Cache raw pinned pointers once — the inner loop is hot (called per
-    // batch × per crop) and per-iteration .get() calls add up.
-    auto &os = output_slots_[slot];
-    float *h_M_invs_ptr = os.h_M_invs.get();
-    int *h_crop_widths_ptr = os.h_crop_widths.get();
-    for (int j = 0; j < cur_batch; ++j) {
-      int orig_idx = crops[beg + j].orig_idx;
-      auto ct = turbo_ocr::compute_crop_transform(boxes[orig_idx], rec_image_h_, imgW);
-      h_crop_widths_ptr[j] = ct.crop_width;
-      std::memcpy(h_M_invs_ptr + j * 9, ct.M_inv, 9 * sizeof(float));
-    }
-
-    // Upload + warp + infer (all async on stream)
-    CUDA_CHECK(cudaMemcpyAsync(d_M_invs_.get(), h_M_invs_ptr, cur_batch * 9 * sizeof(float),
-                                cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_crop_widths_.get(), h_crop_widths_ptr, cur_batch * sizeof(int),
-                                cudaMemcpyHostToDevice, stream));
-
-    turbo_ocr::kernels::cuda_batch_roi_warp(img, d_M_invs_.get(), d_crop_widths_.get(),
-                                     d_batch_input_.get(), cur_batch, rec_image_h_,
-                                     imgW, stream);
-
-    int seq_len = 0;
-    int num_classes = 0;
-    infer_bucket(cur_batch, imgW, stream, seq_len, num_classes);
-
-    if (seq_len > actual_seq_len_ || num_classes > actual_num_classes_) {
-      // Counted so the pipeline can flag text_degraded: these crops return
-      // empty, which must never pass as a page that simply had less text.
-      dropped_crops_ += cur_batch;
-      TOCR_LOG_WARN_RL("PaddleRec output dims exceed decode buffers, skipping batch",
-                       "seq_len", seq_len, "num_classes", num_classes,
-                       "buf_seq_len", actual_seq_len_, "buf_num_classes", actual_num_classes_);
-      beg = end;
-      continue;
-    }
-
-    turbo_ocr::kernels::cuda_argmax(d_output_.get(), os.d_indices.get(), os.d_scores.get(), cur_batch,
-                             seq_len, num_classes, stream);
-
-    // Async D2H copy to this slot's host buffers (no sync needed -- each slot is independent)
-    int dl_count = cur_batch * seq_len;
-    CUDA_CHECK(cudaMemcpyAsync(os.h_indices.get(), os.d_indices.get(), dl_count * sizeof(int),
-                                cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(os.h_scores.get(), os.d_scores.get(), dl_count * sizeof(float),
-                                cudaMemcpyDeviceToHost, stream));
-
-    batch_records.push_back({beg, end, seq_len, slot});
-    slot++;
-    beg = end;
-  }
-
-  // Single sync for ALL queued batches
-  CUDA_CHECK(cudaStreamSynchronize(stream));
-
-  // CTC decode ALL batches on CPU (all D2H transfers are complete)
-  decode_records(batch_records, output_slots_, label_list_, emit_result);
+  run_queue_loop_(
+      total_boxes,
+      [&](int i) { return crops[i].bucket_w; },
+      [&](int i) -> const Box & { return boxes[crops[i].orig_idx]; },
+      [&](int, int cur_batch, int imgW) {
+        turbo_ocr::kernels::cuda_batch_roi_warp(img, d_M_invs_.get(), d_crop_widths_.get(),
+                                         d_batch_input_.get(), cur_batch, rec_image_h_,
+                                         imgW, stream);
+      },
+      [](int, int) {},
+      // Sink for decode_records: map a crop index back to its original box slot.
+      [&](int ci, std::pair<std::string, float> &&r) {
+        results[crops[ci].orig_idx] = std::move(r);
+      },
+      stream);
 
   return results;
 }
@@ -378,112 +406,43 @@ PaddleRec::run_multi(const std::vector<ImageCrops> &image_crops,
     return a.img_idx < b.img_idx;
   });
 
-  // Multi-slot deferred-sync recognition (same as single-image run())
-  std::vector<BatchRecord> batch_records;
-  batch_records.reserve(16);
+  run_queue_loop_(
+      total_boxes,
+      [&](int i) { return crops[i].bucket_w; },
+      [&](int i) -> const Box & {
+        const auto &ci = crops[i];
+        return image_crops[ci.img_idx].boxes[ci.box_idx];
+      },
+      // Warp crops per source image.
+      [&](int beg, int cur_batch, int imgW) {
+        size_t slot_stride = static_cast<size_t>(3) * rec_image_h_ * imgW;
+        int j = 0;
+        while (j < cur_batch) {
+          int src_img = crops[beg + j].img_idx;
+          int run_start = j;
+          while (j < cur_batch && crops[beg + j].img_idx == src_img)
+            j++;
+          int run_len = j - run_start;
 
-  // Sink for decode_records: map a crop index back to its (image, box) slot.
-  const auto emit_result = [&](int ci, std::pair<std::string, float> &&r) {
-    const auto &c = crops[ci];
-    all_results[c.img_idx][c.box_idx] = std::move(r);
-  };
-
-  int beg = 0;
-  int slot = 0;
-
-  while (beg < total_boxes) {
-    int bucket_w = crops[beg].bucket_w;
-
-    int end = beg;
-    while (end < total_boxes && end - beg < rec_batch_num_ &&
-           crops[end].bucket_w == bucket_w)
-      end++;
-
-    int cur_batch = end - beg;
-    int imgW = bucket_w;
-
-    // If we've exhausted output slots, sync and decode what we have so far
-    if (slot >= kMaxSlots) {
-      CUDA_CHECK(cudaStreamSynchronize(stream));
-      decode_records(batch_records, output_slots_, label_list_, emit_result);
-      batch_records.clear();
-      slot = 0;
-    }
-
-    // Build transforms using per-slot pinned buffers (avoids DMA race).
-    // Cache raw pinned pointers once — see notes in run() above.
-    auto &os = output_slots_[slot];
-    float *h_M_invs_ptr = os.h_M_invs.get();
-    int *h_crop_widths_ptr = os.h_crop_widths.get();
-    for (int j = 0; j < cur_batch; ++j) {
-      const auto &ci = crops[beg + j];
-      const auto &box = image_crops[ci.img_idx].boxes[ci.box_idx];
-      auto ct = turbo_ocr::compute_crop_transform(box, rec_image_h_, imgW);
-      h_crop_widths_ptr[j] = ct.crop_width;
-      std::memcpy(h_M_invs_ptr + j * 9, ct.M_inv, 9 * sizeof(float));
-    }
-
-    CUDA_CHECK(cudaMemcpyAsync(d_M_invs_.get(), h_M_invs_ptr,
-                                cur_batch * 9 * sizeof(float),
-                                cudaMemcpyHostToDevice, stream));
-    CUDA_CHECK(cudaMemcpyAsync(d_crop_widths_.get(), h_crop_widths_ptr,
-                                cur_batch * sizeof(int),
-                                cudaMemcpyHostToDevice, stream));
-
-    // Warp crops per source image.
-    {
-      size_t slot_stride = static_cast<size_t>(3) * rec_image_h_ * imgW;
-      int j = 0;
-      while (j < cur_batch) {
-        int src_img = crops[beg + j].img_idx;
-        int run_start = j;
-        while (j < cur_batch && crops[beg + j].img_idx == src_img)
-          j++;
-        int run_len = j - run_start;
-
-        turbo_ocr::kernels::cuda_batch_roi_warp(
-            image_crops[src_img].img,
-            d_M_invs_.get() + run_start * 9,
-            d_crop_widths_.get() + run_start,
-            d_batch_input_.get() + run_start * slot_stride,
-            run_len, rec_image_h_, imgW, stream);
-      }
-    }
-
-    int seq_len = 0;
-    int num_classes = 0;
-    infer_bucket(cur_batch, imgW, stream, seq_len, num_classes);
-
-    if (seq_len > actual_seq_len_ || num_classes > actual_num_classes_) {
-      dropped_crops_ += cur_batch;  // -> text_degraded, same as run()
-      for (int k = beg; k < end; ++k)
-        dropped_per_image_[crops[k].img_idx]++;
-      TOCR_LOG_WARN_RL("PaddleRec output dims exceed decode buffers, skipping batch",
-                       "seq_len", seq_len, "num_classes", num_classes,
-                       "buf_seq_len", actual_seq_len_, "buf_num_classes", actual_num_classes_);
-      beg = end;
-      continue;
-    }
-
-    turbo_ocr::kernels::cuda_argmax(d_output_.get(), os.d_indices.get(), os.d_scores.get(), cur_batch,
-                             seq_len, num_classes, stream);
-
-    int dl_count = cur_batch * seq_len;
-    CUDA_CHECK(cudaMemcpyAsync(os.h_indices.get(), os.d_indices.get(), dl_count * sizeof(int),
-                                cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaMemcpyAsync(os.h_scores.get(), os.d_scores.get(), dl_count * sizeof(float),
-                                cudaMemcpyDeviceToHost, stream));
-
-    batch_records.push_back({beg, end, seq_len, slot});
-    slot++;
-    beg = end;
-  }
-
-  // Single sync for all queued batches
-  CUDA_CHECK(cudaStreamSynchronize(stream));
-
-  // CTC decode all batches
-  decode_records(batch_records, output_slots_, label_list_, emit_result);
+          turbo_ocr::kernels::cuda_batch_roi_warp(
+              image_crops[src_img].img,
+              d_M_invs_.get() + run_start * 9,
+              d_crop_widths_.get() + run_start,
+              d_batch_input_.get() + run_start * slot_stride,
+              run_len, rec_image_h_, imgW, stream);
+        }
+      },
+      // -> text_degraded per source image, same total as run()
+      [&](int beg, int end) {
+        for (int k = beg; k < end; ++k)
+          dropped_per_image_[crops[k].img_idx]++;
+      },
+      // Sink for decode_records: map a crop index back to its (image, box) slot.
+      [&](int ci, std::pair<std::string, float> &&r) {
+        const auto &c = crops[ci];
+        all_results[c.img_idx][c.box_idx] = std::move(r);
+      },
+      stream);
 
   return all_results;
 }

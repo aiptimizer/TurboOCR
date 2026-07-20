@@ -39,7 +39,7 @@
 // budget, NOT this runtime).
 
 #include "turbo_ocr/kernels/kernels.h"
-#include "turbo_ocr/common/cuda_check.h"
+#include "turbo_ocr/common/cuda/cuda_check.h"
 #include <cuda_runtime.h>
 #include <climits>
 #include <cmath>
