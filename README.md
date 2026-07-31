@@ -7,8 +7,9 @@
 </p>
 
 <p align="center">
-  <strong>The fastest GPU document parser — OCR · layout · tables · formulas → Markdown, at 200–559 images/s on one GPU.</strong><br>
-  C++ / CUDA / TensorRT / PP-OCRv6 &mdash; Linux + NVIDIA GPU
+  <strong>Fast document parser — OCR · layout · tables · formulas → Markdown.</strong><br>
+  <strong>GPU build:</strong> 200–559 images/s on one NVIDIA GPU via C++ / CUDA / TensorRT.<br>
+  <strong>CPU build:</strong> same pipeline, no GPU required, runs on x86_64 / ARM64 / Apple Silicon.
 </p>
 
 <h3 align="center">🎉 v3.0 — now powered by PP-OCRv6</h3>
@@ -35,6 +36,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#cpu-quick-start">CPU Quick Start</a> &middot;
   <a href="#getting-higher-accuracy">Accuracy</a> &middot;
   <a href="#benchmarks">Benchmarks</a> &middot;
   <a href="#models">Models</a> &middot;
@@ -45,13 +47,19 @@
 
 ---
 
-An extremely fast GPU **document parser** — not just OCR. PP-OCRv6 detection +
+An extremely fast **document parser** — not just OCR. PP-OCRv6 detection +
 recognition, plus layout, tables (→ HTML), formulas (→ LaTeX) and reading-order
-**Markdown**, the whole pipeline on a single multi-stream CUDA/TensorRT engine,
-locally (no VLM), behind HTTP and gRPC. Whole-page OCR runs at **up to 559 images/s
+**Markdown**, the whole pipeline on a single multi-stream engine, locally (no VLM),
+behind HTTP and gRPC. The GPU build runs whole-page OCR at **up to 559 images/s
 on receipts** (one RTX 5090), and full structured parsing (layout + tables + formulas)
 at **~20 pages/s** — where VLM document parsers like PaddleOCR-VL run ~1 page/s. On
 forms and receipts it is accurate and 15–90× faster than classic OCR engines.
+
+The same pipeline is also available in a **CPU-only build** that requires no
+NVIDIA GPU and no TensorRT engine warm-up. It runs on x86_64, ARM64 and Apple
+Silicon with ONNX Runtime, uses the same models, and exposes the same HTTP/gRPC
+API. See [CPU quick start](#cpu-quick-start), [docs/build/cpu-quickstart.md](docs/build/cpu-quickstart.md),
+and the [slim CPU image](docs/build/cpu-slim.md).
 
 - 🚀 **559 img/s (receipts) · 520 (forms) · 200+ (dense docs) on one RTX 5090 — fastest by default
 - 🎯 **Accurate on forms & receipts** &mdash; competitive with PaddleOCR-VL, PaddleOCR-Python, RapidOCR, EasyOCR and Tesseract ([benchmarks](#benchmarks))
@@ -245,20 +253,64 @@ detected regions (strict opt-in — see [Tables & formulas](#tables--formulas)).
 
 ---
 
+## CPU Quick Start
+
+No NVIDIA GPU required. The CPU-only build runs the same pipeline on ONNX
+Runtime. Works on x86_64, ARM64 and Apple Silicon.
+
+```bash
+docker compose -f docker/docker-compose.cpu.yml up -d
+```
+
+```bash
+curl -X POST http://localhost:8000/ocr/raw \
+  --data-binary @document.png -H "Content-Type: image/png"
+```
+
+Or use the one-line helper:
+
+```bash
+scripts/quickstart-cpu.sh
+```
+
+Pick a model tier and execution provider:
+
+```bash
+OCR_MODEL=small ORT_EP=xnnpack scripts/quickstart-cpu.sh
+```
+
+| Execution provider | Best for | Typical relative speed |
+|---|---|---|
+| `cpu` (default) | any CPU | baseline |
+| `xnnpack` | x86_64 / ARM64 | often 1.2–2× faster |
+| `dnnl` | Intel/AMD with AVX-512 | competitive on server CPUs |
+| `openvino` | Intel CPU | best on modern Intel cores |
+| `openvino_gpu` | Intel integrated GPU | offload to iGPU where available |
+| CoreML | Apple Silicon | auto-enabled inside the ARM64 container |
+
+Image size: ~500 MB. RAM: ~4 GB for text-only, ~8 GB with layout + tables +
+formulas. Cold start: seconds (no engine build).
+
+→ [Full CPU guide](docs/build/cpu-quickstart.md) · [CPU vs GPU](docs/cpu-vs-gpu.md)
+
+---
+
 ## Configuration
 
-Everything is configured by environment variable (and an equivalent CLI flag).
-Common ones:
+Environment variables are shared between GPU and CPU builds unless noted:
 
 | Variable | Default | Description |
 |---|---|---|
 | `OCR_MODEL` | `tiny` | `tiny` / `small` / `medium`, or a PP-OCRv5 script model |
-| `DISABLE_LAYOUT` | `0` | `1` skips the layout model (~300–500 MB VRAM) |
+| `DISABLE_LAYOUT` | `0` | `1` skips the layout model (~300–500 MB VRAM on GPU; ~124 MB on CPU) |
 | `LAYOUT_MERGE_MODE` | `all` | Nested-box policy: `all` (keep every box) / `outer` (outer regions only) / `inner` (innermost only). Old `large`/`small`/`union` accepted as aliases. |
 | `LAYOUT_KEEP_NESTED_CHILDREN` | `0` | Only affects `outer`/`inner` modes: `1` still keeps the model's nested child regions (`figure_title`, `footnote`, `formula_number`, `paragraph_title`) instead of dropping them inside a parent. Formulas are always kept; no effect under default `all`. |
 | `CLS_ALL_BOXES` | `0` | `1` runs the 0°/180° orientation classifier on every text line instead of only vertical-looking ones — for scans with mixed or upside-down lines. |
 | `REQUEST_TIMEOUT_MS` | `60000` | Per-request inference deadline; on overrun returns `504` and frees the slot. `0` = unbounded (pre-v3 behaviour). |
-| `PIPELINE_POOL_SIZE` | auto | Concurrent GPU pipelines |
+| `PIPELINE_POOL_SIZE` | auto | Concurrent pipelines (GPU or CPU) |
+| `ORT_EP` | `cpu` | CPU-only: execution provider (`cpu`, `xnnpack`, `dnnl`, `openvino`) |
+| `ORT_NUM_THREADS` | `4` | CPU-only: intra-op threads per inference session |
+| `ORT_SHARED_POOL` | `0` | CPU-only: `1` uses one global ONNX Runtime threadpool |
 
 → [Full configuration reference (35+ variables)](docs/build/config.md)
 
@@ -267,21 +319,40 @@ Common ones:
 ## Building from Source
 
 ```bash
-# Docker (recommended)
+# Docker (GPU recommended)
 docker build -f docker/Dockerfile.gpu -t turboocr .
 docker run --gpus all -p 8000:8000 -p 50051:50051 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr turboocr
 
-# Native (PP-OCRv6 models auto-fetched into ./models/ on first build)
+# Docker (CPU)
+docker build -f docker/Dockerfile.cpu -t turboocr-cpu .
+docker run -p 8000:8000 -p 50051:50051 turboocr-cpu
+
+# Docker (CPU slim, smaller image)
+docker build -f docker/Dockerfile.cpu-slim -t turboocr-cpu:slim .
+docker run -p 8000:8000 -p 50051:50051 turboocr-cpu:slim
+
+# Native CPU (no TensorRT)
+cmake -B build_cpu -DUSE_CPU_ONLY=ON
+cmake --build build_cpu -j$(nproc) --target turboocr-cpu-server
+./build_cpu/turboocr-cpu-server
+
+# Native GPU
 cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt
 cmake --build build -j$(nproc)
 LD_LIBRARY_PATH=/usr/local/tensorrt/lib ./build/turboocr-server
 ```
 
-Needs GCC 13.3+/C++20, CUDA + TensorRT 10.2+, OpenCV 4.x, Drogon 1.9+, gRPC.
-Wuffs, Clipper, and PDFium are vendored in `third_party/`.
+GPU needs GCC 13.3+/C++20, CUDA + TensorRT 10.2+, OpenCV 4.x, Drogon 1.9+, gRPC.
+CPU needs the same host compiler stack but replaces CUDA/TensorRT with ONNX Runtime
+1.22.0 (fetched automatically by CMake). Wuffs, Clipper, and PDFium are vendored in
+`third_party/`.
 
-→ [Build guide & GPU-architecture notes](docs/build/native.md)
+Optional: optimize the ONNX models for CPU with `scripts/prepare_cpu_models.py`
+(constant folding) and `scripts/quantize_cpu_models.py` (INT8 quantization)
+(see [docs/build/cpu-quickstart.md](docs/build/cpu-quickstart.md)).
+
+→ [Build guide & GPU-architecture notes](docs/build/native.md) · [CPU quickstart](docs/build/cpu-quickstart.md)
 
 ---
 

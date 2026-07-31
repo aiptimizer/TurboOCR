@@ -58,9 +58,11 @@ CpuEngine::CpuEngine(const std::string &model_path) : model_path_(model_path) {
 
   if (const char *env = std::getenv("ORT_SHARED_POOL"))
     use_shared_pool_ = (std::strcmp(env, "1") == 0);
-  // XNNPACK runs ops on its own intra-op threadpool; the shared global pool /
-  // DisablePerSessionThreads path conflicts with it, so force it off for xnnpack.
-  if (ort_ep_ == "xnnpack")
+  // XNNPACK and OpenVINO run ops on their own intra-op threadpools; the shared
+  // global pool / DisablePerSessionThreads path conflicts with them, so force it
+  // off for those EPs.
+  if (ort_ep_ == "xnnpack" || ort_ep_ == "openvino" || ort_ep_ == "openvino_cpu" ||
+      ort_ep_ == "openvino_gpu")
     use_shared_pool_ = false;
 
   // CPU optimizations — balance threads per inference vs concurrency
@@ -151,6 +153,28 @@ void CpuEngine::apply_execution_provider() {
     }
     Ort::GetApi().ReleaseDnnlProviderOptions(dnnl_opts);
     std::cout << "[CpuEngine] EP=oneDNN\n";
+  } else if (ort_ep_ == "openvino" || ort_ep_ == "openvino_cpu" ||
+             ort_ep_ == "openvino_gpu") {
+    // OpenVINO EP: CPU inference through the OpenVINO runtime. For machines
+    // with Intel integrated graphics, set ORT_EP=openvino_gpu to use the GPU
+    // device instead. The default num_of_threads is 0 (use all cores); we honor
+    // ORT_NUM_THREADS when set to keep behavior consistent with other EPs.
+    int n = 0; // 0 = OpenVINO picks all cores
+    if (const char *env = std::getenv("ORT_NUM_THREADS")) {
+      int v = std::atoi(env);
+      if (v > 0)
+        n = v;
+    }
+    const std::string device_type = (ort_ep_ == "openvino_gpu") ? "GPU" : "CPU";
+    const std::string device_id = "0";
+    session_options_.AppendExecutionProvider(
+        "OpenVINO",
+        {{"device_type", device_type},
+         {"device_id", device_id},
+         {"num_of_threads", std::to_string(n)}});
+    std::cout << std::format("[CpuEngine] EP=OpenVINO (device={}, threads={})",
+                             device_type, n)
+              << '\n';
   } else {
     throw std::runtime_error(
         std::format("[CpuEngine] Unknown ORT_EP='{}'", ort_ep_));

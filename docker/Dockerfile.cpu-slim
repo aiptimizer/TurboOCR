@@ -1,0 +1,153 @@
+# ============================================================
+# CPU-only slim Dockerfile — multi-stage, smaller final image.
+# ============================================================
+# Produces a CPU-only TurboOCR server with no build toolchain in the final
+# image. Same runtime behavior as Dockerfile.cpu; image size is typically
+# ~250–350 MB vs ~500 MB for the single-stage build.
+#
+# Build:
+#   docker build -f docker/Dockerfile.cpu-slim -t turboocr-cpu:slim .
+# Run:
+#   docker run -p 8000:8000 -p 50051:50051 turboocr-cpu:slim
+#
+# ============================================================
+
+# ------------------------------- builder stage -------------------------------
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54 AS builder
+
+ARG TARGETARCH
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    g++ \
+    make \
+    pkg-config \
+    libopencv-dev \
+    libwebp-dev \
+    libturbojpeg0-dev \
+    libgrpc++-dev \
+    libc-ares-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    protobuf-compiler-grpc \
+    libjsoncpp-dev \
+    uuid-dev \
+    zlib1g-dev \
+    libssl-dev \
+    git \
+    wget \
+    curl \
+    ca-certificates \
+    gettext-base \
+    && rm -rf /var/lib/apt/lists/*
+
+# Drogon HTTP framework (same pin as Dockerfile.cpu)
+RUN cd /tmp && \
+    git clone --depth 1 --branch v1.9.12 https://github.com/drogonframework/drogon.git && \
+    cd drogon && \
+    git submodule update --init && \
+    mkdir build && cd build && \
+    cmake .. -DBUILD_EXAMPLES=OFF -DBUILD_CTL=OFF -DBUILD_ORM=OFF \
+             -DBUILD_POSTGRESQL=OFF -DBUILD_MYSQL=OFF -DBUILD_SQLITE=OFF \
+             -DBUILD_REDIS=OFF -DBUILD_TESTING=OFF && \
+    make -j$(nproc) && make install && \
+    rm -rf /tmp/drogon
+
+# ONNX Runtime C++ SDK
+ARG ORT_VERSION=1.22.0
+ARG ORT_SHA256=8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3
+ARG ORT_SHA256_ARM64=bb76395092d150b52c7092dc6b8f2fe4d80f0f3bf0416d2f269193e347e24702
+RUN cd /tmp && \
+    case "${TARGETARCH:-amd64}" in \
+      arm64) ORT_ARCH=aarch64; ORT_SHA=${ORT_SHA256_ARM64} ;; \
+      *)     ORT_ARCH=x64;     ORT_SHA=${ORT_SHA256} ;; \
+    esac && \
+    wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}.tgz" -O ort.tgz && \
+    if [ -n "${ORT_SHA}" ]; then echo "${ORT_SHA}  ort.tgz" | sha256sum -c -; else echo "WARN: no SHA256 pinned; skipping checksum"; fi && \
+    tar xzf ort.tgz && \
+    cp -r onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}/include/* /usr/local/include/ && \
+    cp onnxruntime-linux-${ORT_ARCH}-${ORT_VERSION}/lib/libonnxruntime.so* /usr/local/lib/ && \
+    ldconfig && \
+    rm -rf /tmp/onnxruntime* /tmp/ort.tgz
+
+WORKDIR /app
+
+COPY CMakeLists.txt ./
+COPY proto/ proto/
+COPY include/ include/
+COPY src/ src/
+COPY tools/ tools/
+COPY third_party/ third_party/
+COPY tests/ tests/
+COPY scripts/install_fastpdf2png.sh scripts/install_fastpdf2png.sh
+COPY scripts/install_pdfium.sh scripts/install_pdfium.sh
+
+RUN TARGETARCH=${TARGETARCH} bash scripts/install_pdfium.sh && \
+    cp third_party/pdfium/lib/libpdfium.so /usr/lib/ && ldconfig && \
+    TARGETARCH=${TARGETARCH} bash scripts/install_fastpdf2png.sh && \
+    { cp bin/libpdfium.so /usr/lib/ 2>/dev/null || true; } && \
+    ldconfig
+
+RUN mkdir -p build_cpu && cd build_cpu && \
+    cmake .. -DUSE_CPU_ONLY=ON -DFETCH_MODELS=OFF && \
+    make -j$(nproc) --target turboocr-cpu-server
+
+# Collect runtime shared-library dependencies.  We use ldd to walk everything
+# the binary needs, then copy the resulting set into the runtime stage.  This
+# avoids shipping the full build toolchain while still keeping all transitive
+# runtime deps.
+RUN mkdir -p /opt/turboocr-libs && \
+    ldd /app/build_cpu/turboocr-cpu-server | awk '/=> \// {print $3}' | sort -u | \
+    while read -r lib; do cp -v "$lib" /opt/turboocr-libs/; done && \
+    cp -v /usr/local/lib/libonnxruntime.so* /opt/turboocr-libs/ && \
+    cp -v /usr/local/lib/libonnxruntime_providers_*.so* /opt/turboocr-libs/ 2>/dev/null || true && \
+    cp -v /usr/lib/libpdfium.so /opt/turboocr-libs/ && \
+    cp -v /usr/local/lib/libdrogon.so* /opt/turboocr-libs/ 2>/dev/null || true && \
+    cp -v /usr/local/lib/libtrantor.so* /opt/turboocr-libs/ 2>/dev/null || true
+
+# Fetch models (same as Dockerfile.cpu)
+COPY scripts/fetch_release_models.sh scripts/
+RUN bash scripts/fetch_release_models.sh
+
+# ------------------------------- runtime stage -------------------------------
+FROM ubuntu:24.04@sha256:786a8b558f7be160c6c8c4a54f9a57274f3b4fb1491cf65146521ae77ff1dc54
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Runtime-only packages: nginx (reverse proxy), gosu (privilege drop), curl
+# (healthchecks), ca-certificates (HTTPS).  No compiler, no cmake, no git.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nginx \
+    gosu \
+    curl \
+    ca-certificates \
+    gettext-base \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy binary, collected libraries, models and runtime scripts/configs.
+COPY --from=builder /app/build_cpu/turboocr-cpu-server ./build_cpu/
+COPY --from=builder /opt/turboocr-libs/* /usr/local/lib/
+COPY --from=builder /app/models ./models
+COPY --from=builder /app/bin ./bin
+COPY docker/ docker/
+COPY scripts/entrypoint.sh scripts/download_models.sh scripts/fetch_release_models.sh scripts/
+
+RUN ldconfig
+
+# Create ocr user and wire the persisted cache volume.
+RUN useradd -m -s /bin/bash ocr \
+    && chmod +x /app/scripts/entrypoint.sh \
+    && mkdir -p /home/ocr/.cache/turbo-ocr/models/rec /app/models \
+    && ln -s /home/ocr/.cache/turbo-ocr/models/rec /app/models/rec \
+    && chown -R ocr:ocr /app /home/ocr/.cache
+
+EXPOSE 8000 50051
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -sf http://localhost:8000/health || exit 1
+
+ENTRYPOINT ["/app/scripts/entrypoint.sh"]
+CMD ["./build_cpu/turboocr-cpu-server"]

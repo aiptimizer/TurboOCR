@@ -213,10 +213,10 @@ measured reason.
 
 | Variable | Default | Description |
 |---|---|---|
-| `ORT_EP` | `cpu` | Execution provider for the CPU engine (`cpu` / `coreml`). |
-| `ORT_NUM_THREADS` | auto | Intra-op thread count per ORT session. |
+| `ORT_EP` | `cpu` | Execution provider for the CPU engine: `cpu`, `xnnpack`, `dnnl`, `openvino`, `openvino_cpu`, `openvino_gpu`, or `coreml` (macOS only). |
+| `ORT_NUM_THREADS` | `4` | Intra-op thread count per ORT session (0 for OpenVINO = all cores). |
 | `ORT_GLOBAL_THREADS` | auto | Shared global thread-pool size (with `ORT_SHARED_POOL=1`). |
-| `ORT_SHARED_POOL` | `1` | One shared ORT thread pool across sessions instead of per-session pools. |
+| `ORT_SHARED_POOL` | `0` | One shared ORT thread pool across sessions instead of per-session pools. Auto-disabled for XNNPACK/OpenVINO because they manage their own pools. |
 | `ORT_REC_OPT_CAP` | unset | Cap ORT graph-optimization level for the recognizer. |
 | `DISABLE_COREML` / `COREML_FLAGS` | unset | macOS CoreML EP opt-out / flags. |
 

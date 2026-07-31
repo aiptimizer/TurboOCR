@@ -1,0 +1,67 @@
+# CPU-only TurboOCR deployment — no NVIDIA GPU required.
+#
+# Runs the same OCR/layout/table/formula pipeline as the GPU build, but uses
+# ONNX Runtime on the CPU (or Apple Neural Engine / Intel iGPU via optional EPs).
+# Models are baked into the image; the container starts immediately with no
+# engine-build warm-up.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.cpu.yml up -d
+#   curl -X POST http://localhost:8000/ocr/raw \
+#        --data-binary @receipt.png -H "Content-Type: image/png"
+#
+# Environment variables (all optional):
+#   OCR_MODEL=tiny|small|medium          # default: tiny (fastest)
+#   PIPELINE_POOL_SIZE=4                 # default: hardware threads / 4
+#   ORT_EP=cpu|xnnpack|dnnl|openvino     # default: cpu; xnnpack often fastest
+#   ORT_NUM_THREADS=4                      # intra-op threads per session
+#   ORT_SHARED_POOL=1                      # share one global threadpool
+#   MAX_BODY_MB=100
+#   DISABLE_LAYOUT=1                       # skip ~124 MB layout model
+#   TABLE_BACKEND=slanext                  # enable table → HTML
+#   FORMULA_BACKEND=ppformulanet_s       # enable formula → LaTeX
+#
+# See README.md and docs/build/cpu-quickstart.md for full details.
+
+services:
+  ocr-cpu:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    environment:
+      - OCR_MODEL=${OCR_MODEL:-tiny}
+      - PIPELINE_POOL_SIZE=${PIPELINE_POOL_SIZE:-4}
+      - ORT_EP=${ORT_EP:-cpu}
+      - ORT_NUM_THREADS=${ORT_NUM_THREADS:-4}
+      - ORT_SHARED_POOL=${ORT_SHARED_POOL:-1}
+      - MAX_BODY_MB=${MAX_BODY_MB:-100}
+      - TABLE_BACKEND=${TABLE_BACKEND:-}
+      - FORMULA_BACKEND=${FORMULA_BACKEND:-}
+    ports:
+      - "8000:8000"
+      - "50051:50051"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # Optional: a second CPU instance pinned to a different execution provider for
+  # A/B testing (e.g., xnnpack vs. dnnl). Use the `ep-test` profile to spin it up.
+  ocr-cpu-xnnpack:
+    profiles:
+      - ep-test
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    environment:
+      - OCR_MODEL=${OCR_MODEL:-tiny}
+      - PIPELINE_POOL_SIZE=${PIPELINE_POOL_SIZE:-4}
+      - ORT_EP=xnnpack
+      - ORT_NUM_THREADS=${ORT_NUM_THREADS:-4}
+      - MAX_BODY_MB=${MAX_BODY_MB:-100}
+    ports:
+      - "8001:8000"
+    restart: unless-stopped
