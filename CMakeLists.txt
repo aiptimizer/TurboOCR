@@ -524,9 +524,20 @@ add_executable(turbo_ocr_tests
     # in EVERY configure — they used to sit in the CUDA-only block below, which
     # left the converter the CPU unified server actually executes untested here.
     tests/cpp/vlm/test_openai_parsers.cpp
-    tests/cpp/vlm/test_openai_policy.cpp
+    # NOTE: test_openai_policy.cpp is NOT here — it needs libcurl. See below.
     third_party/catch2/catch_amalgamated.cpp
 )
+# openai_policy.h -> crop_pool.h -> <curl/curl.h>, so this suite only compiles
+# where libcurl's headers exist. find_package(CURL) above is deliberately not
+# REQUIRED — a build without it still produces the library, the backends and
+# the local OCR pipeline — so the test has to degrade the same way the VLM
+# transport sources already do further down. Listing it unconditionally broke
+# the CI runner (no libcurl) while passing on any dev box that has it.
+if(CURL_FOUND OR CURL_LIB)
+    target_sources(turbo_ocr_tests PRIVATE tests/cpp/vlm/test_openai_policy.cpp)
+else()
+    message(STATUS "libcurl not found — VLM endpoint-policy tests excluded")
+endif()
 # Host-logic suites above resolve their symbols from turbo_ocr_cpu on the CPU
 # build and from turbo_ocr_gpu on the GPU build (linked below).
 if(USE_CPU_ONLY)
