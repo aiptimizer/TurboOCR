@@ -542,11 +542,16 @@ the part that goes wrong.
 
     The CUDA, cuDNN and TensorRT runtimes are **not** bundled: the repair step
     excludes every one of those sonames, exactly as `onnxruntime-gpu` ships.
-    They must be present on the host — from the system CUDA install, or from
-    the matching pip packages (`nvidia-cuda-runtime-cu12`, `nvidia-cudnn-cu12`,
-    `tensorrt-cu12==10.15.1.29`, and the `-cu13` equivalents). They are not
-    declared as dependencies of the engine wheel, so a driver-only machine
-    needs them installed alongside.
+    They come from the system CUDA install, or from the matching pip packages,
+    which the wheel **finds automatically** — no `LD_LIBRARY_PATH` needed. On a
+    driver-only machine:
+
+    ```bash
+    pip install tensorrt-cu12-libs==10.15.1.29 nvidia-cuda-runtime-cu12 nvidia-nvjpeg-cu12   # or the -cu13 equivalents
+    ```
+
+    They are not declared as dependencies of the engine wheel, so nothing
+    CUDA-sized lands on machines that install it for its API surface alone.
 
     It carries two NVIDIA paths, and which one you get is a `backend=` choice
     with very different startup behaviour:

@@ -128,11 +128,12 @@ turboocr.OCR(backend="openvino", device="NPU")
 
 **NVIDIA (`turboocr-engine-cuda12` / `-cuda13`) — what the first run costs.** The wheel needs an
 NVIDIA **driver** at runtime. The CUDA, cuDNN and TensorRT runtimes are **not**
-bundled — the repair step excludes those sonames — so they must come from the
-host toolkit or the matching pip packages (`nvidia-cuda-runtime-cu12`,
-`nvidia-cudnn-cu12`, `tensorrt-cu12==10.15.1.29`, and the `-cu13` equivalents).
-They are not declared as dependencies of the engine wheel. It carries two
-NVIDIA paths:
+bundled — the repair step excludes those sonames — so they come from the host
+toolkit, or from the matching pip packages, which the wheel **finds
+automatically** (`pip install tensorrt-cu12-libs==10.15.1.29
+nvidia-cuda-runtime-cu12 nvidia-nvjpeg-cu12`, or the `-cu13` equivalents; no
+`LD_LIBRARY_PATH` needed). They are not declared as dependencies of the engine
+wheel. It carries two NVIDIA paths:
 
 - `backend="cuda"` runs the ONNX graph on the CUDA execution provider.
   **Nothing is compiled — start-up is instant**, and steady-state speed is

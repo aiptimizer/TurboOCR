@@ -657,3 +657,81 @@ def test_driver_probe_survives_hostile_nvidia_smi_output(monkeypatch):
         drv = hw.nvidia_driver_major
         assert drv is None or isinstance(drv, int)
     providers.detect_hardware.cache_clear()
+
+
+def test_nvidia_pip_lib_discovery_orders_dependencies_first(tmp_path):
+    """The preload must dlopen dependencies before their dependents (cudart
+    before nvinfer, nvinfer before its plugin/parser), across BOTH layouts the
+    pip packages use (tensorrt_libs/ flat, nvidia/<pkg>/lib/ nested). Ordering
+    is the part a refactor would silently break — a wrong order still 'works'
+    on machines where the loader finds the dep elsewhere, and only fails on the
+    pip-only machine the preload exists for."""
+    from turboocr_engine import native as n
+
+    site = tmp_path
+    (site / "tensorrt_libs").mkdir()
+    (site / "tensorrt_libs" / "libnvinfer.so.10").write_bytes(b"")
+    (site / "tensorrt_libs" / "libnvinfer_plugin.so.10").write_bytes(b"")
+    (site / "tensorrt_libs" / "libnvonnxparser.so.10").write_bytes(b"")
+    # Must be ignored: dev symlink name and the builder resources (nvinfer's
+    # own $ORIGIN RPATH handles those — preloading them is pure waste).
+    (site / "tensorrt_libs" / "libnvinfer.so").write_bytes(b"")
+    (site / "tensorrt_libs" / "libnvinfer_builder_resource_sm90.so.10.15.1").write_bytes(b"")
+    (site / "nvidia" / "cuda_runtime" / "lib").mkdir(parents=True)
+    (site / "nvidia" / "cuda_runtime" / "lib" / "libcudart.so.12").write_bytes(b"")
+    (site / "nvidia" / "nvjpeg" / "lib").mkdir(parents=True)
+    (site / "nvidia" / "nvjpeg" / "lib" / "libnvjpeg.so.12").write_bytes(b"")
+
+    dirs = n._nvidia_pip_lib_dirs(str(site))
+    assert str(site / "tensorrt_libs") in dirs
+    assert str(site / "nvidia" / "cuda_runtime" / "lib") in dirs
+
+    # Reconstruct the exact load order the preload would use.
+    order = []
+    for d in dirs:
+        import os as _os
+        for name in _os.listdir(d):
+            for rank, prefix in enumerate(n._NVIDIA_LIB_PRIORITY):
+                if name.startswith(prefix + "."):
+                    order.append((rank, name))
+                    break
+    order = [name for _r, name in sorted(order)]
+    assert order == [
+        "libcudart.so.12",
+        "libnvjpeg.so.12",
+        "libnvinfer.so.10",
+        "libnvonnxparser.so.10",
+        "libnvinfer_plugin.so.10",
+    ]
+
+
+def test_nvidia_preload_never_raises(tmp_path):
+    """detect-and-retry must be safe on every machine: fake unloadable files
+    (empty, not ELF) must be skipped, not crash — and a site dir with nothing
+    NVIDIA in it must be a clean no-op returning 0."""
+    from turboocr_engine import native as n
+
+    empty = tmp_path / "empty-site"
+    empty.mkdir()
+    assert n._preload_nvidia_pip_libs(str(empty)) == 0
+
+    site = tmp_path / "fake-site"
+    (site / "tensorrt_libs").mkdir(parents=True)
+    (site / "tensorrt_libs" / "libnvinfer.so.10").write_bytes(b"not an ELF")
+    # Every candidate fails CDLL -> loaded == 0, no exception.
+    assert n._preload_nvidia_pip_libs(str(site)) == 0
+
+
+def test_nvidia_runtime_hint_names_the_matching_major():
+    """The remedy line must follow the SONAME in the error: a .so.12 miss names
+    the cu12 pip packages, .so.13 names cu13, and a non-NVIDIA import error
+    gets no NVIDIA advice at all."""
+    from turboocr_engine.native import _nvidia_runtime_hint
+
+    assert "tensorrt-cu12-libs" in _nvidia_runtime_hint(
+        "libcudart.so.12: cannot open shared object file")
+    assert "tensorrt-cu13-libs" in _nvidia_runtime_hint(
+        "libnvjpeg.so.13: cannot open shared object file")
+    assert "tensorrt-cu" in _nvidia_runtime_hint(
+        "libnvinfer.so.10: cannot open shared object file")
+    assert _nvidia_runtime_hint("No module named '_turboocr'") == ""

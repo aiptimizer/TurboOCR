@@ -56,12 +56,138 @@ def set_log_level_default(verbose: bool) -> None:
 _REQUIRED_NATIVE_ATTRS = ("Pipeline", "build_info")
 
 
+# ---- NVIDIA pip-package library preload -------------------------------------
+# The NVIDIA engine wheels deliberately do NOT vendor the CUDA/TensorRT
+# runtimes (excluded in the repair step, exactly as onnxruntime-gpu ships), so
+# `_turboocr` there has DT_NEEDED on libnvinfer.so.10, libnvinfer_plugin.so.10,
+# libnvonnxparser.so.10, libcudart.so.1X and libnvjpeg.so.1X. From a SYSTEM
+# CUDA/TensorRT install the dynamic loader resolves those on its own. From the
+# matching PIP packages (tensorrt-cuXX-libs, nvidia-*-cuXX) they sit in
+# site-packages directories the loader never searches, so the plain import
+# fails even though everything is installed. The fix is the trick torch and
+# onnxruntime-gpu use: dlopen each library by ABSOLUTE path first — that puts
+# its SONAME in the process link map, which satisfies the DT_NEEDED lookup when
+# `_turboocr` is imported right after. pip's libnvinfer.so.10 carries its own
+# $ORIGIN RPATH for everything IT dlopens later (per-SM builder resources,
+# nvidia/*/lib), so preloading the top-level libraries is sufficient.
+#
+# Ordered dependencies-first; prefixes not present on a machine are skipped, so
+# this is a no-op unless the pip packages are actually installed.
+_NVIDIA_LIB_PRIORITY = (
+    "libcudart.so",      # nvidia/cuda_runtime/lib — everything needs it
+    "libcublasLt.so",    # nvidia/cublas/lib — before libcublas, which links it
+    "libcublas.so",
+    "libcudnn.so",       # nvidia/cudnn/lib — ORT CUDA EP (backend="cuda")
+    "libcufft.so",
+    "libcurand.so",
+    "libnvjpeg.so",      # nvidia/nvjpeg/lib — the NVDEC image decoder
+    "libnvinfer.so",     # tensorrt_libs — before plugin/onnxparser, which link it
+    "libnvonnxparser.so",
+    "libnvinfer_plugin.so",
+)
+
+#: Absolute paths successfully preloaded (for doctor/debugging).
+_nvidia_preloaded: List[str] = []
+_nvidia_preload_attempted = False
+
+
+def _nvidia_pip_lib_dirs(site_dir: Optional[str] = None) -> List[str]:
+    """Directories the NVIDIA pip packages install their libraries into,
+    for the site-packages holding THIS package (pip installs the runtime
+    packages next to the wheel that needs them). Empty when none exist."""
+    if site_dir is None:
+        site_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    dirs = []
+    trt = os.path.join(site_dir, "tensorrt_libs")
+    if os.path.isdir(trt):
+        dirs.append(trt)
+    nvidia = os.path.join(site_dir, "nvidia")
+    if os.path.isdir(nvidia):
+        for sub in sorted(os.listdir(nvidia)):
+            lib = os.path.join(nvidia, sub, "lib")
+            if os.path.isdir(lib):
+                dirs.append(lib)
+    return dirs
+
+
+def _preload_nvidia_pip_libs(site_dir: Optional[str] = None) -> int:
+    """Best-effort dlopen of pip-provided NVIDIA libraries, dependencies first.
+
+    Returns how many loaded. Never raises: a library that fails to load (wrong
+    arch, half-installed package, placeholder wheel) is skipped — the retried
+    `_turboocr` import produces the real, actionable error."""
+    global _nvidia_preload_attempted
+    _nvidia_preload_attempted = True
+    if platform.system() != "Linux":
+        return 0
+    import ctypes
+
+    candidates: List[Tuple[int, str, str]] = []
+    for d in _nvidia_pip_lib_dirs(site_dir):
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            for rank, prefix in enumerate(_NVIDIA_LIB_PRIORITY):
+                # Versioned real names only ("libcudart.so.12"): the bare ".so"
+                # dev symlink may be absent and would double-load anyway.
+                if name.startswith(prefix + "."):
+                    candidates.append((rank, name, os.path.join(d, name)))
+                    break
+    loaded = 0
+    for _rank, _name, path in sorted(candidates):
+        try:
+            ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
+        except OSError:
+            continue
+        _nvidia_preloaded.append(path)
+        loaded += 1
+    return loaded
+
+
+def _nvidia_runtime_hint(err: str) -> str:
+    """One actionable line for an ImportError naming a CUDA/TensorRT soname."""
+    if not any(k in err for k in ("libnvinfer", "libnvonnxparser", "libcudart", "libnvjpeg")):
+        return ""
+    major = "13" if ".so.13" in err else ("12" if ".so.12" in err else "1X")
+    return (
+        " This is the NVIDIA engine wheel and a CUDA/TensorRT runtime library "
+        "was not found. Install the matching pip packages — "
+        f"pip install tensorrt-cu{major}-libs==10.15.1.29 "
+        f"nvidia-cuda-runtime-cu{major} nvidia-nvjpeg-cu{major} "
+        "— (they are found automatically), or install the system CUDA toolkit "
+        "+ TensorRT."
+    )
+
+
 def load_native():
     """Import the compiled `_turboocr` extension, or raise with build guidance."""
     from .errors import NativeExtensionMissing
 
     try:
         from . import _turboocr  # type: ignore
+    except ImportError as first_exc:
+        # NVIDIA wheel + pip-provided runtimes: preload and retry ONCE. Only on
+        # ImportError — anything else is not a missing-library problem.
+        exc = first_exc
+        retried = _preload_nvidia_pip_libs() > 0
+        if retried:
+            try:
+                from . import _turboocr  # type: ignore
+            except Exception as second_exc:
+                exc = second_exc
+            else:
+                exc = None
+        if exc is not None:
+            raise NativeExtensionMissing(
+                "The native TurboOCR extension (_turboocr) is not built for this "
+                "environment. Install a prebuilt wheel for your platform "
+                "(`turboocr doctor` shows which), or build it from source with "
+                "`cmake -B build -DUSE_CPU_ONLY=ON -DBUILD_PYTHON=ON` and copy the "
+                "resulting _turboocr*.so into turboocr/."
+                + _nvidia_runtime_hint(str(exc))
+            ) from exc
     except Exception as exc:  # pragma: no cover
         raise NativeExtensionMissing(
             "The native TurboOCR extension (_turboocr) is not built for this "

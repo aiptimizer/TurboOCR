@@ -198,9 +198,26 @@ jobs:
             # toolkit at build time (find_package(CUDAToolkit REQUIRED)).
             # Measured at ~382 MB for the CUDA side — well inside the runner.
             before-all-extra: |
-              dnf install -y -q dnf-plugins-core
+              dnf install -y -q dnf-plugins-core epel-release
               dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
-              dnf install -y -q cuda-nvcc-12-9 cuda-cudart-devel-12-9 libnvjpeg-devel-12-9 tensorrt-devel-10.15.1.29-1.cuda12.9
+              # turbojpeg-devel is from EPEL: AlmaLinux 8's libjpeg-turbo-devel
+              # carries the libjpeg API only, and the GPU arm hard-requires the
+              # TurboJPEG API (find_library(TURBOJPEG_LIB turbojpeg REQUIRED) —
+              # the CPU JPEG-encode fallback for inline page-image export).
+              # openssl-devel is for the pinned curl build below. Both the
+              # TurboJPEG and curl libraries get VENDORED by auditwheel (not
+              # excluded), unlike the CUDA/TensorRT sonames.
+              dnf install -y -q cuda-nvcc-12-9 cuda-cudart-devel-12-9 libnvjpeg-devel-12-9 tensorrt-devel-10.15.1.29-1.cuda12.9 turbojpeg-devel openssl-devel
+              # The nvidia backend's VLM table/formula clients link libcurl
+              # unconditionally (runtime-opt-in, compile-time hard dep —
+              # CMakeLists FATAL_ERRORs without it), and EL8's libcurl is 7.61:
+              # too old for curl_multi_poll (7.66) and curl_multi_wakeup (7.68),
+              # the crop pool's only two post-7.61 calls. Build a pinned modern
+              # curl from source, exactly like OpenCV above.
+              wget -q https://curl.se/download/curl-8.11.1.tar.gz -O curl.tar.gz
+              tar xzf curl.tar.gz
+              (cd curl-8.11.1 && ./configure --prefix=/usr/local --with-openssl --without-libpsl --disable-ldap --disable-manual >/dev/null && make -j"$(nproc)" >/dev/null && make install >/dev/null)
+              ldconfig
               # The RPMs put TensorRT at /usr/include + /usr/lib64, NOT the
               # /usr/local/tensorrt that CMakeLists.txt defaults TENSORRT_DIR
               # to — and it reads ${TENSORRT_DIR}/lib, not lib64. Lay out a
@@ -219,8 +236,18 @@ jobs:
               # header was being checked. -e (not -f) because these are symlinks.
               test -e /usr/local/tensorrt/include/NvInfer.h
               test -e /usr/local/tensorrt/lib/libnvinfer.so
+              # nvcc lands at /usr/local/cuda/bin/nvcc (alternatives symlink),
+              # which is NOT on the build PATH — cmake-args-linux pins
+              # CMAKE_CUDA_COMPILER to it, so assert it here where a missing
+              # RPM fails in seconds instead of at configure time.
+              test -x /usr/local/cuda/bin/nvcc
             # USE_CPU_ONLY=OFF + TURBO_BACKENDS=cpu;nvidia come from the staged
             # pyproject's cmake.args.
+            # CMAKE_CUDA_COMPILER is pinned because enable_language(CUDA) only
+            # consults CMAKE_CUDA_COMPILER/CUDACXX/PATH — unlike
+            # find_package(CUDAToolkit), it never searches /usr/local/cuda, and
+            # the container's PATH does not include it, so detection fails with
+            # the toolkit fully installed (proven by the first cuda13 run).
             # CMAKE_CUDA_ARCHITECTURES is set EXPLICITLY, not left to nvcc.
             # Unset, CMake pre-fills it during enable_language(CUDA) with the
             # toolkit's OLDEST arch — sm_50 on nvcc 12.9 — and the Turing
@@ -230,7 +257,7 @@ jobs:
             # 6.0+. The project floor is Turing anyway (README, and the
             # CMAKE_CUDA_ARCHITECTURES 75 fallback), so pin the real target
             # set and make both CUDA majors produce the same GPU coverage.
-            cmake-args-linux: "-DTENSORRT_DIR=/usr/local/tensorrt -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120"
+            cmake-args-linux: "-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DTENSORRT_DIR=/usr/local/tensorrt -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120"
             # CUDA toolkit + driver sonames are EXCLUDED from vendoring: they
             # are host-provided or come from the user's onnxruntime-gpu
             # dependency, exactly as onnxruntime-gpu itself ships. Bundling
@@ -259,9 +286,26 @@ jobs:
             # toolkit at build time (find_package(CUDAToolkit REQUIRED)).
             # Measured at ~382 MB for the CUDA side — well inside the runner.
             before-all-extra: |
-              dnf install -y -q dnf-plugins-core
+              dnf install -y -q dnf-plugins-core epel-release
               dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
-              dnf install -y -q cuda-nvcc-13-3 cuda-cudart-devel-13-3 libnvjpeg-devel-13-3 tensorrt-devel-10.15.1.29-1.cuda13.1
+              # turbojpeg-devel is from EPEL: AlmaLinux 8's libjpeg-turbo-devel
+              # carries the libjpeg API only, and the GPU arm hard-requires the
+              # TurboJPEG API (find_library(TURBOJPEG_LIB turbojpeg REQUIRED) —
+              # the CPU JPEG-encode fallback for inline page-image export).
+              # openssl-devel is for the pinned curl build below. Both the
+              # TurboJPEG and curl libraries get VENDORED by auditwheel (not
+              # excluded), unlike the CUDA/TensorRT sonames.
+              dnf install -y -q cuda-nvcc-13-3 cuda-cudart-devel-13-3 libnvjpeg-devel-13-3 tensorrt-devel-10.15.1.29-1.cuda13.1 turbojpeg-devel openssl-devel
+              # The nvidia backend's VLM table/formula clients link libcurl
+              # unconditionally (runtime-opt-in, compile-time hard dep —
+              # CMakeLists FATAL_ERRORs without it), and EL8's libcurl is 7.61:
+              # too old for curl_multi_poll (7.66) and curl_multi_wakeup (7.68),
+              # the crop pool's only two post-7.61 calls. Build a pinned modern
+              # curl from source, exactly like OpenCV above.
+              wget -q https://curl.se/download/curl-8.11.1.tar.gz -O curl.tar.gz
+              tar xzf curl.tar.gz
+              (cd curl-8.11.1 && ./configure --prefix=/usr/local --with-openssl --without-libpsl --disable-ldap --disable-manual >/dev/null && make -j"$(nproc)" >/dev/null && make install >/dev/null)
+              ldconfig
               # The RPMs put TensorRT at /usr/include + /usr/lib64, NOT the
               # /usr/local/tensorrt that CMakeLists.txt defaults TENSORRT_DIR
               # to — and it reads ${TENSORRT_DIR}/lib, not lib64. Lay out a
@@ -280,8 +324,18 @@ jobs:
               # header was being checked. -e (not -f) because these are symlinks.
               test -e /usr/local/tensorrt/include/NvInfer.h
               test -e /usr/local/tensorrt/lib/libnvinfer.so
+              # nvcc lands at /usr/local/cuda/bin/nvcc (alternatives symlink),
+              # which is NOT on the build PATH — cmake-args-linux pins
+              # CMAKE_CUDA_COMPILER to it, so assert it here where a missing
+              # RPM fails in seconds instead of at configure time.
+              test -x /usr/local/cuda/bin/nvcc
             # USE_CPU_ONLY=OFF + TURBO_BACKENDS=cpu;nvidia come from the staged
             # pyproject's cmake.args.
+            # CMAKE_CUDA_COMPILER is pinned because enable_language(CUDA) only
+            # consults CMAKE_CUDA_COMPILER/CUDACXX/PATH — unlike
+            # find_package(CUDAToolkit), it never searches /usr/local/cuda, and
+            # the container's PATH does not include it, so detection fails with
+            # the toolkit fully installed (proven by the first cuda13 run).
             # CMAKE_CUDA_ARCHITECTURES is set EXPLICITLY, not left to nvcc.
             # Unset, CMake pre-fills it during enable_language(CUDA) with the
             # toolkit's OLDEST arch — sm_50 on nvcc 12.9 — and the Turing
@@ -291,7 +345,7 @@ jobs:
             # 6.0+. The project floor is Turing anyway (README, and the
             # CMAKE_CUDA_ARCHITECTURES 75 fallback), so pin the real target
             # set and make both CUDA majors produce the same GPU coverage.
-            cmake-args-linux: "-DTENSORRT_DIR=/usr/local/tensorrt -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120"
+            cmake-args-linux: "-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DTENSORRT_DIR=/usr/local/tensorrt -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120"
             # CUDA toolkit + driver sonames are EXCLUDED from vendoring: they
             # are host-provided or come from the user's onnxruntime-gpu
             # dependency, exactly as onnxruntime-gpu itself ships. Bundling

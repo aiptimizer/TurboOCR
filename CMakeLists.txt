@@ -1204,28 +1204,35 @@ else()
     # Legacy standalone gRPC server removed — gRPC now runs from the main
     # binary via start_grpc_server() in grpc_service.h.
 
-    # Benchmark tools
-    add_executable(grpc_bench EXCLUDE_FROM_ALL
-        tools/bench/grpc_bench.cpp
-        ${PROTO_GEN_CC}
-        ${GRPC_GEN_CC}
-    )
-    target_include_directories(grpc_bench PRIVATE ${PROTO_GEN_DIR})
-    target_link_libraries(grpc_bench PRIVATE
-        ${GRPC_LIBRARIES}
-        protobuf::libprotobuf
-    )
+    # Benchmark tools. Gated like turbo_setup_grpc_codegen() above: they consume
+    # the generated protos and link protobuf::libprotobuf, and EXCLUDE_FROM_ALL
+    # does NOT save a BUILD_SERVER=OFF configure — target_link_libraries against
+    # a nonexistent imported target is a hard error at GENERATE time, before
+    # anything is built (this is exactly how the NVIDIA python wheels die when
+    # these sit outside the gate: their containers have no protobuf/gRPC).
+    if(BUILD_SERVER)
+        add_executable(grpc_bench EXCLUDE_FROM_ALL
+            tools/bench/grpc_bench.cpp
+            ${PROTO_GEN_CC}
+            ${GRPC_GEN_CC}
+        )
+        target_include_directories(grpc_bench PRIVATE ${PROTO_GEN_DIR})
+        target_link_libraries(grpc_bench PRIVATE
+            ${GRPC_LIBRARIES}
+            protobuf::libprotobuf
+        )
 
-    add_executable(grpc_burst EXCLUDE_FROM_ALL
-        tools/bench/grpc_burst.cpp
-        ${PROTO_GEN_CC}
-        ${GRPC_GEN_CC}
-    )
-    target_include_directories(grpc_burst PRIVATE ${PROTO_GEN_DIR})
-    target_link_libraries(grpc_burst PRIVATE
-        ${GRPC_LIBRARIES}
-        protobuf::libprotobuf
-    )
+        add_executable(grpc_burst EXCLUDE_FROM_ALL
+            tools/bench/grpc_burst.cpp
+            ${PROTO_GEN_CC}
+            ${GRPC_GEN_CC}
+        )
+        target_include_directories(grpc_burst PRIVATE ${PROTO_GEN_DIR})
+        target_link_libraries(grpc_burst PRIVATE
+            ${GRPC_LIBRARIES}
+            protobuf::libprotobuf
+        )
+    endif()
 
     # diff_ccl: side-by-side comparator for CPU CCL=1 vs GPU CCL=2 outputs.
     # Loads an image, runs both detection paths, prints box counts, IoU stats,

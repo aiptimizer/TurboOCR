@@ -53,9 +53,13 @@ compiled into the native extension:
   need an instant first start instead.
 
 The CUDA, cuDNN and TensorRT runtimes are **not** bundled in this wheel and are
-**not** declared as dependencies — they must already be present on the host,
-from a system CUDA install or the matching pip packages
-(`nvidia-cuda-runtime-cu13`, `nvidia-cudnn-cu13`, `tensorrt-cu13==10.15.1.29`).
+**not** declared as dependencies — they come from a system CUDA install, or
+from the matching pip packages, which are **found automatically** (no
+`LD_LIBRARY_PATH` needed):
+
+```
+pip install tensorrt-cu13-libs==10.15.1.29 nvidia-cuda-runtime-cu13 nvidia-nvjpeg-cu13
+```
 
 **Install exactly one**
 `turboocr-engine-*` wheel per environment: they all provide the
