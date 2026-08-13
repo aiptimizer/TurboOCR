@@ -575,7 +575,10 @@ endif()
 # non-bold or unmeasurable face for "Helvetica-Bold"/"Courier". Absolute path
 # baked at configure time so the test finds them regardless of CWD.
 target_compile_definitions(turbo_ocr_tests PRIVATE
-    TURBO_TEST_FONT_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/fonts")
+    TURBO_TEST_FONT_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/fonts"
+    # Same reasoning for the PDF fixtures: the renderer-liveness test proves the
+    # in-process fallback actually rasterizes, which needs a real document.
+    TURBO_TEST_PDF_DIR="${CMAKE_SOURCE_DIR}/tests/fixtures/pdf")
 
 # Register with CTest so `ctest` (and run_all.py --suite cpp) actually runs the
 # suite. Without this, ctest finds no tests and exits 0 — green while testing
@@ -826,21 +829,28 @@ if(USE_CPU_ONLY)
     # the file's only non-portable calls were mkdtemp and unlink, both now
     # std::filesystem. docs/guides/windows-native-build.md had already reached
     # "reuse as-is" by inspection; this is that conclusion actually wired up.
+    # The in-process arm and the selector build EVERYWHERE. The daemon arm is
+    # added on top where its syscalls exist, and TURBO_PDF_DAEMON lets
+    # pdf_renderer_select.cpp choose between them at RUN time (binary present
+    # -> daemon, else in-process). Compiling only the daemon on Linux is what
+    # made a build without scripts/setup/install_fastpdf2png.sh refuse to boot.
     include(CheckIncludeFileCXX)
     check_include_file_cxx("sys/inotify.h" TURBO_HAVE_INOTIFY)
+    target_sources(turbo_ocr_cpu PRIVATE
+        src/pdf/render/pdf_renderer_select.cpp
+        src/pdf/render/pdf_renderer_inprocess.cpp)
     if(TURBO_HAVE_INOTIFY)
         target_sources(turbo_ocr_cpu PRIVATE
             src/pdf/render/pdf_renderer.cpp
             src/pdf/render/pdf_daemon.cpp)
-        set(TURBO_HAVE_PDF_RENDER ON CACHE INTERNAL "")
+        # PUBLIC, not PRIVATE: this macro switches DECLARATIONS in the public
+        # pdf_renderer.h, so every TU that includes it must agree on the class
+        # — the same reason USE_CPU_ONLY/TURBO_CPU_ONLY are PUBLIC below.
+        target_compile_definitions(turbo_ocr_cpu PUBLIC TURBO_PDF_DAEMON)
     else()
-        # Serial by design — every FPDF_* call in the tree already runs under one
-        # library-wide lock, so a daemon pool buys nothing here.
-        message(STATUS "no inotify — PDF page RENDERER uses in-process PDFium")
-        target_sources(turbo_ocr_cpu PRIVATE
-            src/pdf/render/pdf_renderer_inprocess.cpp)
-        set(TURBO_HAVE_PDF_RENDER ON CACHE INTERNAL "")
+        message(STATUS "no inotify — PDF page RENDERER is in-process PDFium only")
     endif()
+    set(TURBO_HAVE_PDF_RENDER ON CACHE INTERNAL "")
     target_compile_options(turbo_ocr_cpu PRIVATE ${TURBO_OCR_CXX_FLAGS})
     # USE_CPU_ONLY: existing CPU-build switch (page_image_encoder etc.).
     # TURBO_CPU_ONLY: compiles the CUDA execution provider out of the shared
@@ -991,13 +1001,20 @@ else()
         # copy. Listing it here too would compile it twice.
         src/pipeline/finalize_deferred.cpp
         ${TURBO_GPU_CU_SRCS}
-        # The daemon-based page renderer is compiled UNCONDITIONALLY here (the
-        # GPU configure is Linux-only, where inotify/sigtimedwait/pipe2 are a
-        # given) — so TURBO_HAVE_PDF_RENDER is set below to match. It used to
-        # be set only in the CPU-configure branch, which made the unified
-        # server on every GPU build answer 501 "no PDF page RENDERER" for
-        # scanned PDFs while the renderer's own object files sat inside the
-        # very same binary. Found on the RTX 5090 bring-up.
+        # The page renderer is compiled UNCONDITIONALLY here (the GPU configure
+        # is Linux-only, where inotify/sigtimedwait/pipe2 are a given) — so
+        # TURBO_HAVE_PDF_RENDER is set below to match. It used to be set only
+        # in the CPU-configure branch, which made the unified server on every
+        # GPU build answer 501 "no PDF page RENDERER" for scanned PDFs while
+        # the renderer's own object files sat inside the very same binary.
+        # Found on the RTX 5090 bring-up.
+        # BOTH arms are here for the same reason as the CPU target: the daemon
+        # needs the fastpdf2png binary at run time, and a GPU box that never
+        # ran install_fastpdf2png.sh must still serve PDF (and still BOOT)
+        # rather than die in the PdfRenderer constructor. TURBO_PDF_DAEMON is
+        # defined below so the selector knows the daemon arm is available.
+        src/pdf/render/pdf_renderer_select.cpp
+        src/pdf/render/pdf_renderer_inprocess.cpp
         src/pdf/render/pdf_renderer.cpp
         src/pdf/render/pdf_ppm.cpp
         src/pdf/render/pdf_daemon.cpp
@@ -1054,6 +1071,10 @@ else()
     # See the note on pdf_renderer.cpp above: the renderer is in this target,
     # so the unified server's PDF gate must say so.
     set(TURBO_HAVE_PDF_RENDER ON CACHE INTERNAL "")
+    # The daemon arm is compiled into this target, so the selector may pick it.
+    # PUBLIC for the same reason as the CPU target: it switches declarations in
+    # the public pdf_renderer.h, so every consumer must see the same class.
+    target_compile_definitions(turbo_ocr_gpu PUBLIC TURBO_PDF_DAEMON)
     # The SLANeXt host GRU decoder is a tight scalar GEMV/attention loop; let the
     # compiler vectorize the dot-product reductions (FP reassociation only —
     # accuracy-neutral, verified) under the default AVX2 (-march=x86-64-v3) target.
@@ -1409,7 +1430,6 @@ if(TURBO_BACKENDS)
         src/pipeline/unified/make_infer_func.cpp
         src/pipeline/unified/unified_pipeline_pool.cpp
         src/pipeline/unified/stage_batcher.cpp
-        src/pipeline/unified/vlm_factory.cpp
         src/backend/backend_registry.cpp
         # The CUA router is referenced by UnifiedOcrPipeline's dispatch even on
         # the text-only path; device-neutral.
@@ -1445,13 +1465,18 @@ if(TURBO_BACKENDS)
         target_compile_definitions(turbo_ocr_pipeline PUBLIC USE_CPU_ONLY TURBO_CPU_ONLY)
     endif()
     target_compile_options(turbo_ocr_pipeline PRIVATE ${TURBO_BACKEND_CXX_FLAGS})
-    # vlm_factory.cpp -> openai_policy.h -> crop_pool.h -> <curl/curl.h>. The
-    # VLM endpoint is runtime-opt-in, but the include is unconditional in that
-    # header chain, so the include dir has to reach this target at COMPILE time
-    # even for a build that never calls a remote endpoint. PUBLIC: the same
-    # chain is visible to anything linking the pipeline.
+    # vlm_factory.cpp -> openai_policy.h -> crop_pool.h -> <curl/curl.h>.
+    # Without libcurl the header chain cannot compile, so vlm_factory.cpp is
+    # only part of this archive when curl is available. Binaries that link
+    # the pipeline without curl (the Python extension, offline test tools)
+    # supply vlm_factory_link_support.cpp stubs for the two factory symbols.
     if(TARGET CURL::libcurl)
+        target_sources(turbo_ocr_pipeline PRIVATE
+            src/pipeline/unified/vlm_factory.cpp)
         target_link_libraries(turbo_ocr_pipeline PUBLIC CURL::libcurl)
+    else()
+        target_sources(turbo_ocr_pipeline PRIVATE
+            tests/cpp/backends/vlm_factory_link_support.cpp)
     endif()
     add_library(turbo_ocr::pipeline ALIAS turbo_ocr_pipeline)
 
@@ -1949,12 +1974,11 @@ if(TURBO_BACKENDS)
     #   turbo_golden      — per-STAGE golden diff (backend, stage) vs the CPU ref
     # -----------------------------------------------------------------------
     function(turbo_add_backend_test_exe name src)
-        add_executable(${name}
-            ${src}
-            # nullptr stubs for the two seam VLM factory overloads: offline
-            # det/rec/cls binaries must not drag in the drogon OpenAI endpoint.
-            tests/cpp/backends/vlm_factory_link_support.cpp
-        )
+        add_executable(${name} ${src})
+        if(TARGET CURL::libcurl)
+            target_sources(${name} PRIVATE
+                tests/cpp/backends/vlm_factory_link_support.cpp)
+        endif()
         target_link_libraries(${name} PRIVATE turbo_ocr_pipeline ${OpenCV_LIBS})
         turbo_link_backends(${name} ${TURBO_BACKENDS})
         turbo_nvidia_runtime_paths(${name})
@@ -1972,9 +1996,11 @@ if(TURBO_BACKENDS)
     # printing available_backends() and constructing each — the regression test
     # for "registrars survived the link" (i.e. WHOLE_ARCHIVE works).
     add_executable(turbo_backend_probe
-        tests/cpp/backends/backend_probe.cpp
-        tests/cpp/backends/vlm_factory_link_support.cpp
-    )
+        tests/cpp/backends/backend_probe.cpp)
+    if(TARGET CURL::libcurl)
+        target_sources(turbo_backend_probe PRIVATE
+            tests/cpp/backends/vlm_factory_link_support.cpp)
+    endif()
     target_link_libraries(turbo_backend_probe PRIVATE turbo_ocr_pipeline ${OpenCV_LIBS})
     turbo_link_backends(turbo_backend_probe ${TURBO_BACKENDS})
     turbo_nvidia_runtime_paths(turbo_backend_probe)
@@ -2140,10 +2166,15 @@ if(BUILD_PYTHON)
     find_package(nanobind CONFIG REQUIRED)
     nanobind_add_module(_turboocr STABLE_ABI NB_STATIC
         src/service/python/bindings.cpp
-        # nullptr stubs for the seam's remote-VLM factory overloads: the offline
-        # extension must not drag in the drogon OpenAI endpoint / libcurl.
-        tests/cpp/backends/vlm_factory_link_support.cpp
     )
+    # When curl is found, the pipeline archive contains the real vlm_factory.o
+    # but the stubs compiled here satisfy the symbols first, so the linker
+    # never pulls the archive member (no curl dependency in the extension).
+    # When curl is absent, the pipeline already includes the stubs itself.
+    if(TARGET CURL::libcurl)
+        target_sources(_turboocr PRIVATE
+            tests/cpp/backends/vlm_factory_link_support.cpp)
+    endif()
     target_link_libraries(_turboocr PRIVATE turbo_ocr_pipeline turbo_ocr_common)
     turbo_link_backends(_turboocr ${TURBO_BACKENDS})
     target_compile_options(_turboocr PRIVATE ${TURBO_OCR_CXX_FLAGS})

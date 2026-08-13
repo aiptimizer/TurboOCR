@@ -90,10 +90,8 @@ struct TempGuard {
 
 } // namespace
 
-bool PdfRenderer::can_render() noexcept { return true; }
-
-std::vector<cv::Mat> PdfRenderer::render(const uint8_t *data, size_t len,
-                                         int dpi) {
+std::vector<cv::Mat> PdfRenderer::render_daemon(const uint8_t *data, size_t len,
+                                                int dpi) {
   TempGuard tmpfile(write_temp_pdf(data, len), false);
   TempGuard tmpdir(make_temp_dir(), true);
   std::string pattern = std::format("{}/p_%04d.ppm", tmpdir.path);
@@ -158,23 +156,6 @@ std::vector<cv::Mat> PdfRenderer::render(const uint8_t *data, size_t len,
   return pages;
 }
 
-// StreamHandle cleanup: unlink the tmpfile and remove the tmpdir (and
-// any remaining PPMs inside it). Called from the destructor when the
-// caller finally drops the handle — which MUST be after all OCR workers
-// finish decoding, otherwise workers will try to open a file that's been
-// unlinked under them.
-void PdfRenderer::StreamHandle::cleanup() noexcept {
-  // Best-effort cleanup from a noexcept path: a failed unlink/remove only
-  // leaks a temp file the OS reclaims later, and we must not throw here.
-  try {
-    if (!pdf_tmpfile.empty()) ::unlink(pdf_tmpfile.c_str());
-    if (!ppm_tmpdir.empty())  std::filesystem::remove_all(ppm_tmpdir);
-  } catch (...) { /* noexcept cleanup: leaked temp is reclaimed by the OS */ }
-  pdf_tmpfile.clear();
-  ppm_tmpdir.clear();
-  num_pages = 0;
-}
-
 // ---------------------------------------------------------------------------
 // render_streamed: overlap rendering with OCR using inotify
 // ---------------------------------------------------------------------------
@@ -195,8 +176,8 @@ void PdfRenderer::StreamHandle::cleanup() noexcept {
 //                                [worker: decode + OCR  ] × pool → GPU-bound
 
 PdfRenderer::StreamHandle
-PdfRenderer::render_streamed(const uint8_t *data, size_t len, int dpi,
-                             PageCallback on_page) {
+PdfRenderer::render_streamed_daemon(const uint8_t *data, size_t len, int dpi,
+                                    PageCallback on_page) {
   TempGuard tmpfile(write_temp_pdf(data, len), false);
   TempGuard tmpdir(make_temp_dir(), true);
   std::string pattern = std::format("{}/p_%04d.ppm", tmpdir.path);

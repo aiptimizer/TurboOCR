@@ -23,11 +23,16 @@
 #include "pdf_renderer_internal.h"
 #include "turbo_ocr/base/env_utils.h"
 #include "turbo_ocr/base/errors.h"
+#include "turbo_ocr/base/log/logger.h"
 
 using namespace turbo_ocr::render;
 
 namespace {
 
+// Returns an empty string when the binary is simply absent — the caller then
+// falls back to the in-process renderer. An explicitly configured
+// FASTPDF2PNG_PATH that does not exist still throws: that is an operator
+// mistake, and silently ignoring it would run a different renderer than asked.
 std::string find_binary() {
   // Explicit override — used by tests and by deployments that put the binary
   // in a non-standard location. Fails fast if the configured path is missing
@@ -46,7 +51,7 @@ std::string find_binary() {
   for (const char *p : paths) {
     if (std::filesystem::exists(p)) return p;
   }
-  throw turbo_ocr::PdfRenderError("fastpdf2png binary not found");
+  return {};
 }
 
 // Block SIGPIPE on the calling thread for the lifetime of the guard, draining
@@ -183,11 +188,28 @@ bool PdfRenderer::respawn_daemon(Daemon &d) {
   return d.pid > 0;
 }
 
-PdfRenderer::PdfRenderer(int pool_size, int workers_per_render)
-    : pool_size_(pool_size), workers_per_render_(workers_per_render),
-      binary_path_(find_binary()), daemons_(pool_size) {
-  for (int i = 0; i < pool_size_; ++i)
-    spawn_daemon(daemons_[i]);
+bool PdfRenderer::try_init_daemons() {
+  binary_path_ = find_binary();
+  // No binary: not an error. The caller runs the in-process renderer instead,
+  // which needs nothing installed. Refusing to start the whole server here is
+  // what used to make a plain `cmake` build on Linux unbootable.
+  if (binary_path_.empty()) return false;
+
+  daemons_ = std::vector<Daemon>(pool_size_);
+  // spawn_daemon() throws on a pipe2()/fork() failure — i.e. the machine is out
+  // of fds or processes. That is still no reason to refuse to serve: the
+  // in-process renderer needs neither. Catch here so the fallback covers
+  // resource exhaustion too, not just a missing binary.
+  try {
+    for (int i = 0; i < pool_size_; ++i)
+      spawn_daemon(daemons_[i]);
+  } catch (const std::exception &ex) {
+    TOCR_LOG_WARN("PDF renderer daemon pool failed to start — falling back to "
+                  "the in-process renderer",
+                  "binary", binary_path_, "error", ex.what());
+    shutdown_daemons();
+    return false;
+  }
 
   // Liveness probe: if the binary was missing a shared lib, wasn't executable,
   // or crashed during its own startup, the child calls _exit(1) within ~micro-
@@ -206,15 +228,30 @@ PdfRenderer::PdfRenderer(int pool_size, int workers_per_render)
     fclose(daemons_[i].cmd_in);     daemons_[i].cmd_in = nullptr;
     fclose(daemons_[i].result_out); daemons_[i].result_out = nullptr;
     daemons_[i].pid = 0;
-    throw turbo_ocr::PdfRenderError(std::format(
-        "PDF renderer daemon {}/{} exited immediately after fork "
-        "(binary={}, exit={}) — likely missing shared library, "
-        "non-executable binary, or crash during startup.",
-        i, pool_size_, binary_path_, exit_code));
+    // The binary exists but cannot run (missing .so, not executable, crashes
+    // on startup). Tear the pool back down and decline: the in-process
+    // renderer still serves PDF, and a loud WARN names the real cause. This
+    // used to throw and take the whole server down with it.
+    TOCR_LOG_WARN("PDF renderer daemon exited immediately after fork — "
+                  "falling back to the in-process renderer",
+                  "daemon", i, "pool_size", pool_size_, "binary", binary_path_,
+                  "exit_code", exit_code);
+    shutdown_daemons();
+    return false;
   }
+  return true;
 }
 
-PdfRenderer::~PdfRenderer() noexcept {
+void PdfRenderer::shutdown_daemons() noexcept {
+  // "QUIT" goes to a child that may already be gone, and writing to a pipe
+  // whose reader died raises SIGPIPE — which by default kills the process.
+  // That is not hypothetical here: the failed-bring-up path in
+  // try_init_daemons() calls this with EVERY daemon dead (the first one is
+  // what tripped the liveness probe; the rest died the same way), so the very
+  // first QUIT lands on a dead pipe. The old code got away without this guard
+  // only because that path THREW instead — the destructor never ran, and the
+  // fds leaked rather than being written to.
+  SigpipeBlocker no_sigpipe;
   for (auto &d : daemons_) {
     if (d.cmd_in) {
       fprintf(d.cmd_in, "QUIT\n");
@@ -230,6 +267,12 @@ PdfRenderer::~PdfRenderer() noexcept {
       }
     }
   }
+  // Idempotent: this runs both from the failed-bring-up path in
+  // try_init_daemons() and from ~PdfRenderer(), and must not double-close.
+  // Clearing the vector is what makes the second call a no-op. pool_size_ is
+  // deliberately LEFT ALONE — acquire_daemon() computes `hint % pool_size_`,
+  // so zeroing it here would arm a division by zero for no benefit.
+  daemons_.clear();
 }
 
 int PdfRenderer::acquire_daemon() {

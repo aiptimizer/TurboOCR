@@ -112,6 +112,34 @@ private:
   std::string binary_path_;
   std::vector<Daemon> daemons_;
 
+  // Which arm this instance actually runs on, decided ONCE in the constructor.
+  // True only when the daemon arm is compiled in AND its fastpdf2png binary is
+  // present and its daemons came up. Otherwise every call falls back to the
+  // in-process renderer, which needs no external binary — so a build that has
+  // the daemon sources still serves PDF on a machine that never installed the
+  // helper, instead of refusing to start.
+  bool use_daemon_ = false;
+
+  // The two arms. `render()` / `render_streamed()` above are thin dispatchers
+  // over these (pdf_renderer_select.cpp). The in-process pair is compiled on
+  // every platform; the daemon pair only where inotify/pipe2/sigtimedwait
+  // exist (Linux) — see TURBO_PDF_DAEMON in CMakeLists.txt.
+  [[nodiscard]] std::vector<cv::Mat> render_inprocess(const uint8_t *data,
+                                                      size_t len, int dpi);
+  StreamHandle render_streamed_inprocess(const uint8_t *data, size_t len,
+                                         int dpi, PageCallback on_page);
+#ifdef TURBO_PDF_DAEMON
+  [[nodiscard]] std::vector<cv::Mat> render_daemon(const uint8_t *data,
+                                                   size_t len, int dpi);
+  StreamHandle render_streamed_daemon(const uint8_t *data, size_t len, int dpi,
+                                      PageCallback on_page);
+  // Locate the binary and bring the pool up. Returns false when the binary is
+  // absent (the fallback case); still throws when FASTPDF2PNG_PATH names a
+  // path that does not exist, which is an explicit operator error.
+  [[nodiscard]] bool try_init_daemons();
+  void shutdown_daemons() noexcept;
+#endif
+
   [[nodiscard]] int acquire_daemon();
   [[nodiscard]] std::string send_cmd(Daemon &d, const std::string &cmd);
   // One write+read round-trip; returns false on a pipe write/read failure

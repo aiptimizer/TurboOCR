@@ -173,20 +173,8 @@ int open_document(const uint8_t *data, size_t len, DocGuard &out) {
 
 } // namespace
 
-PdfRenderer::PdfRenderer(int pool_size, int workers_per_render)
-    : pool_size_(pool_size), workers_per_render_(workers_per_render) {
-  pdf::ensure_pdfium_initialized();
-  TOCR_LOG_INFO("PDF renderer: in-process PDFium (darwin)", "pool_size",
-                pool_size, "workers", workers_per_render);
-}
-
-PdfRenderer::~PdfRenderer() noexcept = default;
-
-bool PdfRenderer::can_render() noexcept { return true; }
-
-
-std::vector<cv::Mat> PdfRenderer::render(const uint8_t *data, size_t len,
-                                         int dpi) {
+std::vector<cv::Mat> PdfRenderer::render_inprocess(const uint8_t *data,
+                                                   size_t len, int dpi) {
   DocGuard doc;
   const int num_pages = open_document(data, len, doc);
 
@@ -196,9 +184,9 @@ std::vector<cv::Mat> PdfRenderer::render(const uint8_t *data, size_t len,
   return pages;
 }
 
-PdfRenderer::StreamHandle PdfRenderer::render_streamed(const uint8_t *data,
-                                                       size_t len, int dpi,
-                                                       PageCallback on_page) {
+PdfRenderer::StreamHandle
+PdfRenderer::render_streamed_inprocess(const uint8_t *data, size_t len, int dpi,
+                                       PageCallback on_page) {
   DocGuard doc;
   const int num_pages = open_document(data, len, doc);
 
@@ -219,20 +207,6 @@ PdfRenderer::StreamHandle PdfRenderer::render_streamed(const uint8_t *data,
     on_page(i, std::move(path));
   }
   return handle;
-}
-
-void PdfRenderer::StreamHandle::cleanup() noexcept {
-  try {
-    // std::filesystem rather than ::unlink — same effect, no <unistd.h>. On this
-    // renderer pdf_tmpfile is always empty anyway (documents load from memory
-    // via FPDF_LoadMemDocument); the field is shared with the daemon renderer's
-    // StreamHandle, so the branch stays.
-    if (!pdf_tmpfile.empty()) std::filesystem::remove(pdf_tmpfile);
-    if (!ppm_tmpdir.empty()) std::filesystem::remove_all(ppm_tmpdir);
-  } catch (...) { /* noexcept cleanup: the OS reclaims a leaked temp */ }
-  pdf_tmpfile.clear();
-  ppm_tmpdir.clear();
-  num_pages = 0;
 }
 
 } // namespace turbo_ocr::render
