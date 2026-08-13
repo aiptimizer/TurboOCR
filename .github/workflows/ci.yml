@@ -313,10 +313,29 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Install a C++20 compiler + OpenCV headers
+      # tools/syntax_shims only stubs the VENDOR SDKs (CUDA, TensorRT, HIP,
+      # MIGraphX). gRPC, libcurl and ONNX Runtime are ordinary dependencies of
+      # the sources being checked, so they have to be really present — this job
+      # installed neither and failed on grpcpp/grpcpp.h, curl/curl.h and
+      # onnxruntime_cxx_api.h. Headers only: nothing here is compiled to an
+      # object or linked, so the job stays cheap and needs no toolchain build.
+      - name: Install a C++20 compiler + the headers these sources include
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-18 libopencv-dev
+          sudo apt-get install -y --no-install-recommends \
+            clang-18 libopencv-dev libgrpc++-dev libcurl4-openssl-dev
+      # ONNX Runtime has no apt package and third_party/onnxruntime/ is
+      # gitignored (the build fetches it), so stage just its include/ where
+      # check.sh already looks. Same URL and digest as setup-cpp-deps; keep
+      # them in step.
+      - name: Stage ONNX Runtime headers
+        run: |
+          set -euo pipefail
+          wget -q "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-x64-1.28.0.tgz" -O /tmp/ort.tgz
+          echo "a3e1b79d7bb1bf09696ce675f49e4064e6c81f6202b8225624fff0e93f8d6407  /tmp/ort.tgz" | sha256sum -c -
+          tar xzf /tmp/ort.tgz -C /tmp
+          mkdir -p third_party/onnxruntime
+          cp -r /tmp/onnxruntime-linux-x64-1.28.0/include third_party/onnxruntime/
       - name: Type-check every vendor source against stub SDK headers
         run: CXX=clang++-18 bash tools/syntax_shims/check.sh
 
