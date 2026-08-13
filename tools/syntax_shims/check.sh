@@ -37,7 +37,11 @@ done
 # Linux distro / CI location for the same headers (libopencv-dev). Without this
 # the list only found OpenCV on a Mac, so any source that includes opencv2/ was
 # a guaranteed FAIL everywhere else.
-for d in /usr/include/opencv4 /usr/local/include/opencv4; do
+# jsoncpp is here for the same reason the Homebrew loop above names it: Debian
+# and Ubuntu install it as /usr/include/jsoncpp/json/json.h, so a source that
+# reaches <json/json.h> (drogon's HttpResponse.h does) cannot find it on the
+# default include path the way it can on a Mac.
+for d in /usr/include/opencv4 /usr/local/include/opencv4 /usr/include/jsoncpp; do
   [ -d "$d" ] && INC+=(-isystem "$d")
 done
 

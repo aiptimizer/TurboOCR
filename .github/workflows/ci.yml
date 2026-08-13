@@ -314,16 +314,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       # tools/syntax_shims only stubs the VENDOR SDKs (CUDA, TensorRT, HIP,
-      # MIGraphX). gRPC, libcurl and ONNX Runtime are ordinary dependencies of
-      # the sources being checked, so they have to be really present — this job
-      # installed neither and failed on grpcpp/grpcpp.h, curl/curl.h and
-      # onnxruntime_cxx_api.h. Headers only: nothing here is compiled to an
-      # object or linked, so the job stays cheap and needs no toolchain build.
+      # MIGraphX). Everything else these sources include is an ordinary
+      # dependency that has to be really present, and the job installed none of
+      # them — it failed in sequence on grpcpp/grpcpp.h, curl/curl.h,
+      # onnxruntime_cxx_api.h, drogon/HttpResponse.h, json/json.h and
+      # google/protobuf/descriptor.h. This list was established by running
+      # check.sh to green in a clean ubuntu:24.04 container, not by reading one
+      # error at a time. Headers only: nothing is compiled to an object or
+      # linked, so the job keeps its cheap, no-toolchain shape.
       - name: Install a C++20 compiler + the headers these sources include
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang-18 libopencv-dev libgrpc++-dev libcurl4-openssl-dev
+            clang-18 libopencv-dev libgrpc++-dev libcurl4-openssl-dev \
+            libdrogon-dev libjsoncpp-dev libprotobuf-dev \
+            protobuf-compiler protobuf-compiler-grpc
       # ONNX Runtime has no apt package and third_party/onnxruntime/ is
       # gitignored (the build fetches it), so stage just its include/ where
       # check.sh already looks. Same URL and digest as setup-cpp-deps; keep
@@ -336,6 +341,20 @@ jobs:
           tar xzf /tmp/ort.tgz -C /tmp
           mkdir -p third_party/onnxruntime
           cp -r /tmp/onnxruntime-linux-x64-1.28.0/include third_party/onnxruntime/
+      # The two src/service/grpc sources in sources.txt reach ocr.grpc.pb.h,
+      # which only exists after protoc runs — normally a CMake step. Running
+      # protoc directly keeps this job free of a configure while still covering
+      # those files. check.sh looks in $TURBO_BUILD_DIR/proto_gen (default
+      # build-unified), so generate there.
+      - name: Generate the gRPC/protobuf headers
+        run: |
+          set -euo pipefail
+          mkdir -p build-unified/proto_gen
+          protoc -I proto \
+            --cpp_out=build-unified/proto_gen \
+            --grpc_out=build-unified/proto_gen \
+            --plugin=protoc-gen-grpc="$(which grpc_cpp_plugin)" \
+            proto/ocr.proto
       - name: Type-check every vendor source against stub SDK headers
         run: CXX=clang++-18 bash tools/syntax_shims/check.sh
 
