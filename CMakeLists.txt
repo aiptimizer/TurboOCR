@@ -2161,7 +2161,20 @@ if(BUILD_PYTHON)
             "BUILD_PYTHON wraps UnifiedOcrPipeline over the cpu backend — "
             "configure with -DUSE_CPU_ONLY=ON and keep 'cpu' in TURBO_BACKENDS.")
     endif()
-    find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module)
+    # Development.SABIModule is what makes the STABLE_ABI flag below MEAN
+    # anything: nanobind needs the Python::SABIModule target to build against
+    # the limited API, and SILENTLY IGNORES STABLE_ABI when it is absent.
+    # Without it the extension came out version-specific
+    # (_turboocr.cpython-312-*.so instead of _turboocr.abi3.so) while
+    # scikit-build-core still tagged the wheel cp312-abi3 from
+    # python/pyproject.toml's wheel.py-api — a wheel that claims to run on every
+    # Python 3.12+ but holds a 3.12-only binary. That mismatch is what
+    # abi3audit was failing on; it was reporting a real defect, not being
+    # pedantic. OPTIONAL, because the target only exists on CPython >= 3.12 and
+    # a 3.9-3.11 build must still configure (nanobind then ignores STABLE_ABI
+    # for real, and scikit-build-core falls back to a cp3XY tag to match).
+    find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module
+                 OPTIONAL_COMPONENTS Development.SABIModule)
     # Isolated builds (pip / scikit-build-core) get nanobind from the build
     # venv; ask the interpreter for its CMake dir before find_package. A
     # manually set nanobind_DIR still wins (the cache variable pre-empts this).

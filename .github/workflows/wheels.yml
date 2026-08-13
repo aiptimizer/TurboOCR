@@ -95,7 +95,11 @@ env:
   # tarball is CPU-only; linking it into turboocr-engine-cuda would ship a
   # lying wheel.
   ORT_CUDA_ASSET: "onnxruntime-linux-x64-gpu_cuda13-1.28.0"
-  ORT_CUDA_SHA256: "1a3227e1dc2f53d9f877c93278af500b15e26d99aa5ade877692138b3ab7d351"
+  # Verified against the published asset (size 240874643, matching the release
+  # metadata). The previous pin was stale and failed `sha256sum -c` before the
+  # CUDA wheel compiled a single file — the same drift that had broken the CPU
+  # tarball's hash in .github/actions/setup-cpp-deps.
+  ORT_CUDA_SHA256: "84d28f27589090b280d4312743efd3d450cd4ac7d1e1d75e7d9076d9637bf9de"
   # manylinux_2_28 is AlmaLinux 8, whose EPEL OpenCV is 3.4.x. The tree needs
   # OpenCV 4 (docker/Dockerfile uses Ubuntu's libopencv-dev 4.6), so the
   # container builds a minimal 4.x from source — deterministic and pinned,
@@ -171,7 +175,8 @@ jobs:
           # ORT's headers + libonnxruntime.so, staged below.
           - wheel: turboocr-engine-cuda
             os: ubuntu-24.04
-            package-dir: python/wheels/cuda
+            package-dir: python
+            stage-pyproject: python/wheels/cuda/pyproject.toml
             cibw-archs: x86_64
             before-all-extra: ""
             # No -DTURBO_BACKENDS override: the CUDA wheel is the ONNX-Runtime
@@ -197,23 +202,24 @@ jobs:
           # (CPU/GPU/NPU) is chosen at RUN time via OV_DEVICE — one binary.
           - wheel: turboocr-engine-openvino
             os: ubuntu-24.04
-            package-dir: python/wheels/openvino
+            package-dir: python
+            stage-pyproject: python/wheels/openvino/pyproject.toml
             cibw-archs: x86_64
-            # OpenVINO from Intel's RHEL8 YUM repo (manylinux_2_28 = AlmaLinux 8).
+            # OpenVINO from its PyPI wheel, NOT Intel's YUM repo. The repo's
+            # GPG key (yum.repos.intel.com/openvino/PUBLIC_KEY.PUB) now returns
+            # 404, so `yum install` fails at metadata download and the build
+            # never starts. The pip wheel ships a COMPLETE C++ SDK — headers,
+            # libs, OpenVINOConfig.cmake, and the GPU/NPU plugins — which is
+            # what src/backends/intel/SETUP.md section 8 already recommends
+            # ("no oneAPI install is needed"), and it pins the version without
+            # depending on a distro repo staying up.
             before-all-extra: |
-              tee /etc/yum.repos.d/intel-openvino.repo >/dev/null <<'REPO'
-              [intel-openvino]
-              name=Intel OpenVINO
-              baseurl=https://yum.repos.intel.com/openvino
-              enabled=1
-              gpgcheck=1
-              repo_gpgcheck=1
-              gpgkey=https://yum.repos.intel.com/openvino/PUBLIC_KEY.PUB
-              REPO
-              yum install -y openvino-2026.2.1   # the version SETUP.md measured on
-            # runtime/cmake is the layout docs/guides/windows-native-build.md
-            # already documents for -DOpenVINO_DIR.
-            cmake-args-linux: "-DTURBO_BACKENDS=cpu;intel -DOpenVINO_DIR=/opt/intel/openvino/runtime/cmake"
+              /opt/python/cp312-cp312/bin/pip install "openvino==2026.2.*"
+              # Assert the layout cmake-args-linux hardcodes below, so a change
+              # in the wheel's layout fails HERE with an obvious message rather
+              # than as a confusing find_package(OpenVINO) miss later.
+              test -f /opt/python/cp312-cp312/lib/python3.12/site-packages/openvino/cmake/OpenVINOConfig.cmake
+            cmake-args-linux: "-DTURBO_BACKENDS=cpu;intel -DOpenVINO_DIR=/opt/python/cp312-cp312/lib/python3.12/site-packages/openvino/cmake"
             # PREREQUISITE, not a bug: libopenvino* is EXCLUDED from vendoring,
             # so this wheel needs the OpenVINO runtime installed on the host —
             # the same deal onnxruntime-openvino ships under, and what
@@ -236,7 +242,8 @@ jobs:
           # CMake to probe, and the .hip kernels need a target list.
           - wheel: turboocr-engine-rocm
             os: ubuntu-24.04
-            package-dir: python/wheels/rocm
+            package-dir: python
+            stage-pyproject: python/wheels/rocm/pyproject.toml
             cibw-archs: x86_64
             experimental: true
             # ROCm 7.1.1 = the version BRINGUP.md compile-verified against.
@@ -314,6 +321,12 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "opencv4[core,jpeg,png]:x64-windows"
+          # delvewheel has to be told where OpenCV's DLLs are or it aborts with
+          # "Unable to find library: opencv_imgcodecs4.dll" — the repair command
+          # listed only pdfium and onnxruntime. Exported rather than hardcoded
+          # so it follows vcpkg wherever the runner image puts it.
+          "VCPKG_BIN=$env:VCPKG_INSTALLATION_ROOT\installed\x64-windows\bin" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
           # TODO(win): record the SHA256 of these two assets here (and in
           # third_party/VERSIONS.md) the way every other download in this tree
@@ -335,6 +348,27 @@ jobs:
           # to find bin/pdfium.dll, which it is pointed at in the repair command.
           Get-ChildItem third_party\pdfium\lib, third_party\pdfium\bin
 
+      # Stage the variant's pyproject.toml OVER python/pyproject.toml and build
+      # `python` — the flow scripts/python/build_backend_wheel.sh already uses,
+      # and the one python/pyproject.toml documents ("THIS FILE IS THE TEMPLATE
+      # FOR ALL FOUR ... they all resolve their paths as if they sat HERE").
+      #
+      # This workflow instead pointed cibuildwheel straight at
+      # python/wheels/<backend>, where those paths do not resolve: `input =
+      # "turboocr_engine/_version.py"` looked for python/wheels/rocm/
+      # turboocr_engine/_version.py and `cmake.source-dir = ".."` pointed at
+      # python/wheels rather than the repo root. Only rocm ever surfaced it —
+      # cuda died earlier on a checksum and openvino on a 404 — but all three
+      # configs are identical here, so all three were broken the same way.
+      - name: Stage the backend pyproject
+        if: matrix.stage-pyproject != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "${{ matrix.stage-pyproject }}" python/pyproject.toml
+          echo "staged ${{ matrix.stage-pyproject }} -> python/pyproject.toml"
+          grep -E '^name' python/pyproject.toml
+
       # --- the build ---------------------------------------------------------
       - name: Build wheels
         run: python -m cibuildwheel --output-dir wheelhouse "${{ matrix.package-dir }}"
@@ -348,10 +382,15 @@ jobs:
           CIBW_ARCHS: ${{ matrix.cibw-archs }}
           CIBW_BUILD_VERBOSITY: "1"
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
-          # nanobind STABLE_ABI uses 5 private CPython symbols for its
-          # fast-path internals; --strict rejects them. The wheel works across
-          # Python versions — drop --strict so abi3audit warns, not fails.
-          CIBW_AUDIT_COMMAND: "abi3audit --report {abi3_wheel}"
+          # No CIBW_AUDIT_COMMAND override: cibuildwheel's default is
+          # `abi3audit --strict --report {abi3_wheel}` and the wheel now passes
+          # it. This briefly carried an override that dropped --strict, on the
+          # theory that nanobind's fast paths inevitably use private CPython
+          # symbols. They did not — the extension simply was not being built
+          # against the limited API at all (see the Development.SABIModule note
+          # in CMakeLists.txt), so the audit was correctly reporting a
+          # 3.12-only binary inside a wheel tagged cp312-abi3. Weakening the
+          # check would have shipped exactly the wheel that breaks on 3.13.
 
           # See "CONTAINER GEOMETRY" above: the checkout is mounted at /repo so
           # the repo-root CMakeLists.txt (and third_party/) exist inside the
@@ -407,7 +446,7 @@ jobs:
           CIBW_BEFORE_BUILD_WINDOWS: "pip install delvewheel"
           CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
             delvewheel repair
-            --add-path "${{ github.workspace }}\third_party\pdfium\bin;${{ github.workspace }}\third_party\onnxruntime\lib"
+            --add-path "${{ github.workspace }}\third_party\pdfium\bin;${{ github.workspace }}\third_party\onnxruntime\lib;${{ env.VCPKG_BIN }}"
             -w {dest_dir} {wheel}
 
       # The CUDA/TensorRT provider libraries are dlopen'd by ORT, never
