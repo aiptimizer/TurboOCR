@@ -37,8 +37,8 @@ and default changes all still apply.
   recognition split between the GPU and the Apple Neural Engine (CoreML) —
   native only, no container.
 - **Intel backend (testing).** One backend for Intel CPUs, iGPUs, Arc and
-  NPUs through OpenVINO; the native path beats the ONNX Runtime path on the
-  same silicon.
+  NPUs through OpenVINO. `--backend intel` is required — without it the
+  server runs the ONNX Runtime CPU path.
 - **Python library (testing).** The C++ pipeline behind a native wheel with
   a built-in replica pool — `OCR(replicas=3)` reaches server-class
   throughput from one object.

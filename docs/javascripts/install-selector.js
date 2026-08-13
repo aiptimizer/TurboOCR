@@ -13,9 +13,10 @@
       methods: {
         docker: {
           command:
+            "docker build -f docker/Dockerfile --target nvidia -t turboocr:nvidia .\n" +
             "docker run --gpus all -p 8000:8000 -p 50051:50051 \\\n" +
             "  -v trt-cache:/home/ocr/.cache/turbo-ocr \\\n" +
-            "  ghcr.io/aiptimizer/turboocr:latest",
+            "  turboocr:nvidia",
           note:
             "First start builds TensorRT engines (~90 s on a 5090; TRT_OPT_LEVEL=3 cuts it 3–5x on older cards) and caches them in the volume. " +
             "Add stages with -e TABLE_BACKEND=slanext, -e FORMULA_BACKEND=ppformulanet_s, -e OCR_MODEL=medium.",
@@ -46,9 +47,8 @@
         source: {
           command:
             "brew install cmake opencv drogon jsoncpp protobuf grpc c-ares jpeg-turbo\n" +
-            "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON\n" +
+            'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu;apple"\n' +
             'cmake --build build -j"$(sysctl -n hw.ncpu)"\n' +
-            "export TURBO_APPLE_REC_BUCKETS=320,480,800,1200,1600,2000,2500,3200,4000\n" +
             "./build/turboocr-server --backend apple",
           note:
             "One-time prereqs: full Xcode + Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) and an osx-arm64 ONNX Runtime ≥ 1.27 — " +
@@ -83,7 +83,8 @@
             "cmake --build build-intel -j$(nproc)\n" +
             "./build-intel/turboocr-server --backend intel",
           note:
-            "OpenVINO runtime must be on CMAKE_PREFIX_PATH. OV_DEVICE=CPU|GPU|NPU picks the device; the native OpenVINO path beats ONNX Runtime on the same silicon.",
+            "--backend intel is REQUIRED: with it the server runs OpenVINO, without it it runs the ONNX Runtime CPU path even though you built the Intel backend. OV_DEVICE=CPU|GPU|NPU picks which Intel device OpenVINO runs on; unset it targets the iGPU/Arc. " +
+            "The OpenVINO runtime must be on CMAKE_PREFIX_PATH; OV_DEVICE=CPU|GPU|NPU chooses between your CPU, integrated graphics and NPU.",
         },
         python: {
           command:
@@ -109,7 +110,7 @@
         },
         source: {
           command:
-            "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON \\\n" +
+            "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \\\n" +
             '      -DTURBO_BACKENDS="cpu;amd" \\\n' +
             "      -DCMAKE_HIP_ARCHITECTURES=\"$(rocminfo | grep -om1 'gfx[0-9a-f]*')\" \\\n" +
             "      -DCMAKE_PREFIX_PATH=/opt/rocm\n" +
@@ -139,7 +140,7 @@
         },
         source: {
           command:
-            "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON\n" +
+            'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu"\n' +
             "cmake --build build -j$(nproc)\n" +
             "./build/turboocr-server",
           note: "ONNX Runtime + OpenCV, no GPU required. Runs anywhere.",
@@ -165,6 +166,15 @@
     var noteEl = root.querySelector(".phc-sel-note");
     var statusEl = root.querySelector(".phc-sel-status");
     var copyBtn = root.querySelector(".phc-sel-copy");
+
+    // The skeleton in install.md ships EMPTY on purpose: GitHub renders the
+    // markdown but never runs this file, and stray "Hardware"/"Run as"/"copy"
+    // text nodes floating above an empty box is what a reader saw there before.
+    // The labels belong to the working widget, so the working widget writes them.
+    var labels = root.querySelectorAll(".phc-sel-label");
+    if (labels[0]) labels[0].textContent = "Hardware";
+    if (labels[1]) labels[1].textContent = "Run as";
+    copyBtn.textContent = "copy";
 
     function pill(row, key, label) {
       var b = document.createElement("button");
@@ -220,6 +230,14 @@
     });
 
     render();
+
+    // Only now, with a working selector on screen, retire the static list —
+    // it carries the same commands and would otherwise be shown twice. It is
+    // hidden LAST so that a throw anywhere above leaves the reader with the
+    // static commands rather than an empty box.
+    document.querySelectorAll(".phc-static").forEach(function (el) {
+      el.hidden = true;
+    });
   }
 
   function boot() {

@@ -77,75 +77,87 @@ Full documentation: **[docs/](docs/index.md)**
 
 ## Quick Start
 
-Pick your hardware. The full click-through installation guide, with every
-backend and the Python library, is at
-**[Install — pick your hardware](docs/getting-started/install.md)**.
+> **v4.0.0-alpha.1** — nothing is prebuilt yet. Every path below builds from
+> source or builds a Docker image from this checkout. Full details in
+> **[the install guide](docs/getting-started/install.md)**.
 
 <details open>
 <summary><strong>NVIDIA GPU</strong> &nbsp;·&nbsp; shipped</summary>
 
-Linux, driver 595+, Turing or newer. ~4 GB VRAM text-only, ~8 GB full pipeline.
+**Docker** (built from this repo):
 
 ```bash
+docker build -f docker/Dockerfile --target nvidia -t turboocr:nvidia .
 docker run --gpus all -p 8000:8000 -p 50051:50051 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr \
-  ghcr.io/aiptimizer/turboocr:latest
+  turboocr:nvidia
 ```
 
-First start builds TensorRT engines (~90 s on a 5090, up to an hour on older
-cards; `TRT_OPT_LEVEL=3` cuts that 3–5x). The named volume caches them, so
-later starts are instant. All weights are baked into the image; env vars pick
-what loads:
+**From source:**
 
 ```bash
--e TABLE_BACKEND=slanext              # tables to HTML
--e FORMULA_BACKEND=ppformulanet_s     # formulas to LaTeX
--e OCR_MODEL=medium                   # tiny (default) | small | medium | arabic | eslav | korean | thai | greek
+cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt
+cmake --build build -j$(nproc)
+LD_LIBRARY_PATH=/usr/local/tensorrt/lib ./build/turboocr-server --backend nvidia
 ```
 
-→ [Docker & deployment](docs/getting-started/docker.md) · [Native build](docs/getting-started/native.md)
+First start builds TensorRT engines (~90 s on a 5090, longer on older cards;
+`TRT_OPT_LEVEL=3` cuts it 3–5x) and caches them. Needs GCC 13.3+/C++20,
+CUDA + TensorRT 10.2+, OpenCV 4.x, Drogon 1.9+, gRPC.
 </details>
 
 <details>
-<summary><strong>Apple Silicon</strong> &nbsp;·&nbsp; in testing &nbsp;·&nbsp; Metal + Neural Engine, native only</summary>
+<summary><strong>Apple Silicon</strong> &nbsp;·&nbsp; in testing</summary>
 
-Detection and warp run on the GPU (Metal + MPSGraph); recognition is a GPU +
-Neural Engine hybrid, with narrow crops on the ANE via CoreML in parallel.
-No container can run it: macOS virtualization exposes no GPU.
+No Docker — macOS containers have no GPU passthrough.
+
+**From source:**
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON
+brew install cmake opencv drogon jsoncpp protobuf grpc c-ares jpeg-turbo
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu;apple"
 cmake --build build -j"$(sysctl -n hw.ncpu)"
-
-# Pin the 9-bucket rec ladder (auto-discovery otherwise builds a 42-bucket
-# ladder and roughly halves throughput):
-export TURBO_APPLE_REC_BUCKETS=320,480,800,1200,1600,2000,2500,3200,4000
-
 ./build/turboocr-server --backend apple
 ```
 
-Layout, tables, formulas and autorotate work too when their models are
-supplied. Details: `src/backends/apple/README.md`.
+Full Xcode + Metal toolchain required. Details: `src/backends/apple/README.md`.
 </details>
 
 <details>
-<summary><strong>Intel CPU / iGPU / Arc</strong> &nbsp;·&nbsp; in testing &nbsp;·&nbsp; OpenVINO</summary>
+<summary><strong>Intel CPU / iGPU / Arc</strong> &nbsp;·&nbsp; in testing</summary>
+
+**Docker** (built from this repo):
+
+```bash
+docker build -f docker/Dockerfile --target intel -t turboocr:intel .
+docker run --device /dev/dri -p 8000:8000 -p 50051:50051 turboocr:intel
+```
+
+**From source:**
 
 ```bash
 cmake -S . -B build-intel -DTURBO_BACKENDS="cpu;intel"
 cmake --build build-intel -j$(nproc)
-./build-intel/turboocr-server --backend intel      # OV_DEVICE=CPU|GPU|NPU
+./build-intel/turboocr-server --backend intel
 ```
 
-The native OpenVINO path beats the ONNX Runtime path on the same silicon.
-Details: `src/backends/intel/README.md`.
+`--backend intel` is required — without it the server runs the CPU path.
+`OV_DEVICE=CPU|GPU|NPU` picks the Intel device. Details: `src/backends/intel/README.md`.
 </details>
 
 <details>
 <summary><strong>AMD GPU (ROCm)</strong> &nbsp;·&nbsp; not yet hardware-tested</summary>
 
-Runs through ROCm: HIP kernels plus a MIGraphX inference engine with a
-per-architecture `.mxr` compile cache, so model compilation is paid once.
+**Docker** (built from this repo):
+
+```bash
+docker build -f docker/Dockerfile --target amd -t turboocr:amd .
+docker run --device /dev/kfd --device /dev/dri --group-add video \
+  -v ocr-cache:/home/ocr/.cache/turbo-ocr \
+  -p 8000:8000 -p 50051:50051 turboocr:amd
+```
+
+**From source:**
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -156,16 +168,24 @@ cmake --build build -j$(nproc)
 ./build/turboocr-server --backend amd
 ```
 
-The first run compiles the MIGraphX graphs and caches them under
-`~/.cache/turbo-ocr/mgx_*.mxr`. Checklist for a first machine:
-`src/backends/amd/BRINGUP.md`.
+First run compiles MIGraphX graphs and caches them under
+`~/.cache/turbo-ocr/mgx_*.mxr`. First-machine checklist: `src/backends/amd/BRINGUP.md`.
 </details>
 
 <details>
-<summary><strong>CPU only</strong> &nbsp;·&nbsp; portable fallback, runs anywhere</summary>
+<summary><strong>CPU only</strong> &nbsp;·&nbsp; shipped</summary>
+
+**Docker** (built from this repo):
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON
+docker build -f docker/Dockerfile --target cpu -t turboocr:cpu .
+docker run -p 8000:8000 -p 50051:50051 turboocr:cpu
+```
+
+**From source:**
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu"
 cmake --build build -j$(nproc)
 ./build/turboocr-server
 ```
@@ -179,6 +199,26 @@ plus the in-process engine facade. Its extras pick the engine wheel for your
 hardware (install exactly one backend; the engine wheels are mutually
 exclusive):
 
+> **Alpha: the v4 engine wheels are not on PyPI. Build them from this checkout.**
+>
+> `pip install turboocr` today gets you the published **0.3.0 client**, which
+> talks to a server but has no in-process engine. The `turboocr[cpu]` /
+> `[cuda]` / `[openvino]` / `[rocm]` extras below resolve only once the wheels
+> are published. Until then, this is the working path:
+
+```bash
+# The helper builds AND repairs the wheel — a bare `pip wheel python/`
+# bundles no libraries and only runs on the machine that built it.
+scripts/python/build_backend_wheel.sh cpu     # cpu | cuda | openvino | rocm
+pip install build-wheels/cpu/fixed/*.whl
+```
+
+The engine wheel is self-sufficient: `import turboocr_engine` gives you the
+full pipeline and the `turboocr` CLI without the umbrella package installed.
+
+Once the wheels are published, the umbrella becomes the front door — one extra
+per backend, and they are mutually exclusive, so install exactly one:
+
 ```bash
 pip install turboocr              # client only — talk to a running server
 pip install "turboocr[cpu]"       # + in-process engine, CPU (and Apple Silicon)
@@ -188,23 +228,11 @@ pip install "turboocr[rocm]"      # + AMD engine
 ```
 
 `turboocr doctor` prints the right line for your machine. Feature extras
-combine: `"turboocr[cuda,pdf]"`.
-
-**Pre-release status:** `4.0.0a1` is an alpha, so those commands install the
-current stable client (0.3.0) until you ask for the pre-release explicitly:
+combine: `"turboocr[cuda,pdf]"`. Because `4.0.0a1` is a pre-release, pip will
+not select it by default even after publication — ask for it explicitly:
 
 ```bash
 pip install --pre "turboocr[cpu]"        # or pin: turboocr[cpu]==4.0.0a1
-```
-
-The engine wheels are not published yet at all — until the first release run,
-build one from this checkout:
-
-```bash
-# The helper builds AND repairs the wheel — a bare `pip wheel python/`
-# bundles no libraries and only runs on the machine that built it.
-scripts/python/build_backend_wheel.sh cpu     # cpu | cuda | openvino | rocm
-pip install build-wheels/cpu/fixed/*.whl
 ```
 
 On NVIDIA, the engine wheel needs only an NVIDIA **driver** (no CUDA toolkit).
