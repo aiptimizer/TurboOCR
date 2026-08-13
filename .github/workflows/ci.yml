@@ -29,8 +29,13 @@ jobs:
       - uses: ./.github/actions/setup-cpp-deps
       - name: Configure (CPU, portable baseline)
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNATIVE_ARCH=OFF -DUSE_CPU_ONLY=ON
+      # turbo_backend_probe as well as the unit binary: ctest registers a
+      # `backend_probe` case (CMakeLists.txt, add_test) that runs it, so
+      # building only turbo_ocr_tests leaves that case permanently "Not Run"
+      # and ctest exits non-zero. It went unnoticed because the ONNX Runtime
+      # checksum in setup-cpp-deps failed first and this job never got here.
       - name: Build unit tests
-        run: cmake --build build --target turbo_ocr_tests -j"$(nproc)"
+        run: cmake --build build --target turbo_ocr_tests turbo_backend_probe -j"$(nproc)"
       - name: Run unit tests
         run: ctest --test-dir build --output-on-failure --no-tests=error
 

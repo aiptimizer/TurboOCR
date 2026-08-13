@@ -54,7 +54,11 @@ runs:
         mkdir -p "$PREFIX/include" "$PREFIX/lib"
         cd /tmp
         wget -q "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-x64-1.28.0.tgz" -O ort.tgz
-        echo "8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3  ort.tgz" | sha256sum -c -
+        # Must match the x64 ORT_SHA256 pinned in CMakeLists.txt for the same
+        # ORT_VERSION — this copy had drifted, and every job using this action
+        # failed the checksum before a single file was compiled. Refresh BOTH
+        # whenever the version changes.
+        echo "a3e1b79d7bb1bf09696ce675f49e4064e6c81f6202b8225624fff0e93f8d6407  ort.tgz" | sha256sum -c -
         tar xzf ort.tgz
         cp -r onnxruntime-linux-x64-1.28.0/include/* "$PREFIX/include/"
         cp onnxruntime-linux-x64-1.28.0/lib/libonnxruntime.so* "$PREFIX/lib/"
