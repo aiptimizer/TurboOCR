@@ -115,6 +115,9 @@ env:
   # container builds a minimal 4.x from source — deterministic and pinned,
   # rather than "whatever the distro has".
   OPENCV_VERSION: "4.10.0"
+  # sha256 of the 4.10.0 tag tarball, verified from two networks. Bump
+  # TOGETHER with OPENCV_VERSION — a stale hash fails every Linux arm fast.
+  OPENCV_SHA256: "b2171af5be6b26f7a06b1229948bbb2bdaa74fcf5cd097e0af6378fce50a6eb9"
   PDFIUM_RELEASE: "chromium/7857"  # must match scripts/setup/install_pdfium.sh
   # The OpenVINO and ROCm versions are pinned INSIDE the matrix entries below,
   # not here: the `env` context is not available in `jobs.<id>.strategy`, so a
@@ -215,6 +218,10 @@ jobs:
               # the crop pool's only two post-7.61 calls. Build a pinned modern
               # curl from source, exactly like OpenCV above.
               wget -q https://curl.se/download/curl-8.11.1.tar.gz -O curl.tar.gz
+              # Digest cross-checked against curl.se and the GitHub release
+              # mirror from two networks — same rule as the ORT tarballs: no
+              # unverified download gets extracted, let alone compiled in.
+              echo "a889ac9dbba3644271bd9d1302b5c22a088893719b72be3487bc3d401e5c4e80  curl.tar.gz" | sha256sum -c -
               tar xzf curl.tar.gz
               (cd curl-8.11.1 && ./configure --prefix=/usr/local --with-openssl --without-libpsl --disable-ldap --disable-manual >/dev/null && make -j"$(nproc)" >/dev/null && make install >/dev/null)
               ldconfig
@@ -303,6 +310,10 @@ jobs:
               # the crop pool's only two post-7.61 calls. Build a pinned modern
               # curl from source, exactly like OpenCV above.
               wget -q https://curl.se/download/curl-8.11.1.tar.gz -O curl.tar.gz
+              # Digest cross-checked against curl.se and the GitHub release
+              # mirror from two networks — same rule as the ORT tarballs: no
+              # unverified download gets extracted, let alone compiled in.
+              echo "a889ac9dbba3644271bd9d1302b5c22a088893719b72be3487bc3d401e5c4e80  curl.tar.gz" | sha256sum -c -
               tar xzf curl.tar.gz
               (cd curl-8.11.1 && ./configure --prefix=/usr/local --with-openssl --without-libpsl --disable-ldap --disable-manual >/dev/null && make -j"$(nproc)" >/dev/null && make install >/dev/null)
               ldconfig
@@ -578,6 +589,7 @@ jobs:
             pip install --upgrade cmake ninja
             # OpenCV 4, only the three components CMakeLists.txt asks for.
             wget -q "https://github.com/opencv/opencv/archive/refs/tags/${{ env.OPENCV_VERSION }}.tar.gz" -O opencv.tar.gz
+            echo "${{ env.OPENCV_SHA256 }}  opencv.tar.gz" | sha256sum -c -
             tar xzf opencv.tar.gz
             cmake -S "opencv-${{ env.OPENCV_VERSION }}" -B /tmp/opencv-build \
               -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
