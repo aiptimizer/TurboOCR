@@ -1,5 +1,5 @@
 site_name: TurboOCR
-site_description: "Multi-stream OCR pipeline — det, cls, layout, router, rec, table, formula"
+site_description: "The fastest GPU document parser — OCR, layout, tables, formulas to Markdown on NVIDIA, Apple, Intel and CPU"
 site_author: ""
 site_url: "https://aiptimizer.github.io/TurboOCR/"
 
@@ -14,6 +14,8 @@ copyright: ""
 
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
   font:
     text: Inter
     code: JetBrains Mono
@@ -25,23 +27,26 @@ theme:
     - navigation.indexes
     - navigation.footer
     - navigation.path
+    - navigation.instant
     - toc.integrate
     - content.code.copy
     - content.code.annotate
     - content.tabs.link
-    - header.autohide
+    - search.suggest
     - search.highlight
     - search.share
   palette:
-    - scheme: default
-      primary: indigo
-      accent: pink
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-night
         name: Switch to dark mode
-    - scheme: slate
-      primary: indigo
-      accent: pink
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
       toggle:
         icon: material/weather-sunny
         name: Switch to light mode
@@ -50,6 +55,9 @@ theme:
 
 extra_css:
   - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/install-selector.js
 
 extra:
   social:
@@ -61,6 +69,9 @@ markdown_extensions:
   - admonition
   - attr_list
   - md_in_html
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - tables
   - footnotes
   - toc:
@@ -97,37 +108,57 @@ plugins:
           fontSize: "14px"
           fontFamily: "Inter, system-ui, sans-serif"
 
+# Ordered the way a reader arrives: run it → use it → look things up →
+# understand the models → understand the design → check the numbers →
+# change it. Engineering logs come last and are labelled as logs.
 nav:
   - Home: index.md
-  - Architecture:
-      - Overview: architecture/overview.md
-      - Pipeline: architecture/pipeline.md
-      - CUDA Streams: architecture/cuda-streams.md
-      - Router: architecture/router.md
+  - Get started:
+      - Install: getting-started/install.md
+      - Run with Docker: getting-started/docker.md
+      - Build natively: getting-started/native.md
+      - Build on Windows: guides/windows-native-build.md
+      - Fetch the model bundle: getting-started/model-bundle.md
+  - Guides:
+      - What changed in v4: guides/upgrading-v4.md
+      - PaddleOCR-VL on a separate GPU: guides/vl-separate-gpu.md
+      - Upgrading to v3: guides/upgrading-v3.md
+      - Running legacy PP-OCRv5: guides/legacy-ppocrv5.md
+  - Reference:
+      - HTTP API: reference/http.md
+      - gRPC API: reference/grpc.md
+      - Configuration: reference/configuration.md
+      - Markdown output: reference/markdown-output.md
+      - Metrics & monitoring: reference/monitoring.md
   - Models:
-      - Selection: models/selection.md
+      - Choosing a model: models/selection.md
       - Detection: models/detection.md
       - Classification: models/classification.md
       - Layout: models/layout.md
       - Recognition: models/recognition.md
       - Table: models/table.md
       - Formula: models/formula.md
-      - Interactions: models/interactions.md
+      - Form fields: models/forms.md
+      - How the stages interact: models/interactions.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Pipeline: architecture/pipeline.md
+      - CUDA streams: architecture/cuda-streams.md
+      - Router: architecture/router.md
+      - Multi-backend seam: architecture/multi-backend.md
   - Benchmarks:
-      - Engine comparison: benchmarks/comparison.md
       - OmniDocBench: benchmarks/omnidocbench.md
+      - Speed vs accuracy: benchmarks/speed-vs-accuracy.md
       - Latency: benchmarks/latency.md
-  - API:
-      - HTTP: api/http.md
-      - gRPC: api/grpc.md
-      - Monitoring: api/monitoring.md
-  - Build:
-      - Native: build/native.md
-      - Docker: build/docker.md
-      - Configuration: build/config.md
-      - Models: build/models.md
-      - Upgrading to v3: build/upgrading-v3.md
-      - Legacy PP-OCRv5: build/legacy-ppocrv5.md
-  - Dev:
-      - Testing: dev/testing.md
-      - Plan history: dev/plan-history.md
+      - Engine comparison: benchmarks/comparison.md
+      - The benchmark corpus: benchmarks/corpus.md
+  - Contributing:
+      - Running the tests: contributing/testing.md
+      - Testing strategy: contributing/testing-strategy.md
+      - Adding a backend: contributing/adding-a-backend.md
+      - Pre-commit checks: contributing/pre-commit.md
+      - Publishing the model bundle: contributing/model-release.md
+  - Engineering log:
+      - Production readiness (2026-07): notes/production-readiness-2026-07.md
+      - Apple backend bring-up: notes/apple-backend-log.md
+      - Plan history: notes/plan-history.md

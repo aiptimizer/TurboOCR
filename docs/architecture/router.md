@@ -1,8 +1,15 @@
 # Router
 
+!!! note "Line anchors are historic"
+    The `ocr_pipeline.cpp:NNN` anchors on this page refer to the pre-merge
+    GPU pipeline, retired in the 2026-07 unified-backend merge. The logic
+    they describe lives on in `src/pipeline/unified/unified_ocr_pipeline.cpp`
+    and the router sources; the design described here is current, the line
+    numbers are not.
+
 The **CUA router** runs CPU-side between `layout_->collect()` and the table/formula dispatch in `dispatch_router_` — **≈ 50 µs on text-only pages, ≤ 2 ms on mixed pages** (plan 05 §10 budget). It is the only stage that decides which downstream pipeline (text rec / table / formula / skip) each layout cell goes to.
 
-The router itself is `CuaRouter::classify` at `src/router/cua_router.cpp:382`. Its inputs are the sorted detection boxes and the `PaddleLayout::collect()` output; its output is a `RoutingPlan` (per-modality `layout_id` buckets + a `rec_suppress` mask aligned to detection boxes).
+The router itself is `CuaRouter::classify` at `src/pipeline/router/cua_router.cpp:382`. Its inputs are the sorted detection boxes and the `PaddleLayout::collect()` output; its output is a `RoutingPlan` (per-modality `layout_id` buckets + a `rec_suppress` mask aligned to detection boxes).
 
 ## Decision tree
 
@@ -55,7 +62,7 @@ flowchart TD
 
 ## Per-class default destination
 
-Verbatim from plan 05 §2; mirrors the LUT at `include/turbo_ocr/router/router_destination.h:22-54`.
+Verbatim from plan 05 §2; mirrors the LUT at `include/turbo_ocr/pipeline/router/router_destination.h:22-54`.
 
 | class_id | label | Default | Notes |
 |---:|---|---|---|
@@ -115,11 +122,15 @@ Per `tier_for` at `cua_router.cpp:90`, thresholds from
 
 ## Verification — "is this really a table?"
 
-When `class_id == 21` and tier is `Verify`,
-`VerifyTablePath::should_invoke` (`cua_router.cpp:352`) flags the
+**Pass-through today** — nothing in production calls `should_invoke` or
+`apply_verify_result`; the gate model is not shipped and the Verify tier
+behaves exactly like Table (see the PASS-THROUGH note in
+`src/pipeline/router/cua_router_rules.cpp`). The design, kept for when the
+gate model lands: when `class_id == 21` and tier is `Verify`,
+`VerifyTablePath::should_invoke` flags the
 decision for the `turbostruct-table-cls` gate (PP-LCNet_x1_0,
 224×224, INT8). If neither class clears 0.6 and `max(scores) < 0.55`,
-`apply_verify_result` (`cua_router.cpp:357`) demotes to Text with
+`apply_verify_result` demotes to Text with
 reason `TableVerifyDemoted`. (It may still emit a `wired_hint`, but that
 hint is now **inert**: the table stage is a single SLANet-Plus model with
 no wired/wireless classifier, so the downstream pipeline ignores it.)

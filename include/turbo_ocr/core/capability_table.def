@@ -1,0 +1,73 @@
+// capability_table.def — THE list of optional OCR capabilities. No include
+// guard: this is an X-macro database, included repeatedly with different X.
+//
+// ADDING A CAPABILITY IS ONE LINE HERE. That line then drives, generically:
+//   * the HTTP query parameter name          (?<name>=1)
+//   * the HTTP JSON body key                 {"<name>": true}
+//   * the /capabilities features.<name> key
+//   * the gRPC request field name            (must match, see proto_capability_bridge)
+//   * the Python Pipeline.capabilities key
+//   * per-backend availability               (backend::StageAvailability)
+//
+// The name is deliberately ONE string used for all of them. That convention is
+// what lets gRPC be served by proto reflection instead of hand-written glue,
+// and it is why a capability cannot be "added to the parser but forgotten in
+// /capabilities" — there is only one place to add it.
+//
+// WHY AN X-MACRO rather than a struct of bools (what this replaces): a struct
+// of bools cannot be iterated, so every consumer hand-wrote its own list and
+// the lists drifted. Concretely, before this existed: `layout/tables/formulas`
+// were threaded as three positional bools into six registrar signatures — and
+// the gRPC one took them in a DIFFERENT ORDER (layout, readiness, table,
+// formula), so transposing two of them compiled cleanly and silently disabled
+// a feature. Nothing caught it.
+//
+// Rejected alternatives (see docs): enum + a parallel hand-maintained name
+// array (the two lists can still desync in length/order — here both are
+// emitted from the SAME source line); a runtime self-registering table like
+// backend::BackendRegistrar (right for vendors, which are independent TUs
+// nothing can enumerate centrally; wrong for a small closed set every
+// transport must agree on — a registry you can forget to consult reproduces
+// the silent-drop bug instead of preventing it); external codegen (overkill at
+// this size).
+//
+// X(Enumerator, wire_name, implied_mask, error_code, remediation_hint)
+//
+//   implied_mask: capabilities this one REQUIRES. Tables and formulas are
+//   per-layout-region stages, so requesting either implicitly needs layout —
+//   encoding it here means no endpoint has to remember that rule.
+//
+//   error_code + remediation_hint: what a client gets when it asks for this
+//   capability on a server that did not load it. These live HERE, next to the
+//   capability, because the alternative — each endpoint writing its own
+//   rejection — is how two endpoints end up returning different codes for the
+//   same condition. The codes are the ones docs/reference/http.md already documents,
+//   so moving them here changes no wire contract.
+//
+//   The hint says what an OPERATOR must do (the client cannot fix a missing
+//   model), which is why it names env vars and model paths rather than request
+//   parameters.
+
+#ifndef TURBO_CAPABILITY_IMPLIES
+#define TURBO_CAPABILITY_IMPLIES(cap) (1u << static_cast<unsigned>(::turbo_ocr::capability::CapabilityId::cap))
+#endif
+
+// clang-format off
+#define TURBO_CAPABILITY_TABLE(X)                                              \
+  X(Layout,         "layout",     0u,                                          \
+    "LAYOUT_DISABLED",                                                         \
+    "the layout model is not loaded: either models/layout/layout.onnx is "      \
+    "missing, or the server was started with DISABLE_LAYOUT=1")                \
+  X(Table,          "tables",     TURBO_CAPABILITY_IMPLIES(Layout),            \
+    "TABLE_BACKEND_DISABLED",                                                  \
+    "no table backend is configured: start the server with TABLE_BACKEND= + "  \
+    "TABLE_SLANEXT_ENCODER_ONNX=")                                             \
+  X(Formula,        "formulas",   TURBO_CAPABILITY_IMPLIES(Layout),            \
+    "FORMULA_BACKEND_DISABLED",                                                \
+    "no formula backend is configured: start the server with FORMULA_ONNX= + " \
+    "FORMULA_TOKENIZER=")                                                      \
+  X(DocOrientation, "autorotate", 0u,                                          \
+    "AUTOROTATE_DISABLED",                                                     \
+    "the doc-orientation model is not loaded: set DOC_ORI_ONNX= to a "        \
+    "PP-LCNet_x1_0_doc_ori model (default models/doc_ori.onnx)")
+// clang-format on

@@ -1,0 +1,558 @@
+# =============================================================================
+# Python wheels — build + publish to PyPI.
+#
+# TurboOCR ships a pure-Python umbrella plus SEPARATE, MUTUALLY-EXCLUSIVE
+# per-backend engine wheels built from the SAME source tree with different
+# CMake args and a different distribution name (the onnxruntime /
+# onnxruntime-gpu pattern; python/DESIGN.md section 4):
+#
+#   turboocr                  client + engine facade (py3-none-any)  python-sdk/
+#   turboocr-engine-cpu       CPU everywhere, + Metal/ANE on macOS   python/
+#   turboocr-engine-cuda      + ORT CUDA/TensorRT execution providers python/wheels/cuda/
+#   turboocr-engine-openvino  + the native Intel OpenVINO backend    python/wheels/openvino/
+#   turboocr-engine-rocm      + the native AMD ROCm backend          python/wheels/rocm/
+#
+# The umbrella's extras are the front door (`pip install "turboocr[cuda]"`
+# pins the matching engine wheel). All four engine wheels install the SAME
+# import package (`turboocr_engine`), so exactly one may be installed per
+# environment. The per-wheel pyproject.toml files are the source of truth for
+# the distribution name and the scikit-build-core settings; this workflow only
+# supplies the TOOLCHAIN each variant needs and drives cibuildwheel over them.
+#
+# -----------------------------------------------------------------------------
+# ####  PUBLISHING IS IRREVERSIBLE  ###########################################
+# This uploads to REAL PyPI (upload.pypi.org). PyPI does not allow re-uploading
+# a version: once 4.0.0a1 of a distribution is up, that exact version number is
+# burned forever, broken or not. So publishing hides behind a DEDICATED tag
+# namespace, distinct from release tags:
+#
+#   push tag  v4.0.0-alpha.1          -> builds + uploads artifacts ONLY.
+#                                        Download them, install locally, inspect.
+#   push tag  publish-v4.0.0-alpha.1  -> builds AND publishes to PyPI.
+#
+# Typing the visibly different `publish-` tag is the deliberate, irreversible
+# step. (workflow_dispatch with publish=true does the same, but the dispatch
+# button only exists once this file is on the default branch — the tag route
+# works from any branch.) Before the first publish, remember the RPATH/vendoring
+# landmines in python/DESIGN.md section 5 only show up on a clean machine.
+#
+# TRUSTED PUBLISHING (OIDC) is configured on PyPI, one publisher per
+# distribution, each pinned to THIS repo + THIS workflow + its own GitHub
+# environment. PyPI rejects two *pending* publishers that share a config, so the
+# environment name is what distinguishes them — the names below are not
+# cosmetic, they must match PyPI exactly:
+#
+#   turboocr                  -> environment: pypi-umbrella   (ordinary publisher)
+#   turboocr-engine-cpu       -> environment: pypi
+#   turboocr-engine-cuda      -> environment: pypi-cuda
+#   turboocr-engine-openvino  -> environment: pypi-openvino
+#   turboocr-engine-rocm      -> NOT REGISTERED, NOT PUBLISHED (see below)
+#
+# rocm is built and uploaded as an artifact but deliberately absent from the
+# publish matrix: PyPI caps an account at 3 pending publishers, and rocm is the
+# one arm that has never run on its hardware (src/backends/amd/BRINGUP.md), so
+# it is the right one to hold back. To ship it later: register the pending
+# publisher on PyPI with environment `pypi-rocm` (a slot frees up as soon as one
+# of the others publishes and becomes an ordinary publisher), then add its row
+# to the publish matrix.
+# #############################################################################
+#
+# NO GPU IS REQUIRED TO BUILD ANY OF THESE. The vendor execution providers are
+# compiled/linked against headers + import libraries only (and, in ORT's case,
+# dlopen'd at runtime), so a stock GitHub runner is sufficient — the same
+# reasoning as ci.yml's cuda-compile-gate. A GPU is needed to RUN the wheels,
+# never to build them.
+# =============================================================================
+name: Wheels
+
+on:
+  # Manual only, plus release tags. NOT on push/PR: a full matrix is ~4 slow
+  # container builds (OpenCV from source, ROCm/OpenVINO installs) and nothing
+  # here gates correctness — ci.yml does that.
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "PUBLISH to real PyPI (IRREVERSIBLE — a version cannot be re-uploaded)"
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"           # builds + uploads artifacts only; never publishes
+      - "publish-v*"   # builds AND publishes to real PyPI (IRREVERSIBLE)
+
+concurrency:
+  group: wheels-${{ github.ref }}
+  # NOT cancel-in-progress: a half-cancelled release build leaves a partial set
+  # of wheels, and the publish job would then upload an incomplete matrix.
+  cancel-in-progress: false
+
+env:
+  # Keep in step with CMakeLists.txt (ORT_VERSION) and ci.yml. CI testing an
+  # older ORT than production has bitten before (CoreML NaN on 1.24.4, clean on
+  # 1.27) — bump all three together.
+  ORT_VERSION: "1.28.0"
+  # The CUDA-13 asset + hash used by ci.yml's cuda-compile-gate. The PLAIN
+  # tarball is CPU-only; linking it into turboocr-engine-cuda would ship a
+  # lying wheel.
+  ORT_CUDA_ASSET: "onnxruntime-linux-x64-gpu_cuda13-1.28.0"
+  ORT_CUDA_SHA256: "1a3227e1dc2f53d9f877c93278af500b15e26d99aa5ade877692138b3ab7d351"
+  # manylinux_2_28 is AlmaLinux 8, whose EPEL OpenCV is 3.4.x. The tree needs
+  # OpenCV 4 (docker/Dockerfile uses Ubuntu's libopencv-dev 4.6), so the
+  # container builds a minimal 4.x from source — deterministic and pinned,
+  # rather than "whatever the distro has".
+  OPENCV_VERSION: "4.10.0"
+  PDFIUM_RELEASE: "chromium/7857"  # must match scripts/setup/install_pdfium.sh
+  # The OpenVINO and ROCm versions are pinned INSIDE the matrix entries below,
+  # not here: the `env` context is not available in `jobs.<id>.strategy`, so a
+  # version referenced from a matrix value cannot come from this block. One
+  # source of truth each, at the point of use.
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Build every wheel with cibuildwheel.
+  #
+  # CONTAINER GEOMETRY (the thing that breaks first if you change it): on Linux
+  # cibuildwheel copies ONLY the package directory into the manylinux container,
+  # at /project. Every one of these pyproject.toml files sets
+  # `cmake.source-dir` to a path ABOVE itself (the repo root holds CMakeLists.txt),
+  # which does not exist inside the container. So we bind-mount the whole
+  # checkout at /repo via the container-engine create_args and override the
+  # source dir with scikit-build-core's env form, SKBUILD_CMAKE_SOURCE_DIR.
+  # That also makes /repo/third_party (PDFium, the staged ORT) visible to CMake
+  # and lets it write its FetchContent output back to the workspace.
+  # macOS and Windows build in-place on the runner, where the relative
+  # `cmake.source-dir` already resolves — no mount, no override needed.
+  # ---------------------------------------------------------------------------
+  build:
+    name: ${{ matrix.wheel }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Non-blocking arms. `experimental` is set on the two combinations that have
+    # never been built in this exact environment; a failure there must not sink
+    # the whole release, but its wheel simply will not appear in the artifacts —
+    # check the artifact list before treating a green run as a complete matrix.
+    continue-on-error: ${{ matrix.experimental == true }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ---- turboocr-engine-cpu (CPU / portable) ------------------------
+          - wheel: turboocr-engine-cpu
+            os: ubuntu-24.04
+            package-dir: python
+            cibw-archs: x86_64
+            # PDFium linux-x64 is VENDORED in third_party/pdfium, and CMake
+            # fetches the pinned CPU ORT tarball itself, so the container only
+            # needs a compiler + OpenCV.
+            before-all-extra: ""
+            cmake-args-linux: ""
+            repair-linux: "auditwheel repair -w {dest_dir} {wheel}"
+
+          - wheel: turboocr-engine-cpu
+            os: macos-14           # arm64; TURBO_BACKENDS defaults to "cpu;apple"
+            package-dir: python
+            cibw-archs: arm64
+
+          - wheel: turboocr-engine-cpu
+            os: windows-2022
+            package-dir: python
+            cibw-archs: AMD64
+            # Windows is the slowest and least-exercised arm (vcpkg builds
+            # OpenCV from source; docs/guides/windows-native-build.md is the
+            # only record of the native build working). Non-blocking on
+            # purpose — see the note on `continue-on-error` above.
+            experimental: true
+
+          # ---- turboocr-engine-cuda (NVIDIA) -------------------------------
+          # Linux x86_64 only. No CUDA toolkit is installed and none is needed:
+          # the wheel takes the ONNX-Runtime host path (USE_CPU_ONLY=ON) and the
+          # CUDA/TensorRT execution providers live in libonnxruntime_providers_*.so,
+          # which ORT dlopen's at RUN time. All the build needs is the gpu_cuda
+          # ORT's headers + libonnxruntime.so, staged below.
+          - wheel: turboocr-engine-cuda
+            os: ubuntu-24.04
+            package-dir: python/wheels/cuda
+            cibw-archs: x86_64
+            before-all-extra: ""
+            # No -DTURBO_BACKENDS override: the CUDA wheel is the ONNX-Runtime
+            # host path with a CUDA-capable ORT staged into third_party/, which
+            # CMakeLists.txt picks up by search order.
+            cmake-args-linux: ""
+            # CUDA toolkit + driver sonames are EXCLUDED from vendoring: they
+            # are host-provided or come from the user's onnxruntime-gpu
+            # dependency, exactly as onnxruntime-gpu itself ships. Bundling
+            # libcuda.so.1 would pin a driver version into the wheel.
+            repair-linux: >-
+              auditwheel repair -w {dest_dir} {wheel}
+              --exclude libcuda.so.1
+              --exclude 'libcudart.so.*' --exclude 'libcublas.so.*' --exclude 'libcublasLt.so.*'
+              --exclude 'libcudnn*.so.*' --exclude 'libcurand.so.*' --exclude 'libcufft.so.*'
+              --exclude 'libnvinfer*.so.*' --exclude 'libnvonnxparser*.so.*'
+              --exclude 'libnccl.so.*' --exclude 'libcupti.so.*'
+
+          # ---- turboocr-engine-openvino (Intel) ----------------------------
+          # The native OpenVINO backend (TURBO_BACKENDS="cpu;intel",
+          # find_package(OpenVINO)), not the ORT OpenVINO EP: SETUP.md measured
+          # the native path at 5.5 img/s vs ORT's 4.9 on the same part. Device
+          # (CPU/GPU/NPU) is chosen at RUN time via OV_DEVICE — one binary.
+          - wheel: turboocr-engine-openvino
+            os: ubuntu-24.04
+            package-dir: python/wheels/openvino
+            cibw-archs: x86_64
+            # OpenVINO from Intel's RHEL8 YUM repo (manylinux_2_28 = AlmaLinux 8).
+            before-all-extra: |
+              tee /etc/yum.repos.d/intel-openvino.repo >/dev/null <<'REPO'
+              [intel-openvino]
+              name=Intel OpenVINO
+              baseurl=https://yum.repos.intel.com/openvino
+              enabled=1
+              gpgcheck=1
+              repo_gpgcheck=1
+              gpgkey=https://yum.repos.intel.com/openvino/PUBLIC_KEY.PUB
+              REPO
+              yum install -y openvino-2026.2.1   # the version SETUP.md measured on
+            # runtime/cmake is the layout docs/guides/windows-native-build.md
+            # already documents for -DOpenVINO_DIR.
+            cmake-args-linux: "-DTURBO_BACKENDS=cpu;intel -DOpenVINO_DIR=/opt/intel/openvino/runtime/cmake"
+            # PREREQUISITE, not a bug: libopenvino* is EXCLUDED from vendoring,
+            # so this wheel needs the OpenVINO runtime installed on the host —
+            # the same deal onnxruntime-openvino ships under, and what
+            # docs/getting-started/install.md tells Intel users to install.
+            # TODO(openvino): bundle it instead, which means copying the
+            # dlopen'd device plugins AND plugins.xml into the wheel's .libs
+            # dir — the same post-repair injection the CUDA arm does below.
+            # Until then `pip install` alone is not sufficient on a bare host.
+            repair-linux: >-
+              auditwheel repair -w {dest_dir} {wheel}
+              --exclude 'libopenvino*.so.*' --exclude 'libopenvino*.so'
+
+          # ---- turboocr-engine-rocm (AMD) ----------------------------------
+          # UNVERIFIED on hardware by policy: the AMD arm was compile-verified
+          # off-meter in a rocm/dev-ubuntu-24.04:7.1.1 container and has never
+          # run on an AMD GPU (src/backends/amd/BRINGUP.md). This job compiles
+          # it against ROCm's RHEL8 packages instead — a different distro from
+          # the verified one, so drift is expected. Non-blocking.
+          # CMAKE_HIP_ARCHITECTURES must be explicit: there is no GPU here for
+          # CMake to probe, and the .hip kernels need a target list.
+          - wheel: turboocr-engine-rocm
+            os: ubuntu-24.04
+            package-dir: python/wheels/rocm
+            cibw-archs: x86_64
+            experimental: true
+            # ROCm 7.1.1 = the version BRINGUP.md compile-verified against.
+            before-all-extra: |
+              tee /etc/yum.repos.d/rocm.repo >/dev/null <<'REPO'
+              [ROCm]
+              name=ROCm 7.1.1
+              baseurl=https://repo.radeon.com/rocm/rhel8/7.1.1/main
+              enabled=1
+              priority=50
+              gpgcheck=1
+              gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key
+              REPO
+              yum install -y rocm-hip-runtime-devel migraphx-devel rocblas-devel miopen-hip-devel
+            # The gfx list mirrors BRINGUP.md's supported parts: CDNA
+            # (MI210/MI250 = gfx90a, MI300X = gfx942) and RDNA3 (gfx1100).
+            # BRINGUP.md derives it from `rocminfo` on the target box; there is
+            # no GPU here, so it is spelled out.
+            cmake-args-linux: "-DTURBO_BACKENDS=cpu;amd -DCMAKE_HIP_ARCHITECTURES=gfx90a;gfx942;gfx1100 -DCMAKE_PREFIX_PATH=/opt/rocm"
+            # ROCm/HIP runtime sonames are host-provided (driver + toolkit),
+            # same rule as CUDA.
+            repair-linux: >-
+              auditwheel repair -w {dest_dir} {wheel}
+              --exclude 'libamdhip64.so.*' --exclude 'libmigraphx*.so.*'
+              --exclude 'librocblas.so.*' --exclude 'libMIOpen.so.*'
+              --exclude 'libhsa-runtime64.so.*' --exclude 'librocm_smi64.so.*'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # cibuildwheel >= 4 is what python/pyproject.toml's [tool.cibuildwheel]
+      # block is written against (manylinux_2_28 default image, abi3audit in the
+      # audit stage). Installed by pip rather than via pypa/cibuildwheel@vN so
+      # the version constraint lives next to the comment that explains it.
+      - name: Install cibuildwheel
+        run: python -m pip install --upgrade "cibuildwheel~=4.0"
+
+      # --- per-platform host prep (outside the Linux container) --------------
+
+      # The CUDA-enabled ORT, staged into third_party/onnxruntime — the exact
+      # directory CMakeLists.txt searches first (find_library HINTS), so no
+      # -DONNXRUNTIME_LIB override is needed. It is staged on the HOST because
+      # the same tree is bind-mounted into the build container.
+      - name: Stage the CUDA-enabled ONNX Runtime
+        if: matrix.wheel == 'turboocr-engine-cuda'
+        run: |
+          set -euo pipefail
+          rm -rf third_party/onnxruntime
+          wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_CUDA_ASSET}.tgz" -O ort.tgz
+          echo "${ORT_CUDA_SHA256}  ort.tgz" | sha256sum -c -
+          tar xzf ort.tgz
+          mv "${ORT_CUDA_ASSET}" third_party/onnxruntime
+          # Fail loudly rather than silently building a CPU-only "cuda" wheel.
+          ls third_party/onnxruntime/lib/libonnxruntime_providers_cuda.so*
+
+      - name: macOS build deps
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          brew install opencv ninja
+          # mac-arm64 PDFium is vendored; this is a no-op that also validates it.
+          bash scripts/setup/install_pdfium.sh
+
+      # Windows has no install_pdfium.sh path (the script rejects the OS) and
+      # CMake cannot fetch ORT for Windows either (its fetch block only knows the
+      # linux/osx asset names), so both are laid down by hand here, into the same
+      # third_party/ directories the Linux/macOS paths use.
+      - name: Windows build deps (vcpkg OpenCV + ORT + PDFium)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "opencv4[core,jpeg,png]:x64-windows"
+
+          # TODO(win): record the SHA256 of these two assets here (and in
+          # third_party/VERSIONS.md) the way every other download in this tree
+          # is pinned. The first successful run prints them below; until then
+          # these are UNVERIFIED downloads and are one more reason the Windows
+          # arm is marked experimental.
+          $ort = "onnxruntime-win-x64-$env:ORT_VERSION"
+          Invoke-WebRequest "https://github.com/microsoft/onnxruntime/releases/download/v$env:ORT_VERSION/$ort.zip" -OutFile ort.zip
+          (Get-FileHash ort.zip -Algorithm SHA256).Hash
+          Expand-Archive ort.zip -DestinationPath ort-tmp
+          Remove-Item -Recurse -Force third_party\onnxruntime -ErrorAction SilentlyContinue
+          Move-Item "ort-tmp\$ort" third_party\onnxruntime
+
+          Invoke-WebRequest "https://github.com/bblanchon/pdfium-binaries/releases/download/$env:PDFIUM_RELEASE/pdfium-win-x64.tgz" -OutFile pdfium.tgz
+          (Get-FileHash pdfium.tgz -Algorithm SHA256).Hash
+          New-Item -ItemType Directory -Force third_party\pdfium | Out-Null
+          tar -xzf pdfium.tgz -C third_party\pdfium
+          # CMake wants lib/pdfium.dll.lib (CMakeLists.txt:173); delvewheel needs
+          # to find bin/pdfium.dll, which it is pointed at in the repair command.
+          Get-ChildItem third_party\pdfium\lib, third_party\pdfium\bin
+
+      # --- the build ---------------------------------------------------------
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir wheelhouse "${{ matrix.package-dir }}"
+        env:
+          # cp312 + nanobind STABLE_ABI => ONE abi3 wheel per platform covering
+          # every later CPython (3.13/3.14/3.15). Mirrors [tool.cibuildwheel] in
+          # python/pyproject.toml; restated here so a per-backend pyproject that
+          # forgets it still produces the intended single wheel.
+          CIBW_BUILD: "cp312-*"
+          CIBW_SKIP: "*-musllinux*"
+          CIBW_ARCHS: ${{ matrix.cibw-archs }}
+          CIBW_BUILD_VERBOSITY: "1"
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+
+          # See "CONTAINER GEOMETRY" above: the checkout is mounted at /repo so
+          # the repo-root CMakeLists.txt (and third_party/) exist inside the
+          # container, and scikit-build-core is pointed at it explicitly.
+          CIBW_CONTAINER_ENGINE: "docker; create_args: --volume=${{ github.workspace }}:/repo"
+
+          # Common container toolchain, then the per-backend extra. BUILD_SERVER=OFF
+          # is load-bearing: it is the ONE switch that drops Drogon (and, with it,
+          # gRPC/protobuf codegen) from the configure — an unconditional
+          # find_package(Drogon CONFIG REQUIRED) would otherwise fail before CMake
+          # ever reaches the extension. FETCH_MODELS=OFF keeps 1.5 GB of weights
+          # out of the build (the wheel installs COMPONENT python only anyway).
+          CIBW_BEFORE_ALL_LINUX: |
+            set -eux
+            yum install -y wget tar gzip which zlib-devel libpng-devel libjpeg-turbo-devel libwebp-devel
+            # cmake/ninja from PyPI via the manylinux image's own cp312, rather
+            # than whatever AlmaLinux 8 packages: scikit-build-core will pull the
+            # same wheels for the build itself, and before-all runs before that.
+            export PATH="/opt/python/cp312-cp312/bin:$PATH"
+            pip install --upgrade cmake ninja
+            # OpenCV 4, only the three components CMakeLists.txt asks for.
+            wget -q "https://github.com/opencv/opencv/archive/refs/tags/${{ env.OPENCV_VERSION }}.tar.gz" -O opencv.tar.gz
+            tar xzf opencv.tar.gz
+            cmake -S "opencv-${{ env.OPENCV_VERSION }}" -B /tmp/opencv-build \
+              -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+              -DBUILD_LIST=core,imgproc,imgcodecs -DBUILD_TESTS=OFF -DBUILD_PERF_TESTS=OFF \
+              -DBUILD_EXAMPLES=OFF -DBUILD_opencv_apps=OFF -DBUILD_JAVA=OFF \
+              -DBUILD_opencv_python2=OFF -DBUILD_opencv_python3=OFF -DWITH_IPP=OFF
+            cmake --build /tmp/opencv-build -j"$(nproc)"
+            cmake --install /tmp/opencv-build
+            ldconfig
+            ${{ matrix.before-all-extra }}
+
+          CIBW_ENVIRONMENT_LINUX: >-
+            SKBUILD_CMAKE_SOURCE_DIR=/repo
+            LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64:/opt/intel/openvino/runtime/lib/intel64:/opt/rocm/lib
+            CMAKE_ARGS='-DBUILD_SERVER=OFF -DFETCH_MODELS=OFF -DNATIVE_ARCH=OFF ${{ matrix.cmake-args-linux }}'
+
+          CIBW_ENVIRONMENT_MACOS: >-
+            MACOSX_DEPLOYMENT_TARGET=14.0
+            CMAKE_ARGS='-DBUILD_SERVER=OFF -DFETCH_MODELS=OFF -DNATIVE_ARCH=OFF'
+
+          CIBW_ENVIRONMENT_WINDOWS: >-
+            CMAKE_ARGS='-DBUILD_SERVER=OFF -DFETCH_MODELS=OFF -DNATIVE_ARCH=OFF -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake'
+
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: ${{ matrix.repair-linux }}
+          # macOS: delocate, matching [tool.cibuildwheel.macos] in
+          # python/pyproject.toml (restated for the per-backend pyprojects).
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
+          # Windows has no default repair step in cibuildwheel; delvewheel is the
+          # delocate/auditwheel equivalent and must be told where the DLLs are
+          # (they live in third_party/, not on PATH).
+          CIBW_BEFORE_BUILD_WINDOWS: "pip install delvewheel"
+          CIBW_REPAIR_WHEEL_COMMAND_WINDOWS: >-
+            delvewheel repair
+            --add-path "${{ github.workspace }}\third_party\pdfium\bin;${{ github.workspace }}\third_party\onnxruntime\lib"
+            -w {dest_dir} {wheel}
+
+      # The CUDA/TensorRT provider libraries are dlopen'd by ORT, never
+      # DT_NEEDED, so auditwheel does not see them and silently drops them —
+      # producing a wheel that imports fine and then falls back to CPU. Inject
+      # them, ORIGINAL names intact, into the repaired wheel's vendored-libs
+      # directory: ORT dlopens providers from the directory holding
+      # libonnxruntime, so the mangled main-lib name does not matter, the
+      # directory does. Same two-step as scripts/python/build_backend_wheel.sh.
+      - name: Inject the dlopen'd CUDA/TensorRT provider libs
+        if: matrix.wheel == 'turboocr-engine-cuda'
+        run: |
+          set -euxo pipefail
+          python -m pip install wheel
+          for whl in wheelhouse/*.whl; do
+            work="$(mktemp -d)"
+            python -m wheel unpack -d "$work" "$whl"
+            d="$(ls -d "$work"/*/)"
+            libs="$(ls -d "$d"/*.libs 2>/dev/null || echo "$d/turboocr_engine/.libs")"
+            mkdir -p "$libs"
+            cp -P third_party/onnxruntime/lib/libonnxruntime_providers_*.so "$libs/"
+            rm "$whl"
+            python -m wheel pack -d wheelhouse "$d"
+            rm -rf "$work"
+          done
+          ls -lh wheelhouse
+
+      # Always uploaded, publish or not — the wheels must be inspectable
+      # (unzip, `auditwheel show`, `otool -L`, a manual install) without anyone
+      # having to push anything anywhere.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.wheel }}-${{ matrix.os }}-${{ matrix.cibw-archs }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # The pure-Python `turboocr` umbrella (client + engine facade, python-sdk/).
+  # No compiler, no matrix: one py3-none-any wheel + sdist. It is what
+  # `pip install turboocr` resolves to; its extras pin the engine wheels built
+  # above. Artifact name starts with `wheels-` so the publish job's download
+  # pattern picks it up with the rest.
+  # ---------------------------------------------------------------------------
+  build-umbrella:
+    name: turboocr (pure Python umbrella)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade build twine
+          python -m build --outdir wheelhouse python-sdk
+          python -m twine check wheelhouse/*
+
+      # The wheel must stay pure Python: a platform tag here would mean the
+      # umbrella grew a native piece, which belongs in the engine wheels.
+      - name: Assert the wheel is py3-none-any
+        run: ls wheelhouse/turboocr-*-py3-none-any.whl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-turboocr-umbrella
+          path: |
+            wheelhouse/*.whl
+            wheelhouse/*.tar.gz
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # PUBLISH — real PyPI, ONE JOB PER DISTRIBUTION.
+  #
+  # Not one job uploading everything: each distribution has its own trusted
+  # publisher on PyPI, scoped to its own GitHub environment, so the OIDC token
+  # minted for `pypi-cuda` can ONLY create turboocr-engine-cuda. A single
+  # combined job would need one environment authorised for all five names,
+  # which is exactly the blast radius trusted publishing exists to avoid.
+  #
+  # Gated three ways: (1) an explicit opt-in — a `publish-v*` tag push or a
+  # workflow_dispatch with publish=true; a plain `v*` release tag NEVER
+  # publishes, because the upload cannot be undone, (2) a per-distribution
+  # GitHub environment, which is where a reviewer/approval gate belongs (add
+  # one under Settings -> Environments; GitHub creates these on first run),
+  # and (3) no write permission beyond the OIDC token.
+  #
+  # `fail-fast: false` so one distribution's 403 does not strand the rest — a
+  # partial publish is recoverable (re-run the missing one), a cancelled matrix
+  # mid-upload is messier.
+  # ---------------------------------------------------------------------------
+  publish:
+    name: Publish ${{ matrix.dist }}
+    needs: [build, build-umbrella]
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.publish) ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/publish-v'))
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `artifacts` must match ONLY this distribution's artifacts. The
+          # engine patterns end in `-*` (the os/arch suffix); a bare
+          # `wheels-turboocr-*` would sweep in every sibling and upload another
+          # project's wheels under this token.
+          - dist: turboocr
+            artifacts: wheels-turboocr-umbrella
+            environment: pypi-umbrella
+          - dist: turboocr-engine-cpu
+            artifacts: wheels-turboocr-engine-cpu-*
+            environment: pypi
+          - dist: turboocr-engine-cuda
+            artifacts: wheels-turboocr-engine-cuda-*
+            environment: pypi-cuda
+          - dist: turboocr-engine-openvino
+            artifacts: wheels-turboocr-engine-openvino-*
+            environment: pypi-openvino
+          # turboocr-engine-rocm is absent on purpose — see the banner at the
+          # top of this file.
+    environment:
+      name: ${{ matrix.environment }}
+      url: https://pypi.org/p/${{ matrix.dist }}
+    permissions:
+      contents: read
+      # Trusted publishing (OIDC) — no long-lived token in the repo. If trusted
+      # publishing ever has to be abandoned, delete `id-token` and give the
+      # publish step `password: ${{ secrets.PYPI_API_TOKEN }}` instead; no such
+      # secret exists today, on purpose.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ${{ matrix.artifacts }}
+          path: dist
+          merge-multiple: true
+
+      # Print what is about to be uploaded. An experimental build arm that
+      # failed is simply MISSING here rather than loud, so this listing is the
+      # only place an incomplete matrix is visible before it is published.
+      - name: List the files about to be uploaded
+        run: ls -lh dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist
+          # NOT skip-existing: on real PyPI a version collision means the
+          # version was already published and this run would be a silent no-op
+          # pretending to succeed. Fail loudly and bump the version instead.

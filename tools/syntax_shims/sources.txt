@@ -1,0 +1,83 @@
+src/service/grpc/server_launch.cpp
+src/service/grpc/service_core.cpp
+src/backends/nvidia/backend/cuda_backend.cpp
+src/backends/nvidia/kernels_cuda/cuda_kernels.cpp
+src/backends/nvidia/stages/nv_stages.cpp
+src/backends/nvidia/backend/nv_backend_registry.cpp
+src/backends/nvidia/stages/nv_table_recognizer.cpp
+src/backends/nvidia/stages/nv_formula_recognizer.cpp
+src/backends/nvidia/engine/ort_cuda_engine.cpp
+src/backends/nvidia/engine/trt_engine_adapter.cpp
+# The TRT build+run path. Uncovered until the NvInfer.h stub grew a builder half
+# and NvOnnxParser.h was written: these compile only in a real CUDA+TRT
+# configure, which no gate machine has, so nothing type-checked them anywhere.
+src/backends/nvidia/engine/onnx_to_trt.cpp
+src/backends/nvidia/engine/trt_profiles.cpp
+src/backends/nvidia/engine/trt_engine_cache.cpp
+src/backends/nvidia/engine/trt_engine.cpp
+src/backends/nvidia/engine/engine_loader.cpp
+src/backends/nvidia/memory/cuda_allocator.cpp
+src/backends/nvidia/queue/cuda_device_queue.cpp
+# src/backends/amd/kernels_hip/hip_kernels.cpp — the missing IKernels sibling. It is host
+# C++ (the device code is in kernels_hip/*.hip) and would type-check here, but
+# the HIP stub lacks hipMemcpy2DAsync, which decode_image calls. Add that
+# declaration to hip/hip_runtime.h per README "Keeping the stubs honest", then
+# uncomment this — do not list it while it is red.
+src/backends/amd/backend/rocm_backend.cpp
+src/backends/amd/stages/rocm_stages.cpp
+src/backends/amd/backend/amd_backend_registry.cpp
+src/backends/amd/memory/hip_allocator.cpp
+src/backends/amd/queue/hip_queue.cpp
+src/backends/amd/engine/migraphx_engine.cpp
+src/backends/intel/backend/intel_backend.cpp
+src/backends/intel/backend/intel_backend_registry.cpp
+src/backends/intel/stages/intel_stages.cpp
+src/backends/intel/stages/intel_stages_structure.cpp
+src/backends/intel/kernels_sycl/sycl_kernels.cpp
+src/backends/intel/engine/openvino_engine.cpp
+src/backends/intel/memory/l0_allocator.cpp
+src/backends/intel/queue/l0_device_queue.cpp
+src/backends/nvidia/stages/paddle_layout.cpp
+src/backends/nvidia/stages/slanext_table_recognizer.cpp
+src/backends/nvidia/stages/openai_endpoint.cpp
+
+# --- the CUDA orchestration (src/cuda/pipeline/) --------------------------
+# Compiled ONLY by turbo_ocr_gpu under USE_CPU_ONLY=OFF, which no configure on
+# a non-CUDA machine and no CI job can parse (every ci.yml configure passes
+# -DUSE_CPU_ONLY=ON). Most of the includes that reach these headers from
+# elsewhere sit inside `#ifndef USE_CPU_ONLY`, and check.sh compiles with NO
+# -DUSE_CPU_ONLY — so this is the ONLY thing anywhere that type-checks the
+# guarded branch. Without these lines a wrong path here gives a green local
+# build and a broken NVIDIA image.
+src/pipeline/ocr_pipeline_detail.cpp
+
+# --- host consumers of runtime/kernels_cuda/kernels_cuda.h ----------------
+# The .cu bodies cannot be checked at all (clang dispatches .cu to CUDA mode
+# and demands a real toolkit), so these host TUs are the only gate on that
+# header's declarations. Covering them is what makes a rename of the header
+# provable rather than hopeful.
+src/backends/nvidia/stages/paddle_det.cpp
+src/backends/nvidia/stages/paddle_det_ccl.cpp
+src/backends/nvidia/stages/paddle_rec.cpp
+src/backends/nvidia/stages/paddle_cls.cpp
+src/backends/nvidia/stages/table_cell.cpp
+src/backends/nvidia/stages/slanext_enc_split.cpp
+
+# --- previously ungated vendor sources ------------------------------------
+# stages_gpu.cpp is a documented member of turbo_ocr_backend_nvidia
+# (CMakeLists.txt names it in that target) yet sat outside every gate.
+src/backends/nvidia/stages/nv_table_recognizer_impl.cpp
+src/backends/nvidia/stages/nv_formula_recognizer_impl.cpp
+src/backends/intel/probes/ov_engine_probe.cpp
+src/backends/nvidia/support/nv_image_decode.cpp
+src/backends/amd/kernels_hip/hip_kernels.cpp
+
+# GPU-ONLY TEST TUs. These compile only in the USE_CPU_ONLY=OFF configure, whose
+# build runs nightly at best — so three of them referenced deleted symbols
+# (pipeline_dispatcher.h, ScriptIdResult) for as long as it took someone to try
+# a GPU build by hand, and the whole turbo_ocr_tests target would not compile.
+# Type-checking them here costs seconds on every push and catches exactly that.
+tests/cpp/pipeline/test_gpu_safety.cpp
+tests/cpp/pipeline/test_finalize_deferred.cpp
+tests/cpp/formula/test_formula_preprocess.cpp
+tests/cpp/formula/test_formulanet_ar_loop.cpp

@@ -3,6 +3,7 @@
 /build-cpu/
 /build-coverage/
 /build-*/
+/build_*/
 /predeploy/
 __pycache__/
 .pytest_cache/
@@ -15,14 +16,14 @@ timing.cache
 .DS_Store
 PP-OCRv6_MIGRATION_PLAN.md
 # Model weights — all bundles are fetched at build time from the pinned
-# GitHub Release (scripts/fetch_release_models.sh). Native builds with
+# GitHub Release (scripts/models/fetch/fetch_release_models.sh). Native builds with
 # FETCH_MODELS=ON populate this dir on first cmake --build; nothing under
 # models/ should ever be tracked. Anchored to repo root so it does not also
 # ignore unrelated paths like docs/models/ (which holds tracked documentation).
 /models/
 
 # fastpdf2png + pdfium binaries — build artifacts produced by
-# scripts/install_fastpdf2png.sh at build time (Docker + native). Never commit:
+# scripts/setup/install_fastpdf2png.sh at build time (Docker + native). Never commit:
 # they bake the build machine's absolute path into compiled strings.
 bin/fastpdf2png
 bin/libfastpdf2png.so*
@@ -31,21 +32,37 @@ bin/libpdfium.so
 # ONNX Runtime native install — fetched via CMake FetchContent for local
 # CPU builds (the Dockerfile downloads its own copy at image build time).
 third_party/onnxruntime/
-quantization/PaddleOCR/
-quantization/pretrained/
-quantization/output*/
-quantization/.venv*/
+third_party/onnxruntime-cpu/
+third_party/onnxruntime-gpu-cuda13/
 
-# Benchmark outputs (overwritten on every run)
-tests/benchmark/LATEST.md
-tests/benchmark/LATEST.json
-tests/benchmark/stress_*.json
-tests/benchmark/PER_DOCUMENT.md
-tests/benchmark/PER_DOCUMENT.json
+# The nanobind extension is BUILT (cmake --build … --target _turboocr) and then
+# dropped next to the pure-Python package; it is per-interpreter/per-platform
+# (_turboocr.cpython-311-darwin.so) and must never be tracked.
+python/turboocr_engine/_turboocr*.so
+python/turboocr_engine/_turboocr*.pyd
+python/turboocr_engine/_turboocr*.dylib
 
-# WIP — Python bindings and CLI (separate branch)
-python/
-src/cli/
+# Benchmark outputs (overwritten on every run; each driver writes next to itself)
+tests/benchmark/perf/LATEST.md
+tests/benchmark/perf/LATEST.json
+tests/benchmark/perf/stress_*.json
+tests/benchmark/scoring/PER_DOCUMENT.md
+tests/benchmark/scoring/PER_DOCUMENT.json
+
+# WIP — CLI (separate branch)
+#
+# ANCHORED with a leading slash: written bare, `src/cli/` is fine but `python/`
+# matched a directory of that name at ANY depth, so it also swallowed
+# src/python/ — the nanobind bindings CMake compiles into the _turboocr
+# extension module.
+#
+# The Python entries are GONE, not merely anchored. `git ls-files python/
+# src/python/` reported ZERO tracked files while ~4.2k lines of live source sat
+# in the tree — invisible to git status and destroyed by any clean checkout.
+# They are not separable either: src/python/bindings.cpp is built by the main
+# CMake target and python/turboocr/ is its only consumer, so tracking one
+# without the other leaves an unusable module.
+/src/cli/
 
 # Layout-overlay debug images (rendered ad hoc by tests/draw_layout.py)
 layout_overlay*.png
@@ -63,3 +80,20 @@ site/
 model.cache
 # Local scratch outputs (demo/markdown test results) — never tracked
 /tmp/
+
+# CTest scratch: `ctest` (run without --test-dir, i.e. from the repo root)
+# writes Testing/Temporary/{LastTest.log,CTestCostData.txt} here.
+/Testing/
+
+# Server upload scratch — the HTTP layer's 256-way sharded spool dir, created
+# at runtime by a locally-launched turboocr-server. Already excluded from the
+# Docker build context (.dockerignore).
+/uploads/
+
+# Ad-hoc PDF-editor demo scratch (rendered PDFs/PNGs, tens of MB).
+/.ocr-demo/
+
+# Claude Code local session state (scheduled_tasks.lock and friends).
+/.claude/
+python/turboocr/turbo_apple.metallib
+build-wheels/

@@ -13,8 +13,8 @@
   --phc-border-subtle: #e2e8f0;
   --phc-border-strong: #cbd5e1;
   --phc-text-muted: #475569;
-  --phc-accent-soft: rgba(244, 114, 182, 0.08);
-  --phc-accent-line: #f472b6;
+  --phc-accent-soft: rgba(42, 120, 214, 0.08);
+  --phc-accent-line: #2a78d6;
   --phc-code-bg: #f1f5f9;
   --phc-code-shadow: 0 1px 2px rgba(15, 23, 42, 0.06),
                      0 1px 3px rgba(15, 23, 42, 0.04);
@@ -29,8 +29,8 @@
   --phc-border-subtle: #1e293b;
   --phc-border-strong: #334155;
   --phc-text-muted: #94a3b8;
-  --phc-accent-soft: rgba(244, 114, 182, 0.10);
-  --phc-accent-line: #f472b6;
+  --phc-accent-soft: rgba(57, 198, 229, 0.12);
+  --phc-accent-line: #39c6e5;
   --phc-code-bg: #0b1220;
   --phc-code-shadow: 0 1px 2px rgba(0, 0, 0, 0.40),
                      0 2px 8px rgba(0, 0, 0, 0.20);
@@ -217,7 +217,7 @@
 .md-typeset .grid > .card:hover {
   transform: translateY(-2px);
   border-color: var(--phc-accent-line);
-  box-shadow: 0 8px 32px rgba(244, 114, 182, 0.08),
+  box-shadow: 0 8px 32px rgba(42, 120, 214, 0.08),
               0 2px 4px rgba(15, 23, 42, 0.06);
 }
 
@@ -328,4 +328,230 @@
   .md-typeset h1 { font-size: 2rem; }
   .md-typeset h2 { font-size: 1.5rem; }
   .md-typeset h3 { font-size: 1.2rem; }
+}
+
+/* ============================================================
+ * v4 brand layer — matches the README hero banner
+ * (#0a0e15 surface, #2a78d6 -> #39c6e5 accent gradient).
+ * ============================================================ */
+
+/* Material custom palette (mkdocs.yml palette: primary/accent: custom) */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #0a0e15;
+  --md-primary-fg-color--light: #1a2634;
+  --md-primary-fg-color--dark: #06090e;
+  --md-accent-fg-color: #2a78d6;
+  --md-typeset-a-color: #2a78d6;
+}
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #0a0e15;
+  --md-primary-fg-color--light: #1a2634;
+  --md-primary-fg-color--dark: #06090e;
+  --md-accent-fg-color: #39c6e5;
+  --md-typeset-a-color: #5aa9ee;
+  --md-default-bg-color: #0d1117;
+}
+
+/* ---------- landing hero ---------- */
+
+.phc-hero {
+  background:
+    radial-gradient(120% 140% at 82% 20%, rgba(42, 120, 214, 0.25), transparent 60%),
+    radial-gradient(90% 120% at 8% 110%, rgba(124, 92, 255, 0.14), transparent 60%),
+    #0a0e15;
+  border-radius: 16px;
+  padding: 2.6rem 2.4rem 2.2rem;
+  margin: 0.4rem 0 1.6rem;
+  color: #f4f7fa;
+  overflow: hidden;
+  position: relative;
+}
+.phc-hero::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #39c6e5 50%, transparent);
+}
+.phc-hero h1 {
+  color: #f4f7fa !important;
+  font-size: 2.3rem !important;
+  font-weight: 800 !important;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.55rem !important;
+}
+.phc-hero h1 .phc-grad {
+  background: linear-gradient(90deg, #2a78d6, #39c6e5);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.phc-hero p {
+  color: #b8c4d2;
+  max-width: 44rem;
+  margin: 0 0 1.3rem;
+}
+.phc-hero .phc-hero-sub {
+  color: #5d738c;
+  font-size: 0.72rem;
+  letter-spacing: 0.02em;
+}
+.phc-hero .md-button {
+  border-color: #2a3b52;
+  color: #dbe6f2;
+}
+.phc-hero .md-button--primary {
+  background: linear-gradient(90deg, #2a78d6, #39c6e5);
+  border: none;
+  color: #06131f;
+  font-weight: 700;
+}
+
+/* ---------- stat strip (v4) ---------- */
+
+.md-typeset .grid.phc-stats {
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.8rem;
+}
+.phc-stat {
+  background: var(--phc-bg-subtle);
+  border: 1px solid var(--phc-border-subtle);
+  border-radius: 12px;
+  padding: 1rem 1.1rem 0.9rem;
+}
+.phc-stat-num {
+  font-size: 1.65rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  background: linear-gradient(90deg, #2a78d6, #39c6e5);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  line-height: 1.15;
+}
+.phc-stat-label {
+  font-weight: 600;
+  margin-top: 0.15rem;
+}
+.phc-stat-foot {
+  color: var(--phc-text-muted);
+  font-size: 0.68rem;
+  margin-top: 0.1rem;
+}
+
+/* ---------- install selector (PyTorch-style matrix) ---------- */
+
+.phc-installer {
+  border: 1px solid var(--phc-border-subtle);
+  border-radius: 16px;
+  padding: 1.4rem 1.4rem 1.2rem;
+  margin: 1rem 0 1.6rem;
+  background: var(--phc-bg-subtle);
+}
+.phc-sel-row {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.7rem;
+}
+.phc-sel-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--phc-text-muted);
+}
+.phc-sel-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+.phc-pill {
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0.42rem 0.95rem;
+  border-radius: 10px;
+  border: 1.5px solid var(--phc-border-strong);
+  background: var(--phc-bg-elevated);
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s, background 0.12s;
+}
+.phc-pill:hover { border-color: #2a78d6; }
+.phc-pill--on {
+  background: linear-gradient(90deg, #2a78d6, #39c6e5);
+  border-color: transparent;
+  color: #06131f;
+}
+.phc-pill--off {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+.phc-sel-cmdwrap {
+  position: relative;
+  margin-top: 1rem;
+}
+.phc-sel-cmd {
+  background: #0a0e15;
+  border-radius: 12px;
+  padding: 1.05rem 1.2rem;
+  overflow-x: auto;
+}
+.phc-sel-cmd code {
+  display: block;
+  white-space: pre;
+  background: none !important;
+  color: #dbe6f2;
+  font-size: 0.72rem;
+  line-height: 1.65;
+  border: none;
+  padding: 0;
+}
+.phc-sel-copy {
+  position: absolute;
+  top: 0.6rem;
+  right: 0.65rem;
+  font: inherit;
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #7f92a6;
+  background: #101826;
+  border: 1px solid #2a3b52;
+  border-radius: 8px;
+  padding: 0.22rem 0.6rem;
+  cursor: pointer;
+}
+.phc-sel-copy:hover { color: #dbe6f2; border-color: #39c6e5; }
+.phc-sel-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+}
+.phc-sel-status {
+  flex: none;
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  border: 1px solid var(--phc-border-strong);
+  color: var(--phc-text-muted);
+}
+.phc-sel-status[data-status="good"] {
+  color: #0a7a3d;
+  border-color: rgba(10, 122, 61, 0.4);
+}
+[data-md-color-scheme="slate"] .phc-sel-status[data-status="good"] {
+  color: #4ade80;
+  border-color: rgba(74, 222, 128, 0.35);
+}
+.phc-sel-note {
+  font-size: 0.72rem;
+  color: var(--phc-text-muted);
+  line-height: 1.55;
 }

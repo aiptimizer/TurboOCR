@@ -26,6 +26,13 @@ public:
   PdfRenderer(PdfRenderer &&) = delete;
   PdfRenderer &operator=(PdfRenderer &&) = delete;
 
+  /// True when this build can actually rasterize (the daemon/in-process
+  /// renderer is compiled in). The no-PDF build still CONSTRUCTS a renderer
+  /// (its stubs throw), so "pointer != nullptr" is NOT an availability test —
+  /// that exact test made the gRPC PDF_NOT_AVAILABLE guard dead code and a
+  /// streamed PDF on a no-PDF build came back as a generic inference error.
+  [[nodiscard]] static bool can_render() noexcept;
+
   /// Render all pages of a PDF document to cv::Mat images.
   [[nodiscard]] std::vector<cv::Mat> render(const uint8_t *data, size_t len, int dpi = 100);
 
@@ -85,7 +92,16 @@ public:
 
 private:
   struct Daemon {
+    // The daemon pool is the POSIX path (pdf_daemon.cpp: fork/waitpid/pipe2)
+    // and is not compiled on platforms without inotify — but this header is
+    // included by everything that touches PdfRenderer, so the MEMBER still has
+    // to name a type that exists. Windows has no pid_t; intptr_t holds a
+    // process handle or a pid on every platform this builds for.
+#if defined(_WIN32)
+    intptr_t pid = -1;
+#else
     pid_t pid = -1;
+#endif
     FILE *cmd_in = nullptr;
     FILE *result_out = nullptr;
     std::mutex mutex;

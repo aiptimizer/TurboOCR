@@ -36,7 +36,7 @@ parsing (papers/books with tables and formulas).
 |---|---:|---:|---:|---:|
 | **TurboOCR-medium** | **91.9%** | 86 | **93.4%** | 193 |
 | **TurboOCR-small** | 90.3% | 230 | 92.7% | 480 |
-| **TurboOCR-tiny** *(default)* | 84.6% | **520** | 88.9% | **559** |
+| **TurboOCR-tiny** *(default)* | 85.4% | **678** | 88.9% | **559** |
 | PaddleOCR-VL-1.6 (VLM) | 91.6% | 5 | 89.4% | 7 |
 | PaddleOCR PP-OCRv5 (Python) | 86.6% | 6 | 86.4% | 5 |
 | RapidOCR (GPU) | 69.1% | 2 | 82.6% | 8 |
@@ -44,7 +44,9 @@ parsing (papers/books with tables and formulas).
 | Tesseract | 62.3% | 2 | 38.2% | 2 |
 
 TurboOCR has the best accuracy on both datasets and is 15–90× faster than the
-next-most-accurate engine.
+next-most-accurate engine. (The tiny FUNSD row was re-measured on the v4
+unified pipeline — 678 img/s pooled across replicas, F1 85.4%, ≥15 s window;
+the other rows are the original measurement set.)
 
 ---
 
@@ -79,7 +81,7 @@ vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --port 8155 --host 0.0.0.0 \
 
 In the whole-page comparison each page is sent as a base64 image with the official
 `OCR:` prompt (`temperature=0`, concurrency 8). In the full-pipeline comparison VL
-is driven by its PP-DocLayoutV3 layout stage (`tools/omnidoc_run_paddlevl.py`).
+is driven by its PP-DocLayoutV3 layout stage (`tools/bench/omnidoc_run_paddlevl.py`).
 
 ## Reproduce
 
@@ -88,7 +90,7 @@ The full-pipeline OmniDocBench numbers reproduce from this repo:
 ```bash
 # Full pipeline (OmniDocBench-125, official scorer). Enable table + formula:
 FORMULA_BACKEND=ppformulanet_s TABLE_BACKEND=slanext ./build/turboocr-server --pool-size 3
-python scripts/omnidoc_run_and_score_n.py --server-url http://localhost:8080 \
+python scripts/eval/omnidoc_run_and_score_n.py --server-url http://localhost:8080 \
        --n 125 --experiment-name <tier>
 ```
 

@@ -1,234 +1,177 @@
 # OmniDocBench
 
-OmniDocBench v1.7 (1651-page page-match harness) is the accuracy gate this
-pipeline targets. This page documents the current score, the round-by-round
-trajectory, where the remaining gaps live, and how to reproduce the numbers
-locally.
+OmniDocBench v1.7 (1651 pages, official page-match harness) is the accuracy
+gate this pipeline targets. The pipeline has **two operating points** on it —
+fully local, and hybrid with PaddleOCR-VL serving the structure crops — and
+this page documents both, where the gap between them lives, and how to
+reproduce every number.
 
-## Headline (full 1651-page run — model integration, 2026-05-17)
+## Headline (full set, 2026-08)
 
-These are the **full 1651-page** scores from the 2026-05-17 run. The formula CDM 0.063 below was an
-integration bug that has **since been fixed** — the current in-process PP-FormulaNet-S stage scores
-**CDM 0.805 on the 125-doc table/formula subset** (see [§ Current formula state](#current-formula-state-125-doc-subset)).
-The full-1651 composite still embeds the old broken-formula 0.063, so it is a floor pending a re-measure.
+Both rows: `OCR_MODEL=medium`, full 1651-page render, 1557 pages matched and
+scored by the harness (same matched set, so the rows are cell-for-cell
+comparable). Composite = `((1 − Text_Edit) + Table_TEDS + Formula_CDM) / 3 × 100`.
 
-| Metric | Test set | Score | Direction | Notes |
-|---|---|---:|---|---|
-| **Composite Overall** | full 1651 | **≈ 49.0** | ↑ | `((1 − Text_Edit)·100 + Table_TEDS·100 + Formula_CDM·100) / 3`; embeds the since-fixed formula 0.063 — floor pending re-measure |
-| text_block Edit_dist (ALL_page_avg) | full 1651 | **0.160** | ↓ | English subset 0.079; CJK rec swap landed |
-| table TEDS (.all) | full 1651 | **0.568** | ↑ | Table model wired (was 0.027 placeholder) |
-| table TEDS_structure_only (.all) | full 1651 | **0.711** | ↑ | Structure-only — pure layout signal |
-| display_formula CDM (.all) | full 1651 | 0.063 → **fixed** | ↑ | Integration bug, **now resolved**; in-process PP-FormulaNet-S scores **CDM 0.805 on the 125-doc subset** (full-1651 re-measure pending) |
-| reading_order Edit_dist (ALL_page_avg) | full 1651 | **0.326** | ↓ | Down from 0.451 (R1/R2/R3 + locality improvements) |
+| Operating point | text Edit ↓ | Formula CDM ↑ | Table TEDS ↑ | Read-order Edit ↓ | **Composite** |
+|---|---:|---:|---:|---:|---:|
+| **Hybrid** — local text + PaddleOCR-VL tables & formulas (`TURBO_ROUTING_CONFIG`) | **0.044** | **0.924** | **0.907** | **0.130** | **92.9** |
+| **Fully local** — SLANet-Plus tables + PP-FormulaNet plus-S/plus-M ladder (`FORMULA_BACKEND=auto`) | 0.073 | 0.767 | 0.766 | 0.227 | **82.0** |
 
-Source JSON: `omnidocbench/result/md_quick_match_metric_result.json`
-(regenerated 2026-05-17 after the model integration). 1651/1651 pages
-evaluated, 0 timeouts, 0 exceptions.
+Source runs: `omnidocbench/result/md_full_1651_v16_paddlevl_quick_match_*`
+(hybrid) and `omnidocbench/result/md_medium_auto_0806_quick_match_*` (local,
+re-measured 2026-08-06 with the fixed in-process formula stage). The hybrid
+needs the vLLM sidecar ([guide](../guides/vl-separate-gpu.md)); the local
+point is fully self-contained.
 
-### Current formula state (125-doc subset)
+At 92.9 the hybrid sits above Marker (78.4) and Mistral OCR (85.7) and inside
+the specialised-VLM band (93–96) on the leaderboard excerpt below. The local
+point trades ~11 composite points for ~4× the throughput and zero external
+dependencies.
 
-Formula recognition is **working**: the in-process PP-FormulaNet-S decoder (FAST graph, ORT-CUDA-13)
-scores **CDM 0.805** on the 125-doc table/formula-heavy stratified subset (`LAYOUT_MERGE_MODE=all`
-default; `LAYOUT_MERGE_MODE=outer` gives CDM 0.8108). On that same subset the local pipeline scores
-text_block edit ~0.144, table TEDS 0.773, table TEDS_structure_only 0.876, formula edit 0.306, and
-reading_order ~0.333, at ~20–24 img/s. Those are the **125-doc subset** — do not compare them cell-for-cell
-with the full-1651 numbers above; the full-1651 set has not yet been re-scored with the fixed formula
-stage. Per-pipeline detail (local / hybrid / VL) is in
-[Resources, speed & accuracy](../resources_speed_accuracy.md).
+## Speed × accuracy — every configuration, measured
 
-## Round-by-round trajectory
+Throughput: the same 100 OmniDocBench pages, full structured requests
+(`?layout=1&tables=1&formulas=1`), medium tier, one pipeline replica, single
+client, VL co-located on the same RTX 5090 at 0.5 GPU-memory utilization
+(2026-08-07). Accuracy columns: full-set runs where they exist, per-crop
+projections (same crops, VL's own per-sample scores) where marked.
 
-Three labelled snapshots over four days, all on the same 1651-page set and
-the same eval config.
+| Formula engine | Table engine | img/s | CDM ↑ | TEDS ↑ | Composite |
+|---|---|---:|---:|---:|---:|
+| plus-S only | SLANet-Plus | **10.00** | ~0.74 | 0.766 | ~81 |
+| **`auto` ladder** (plus-S, plus-M on CJK) | SLANet-Plus | **9.09** | 0.767 | 0.766 | **82.0** |
+| plus-M everywhere | SLANet-Plus | 2.44 | ~0.77 | 0.766 | ~82 |
+| **PaddleOCR-VL formulas only** | SLANet-Plus | **6.67** | 0.923 † | 0.766 | **≈ 87** † |
+| PaddleOCR-VL both | PaddleOCR-VL | 2.50 | 0.924 | 0.907 | **92.9** |
 
-| Run | Date | text_block ↓ | table TEDS ↑ | formula CDM ↑ | RO ↓ | **Composite** |
-|---|---|---:|---:|---:|---:|---:|
-| baseline (v1) | 2026-05-14 | 0.5087 | 0.0274 | 0.4494 | 0.5190 | 32.27 |
-| optim (R1+R2+R3) | 2026-05-15 | 0.5002 | 0.0274 | 0.4465 | 0.4513 | 32.46 |
-| **Model integration** | **2026-05-17** | **0.160** | **0.568** | 0.063 *(bug, since fixed)* | **0.326** | **≈ 49.0** |
+† projected from the VL run's per-sample CDM on the same crops; not yet a
+full-set scored run.
 
-(All rows are the **full 1651-page** set.) Net delta vs baseline: **+16.7 composite points**
-(32.27 → 49.0). The forensic prediction in internal engineering notes was +25 from
-tables and +10 from CJK rec; realized gain matches the table line (TEDS
-0.03 → 0.57) and the CJK line (text 0.51 → 0.16). The third line (formulas
-+10) was offset at the time by an integration bug in the formula stage; that bug is **now fixed** (the
-in-process PP-FormulaNet-S decoder scores CDM 0.805 on the 125-doc subset — see §4), so the full-1651
-composite above understates the current pipeline and is pending a re-measure.
+Two conclusions fall straight out:
 
-Baseline (May 14) numbers are sourced from internal engineering notes
-§1 because the on-disk `md_quick_match_metric_result.json` was overwritten
-by the integration-day regen. The May 15 optim numbers come from
-`omnidocbench/result/md_optim_quick_match_metric_result.json` (still on
-disk).
+- **`plus-M` everywhere is dominated** — it costs the same as the full VL
+  hybrid (2.44 vs 2.50 img/s) for 11 fewer points. Its right place is inside
+  the `auto` ladder, where escalating only CJK-context crops makes it nearly
+  free (9.09 vs 10.00 img/s).
+- **VL-formulas-only is the cheapest large win**: one routing-config change
+  buys two-thirds of the hybrid's accuracy gap at 2.7× its speed.
 
-## Per-language text_block Edit_dist (May 17)
+## Where the local gap lives (per-crop)
 
-CJK collapse: simplified_chinese dropped from 0.935 → 0.234, traditional
-from 0.931 → 0.486. en_ch_mixed dropped from 0.428 → 0.177. English held
-flat at the leaderboard-competitive 0.079.
+Joining the two runs' per-sample scores (1,897 shared formula crops, 665
+shared tables) locates the losses precisely:
 
-| Language | May 15 optim | May 17 integration | Δ |
-|---|---:|---:|---:|
-| **english** | 0.078 | **0.079** | +0.001 (flat) |
-| en_ch_mixed | 0.428 | **0.177** | **−0.251** |
-| other (latin / multi-script) | 0.501 | 0.503 | +0.002 (flat) |
-| simplified_chinese | 0.935 | **0.234** | **−0.701** |
-| traditional_chinese | 0.931 | **0.486** | **−0.445** |
+- **Formulas: a failure tail, not broad weakness.** 68.7% of crops score
+  CDM ≥ 0.9 locally; the mean is dragged by the bottom 16.2% under 0.3 —
+  including 8.8% at exactly zero (garbled/collapsed decodes). VL beats local
+  on those; it is worse than local on only 3.8% of crops.
+- **Tables: spread weakness.** Only 43.5% of tables reach TEDS 0.9.
+  Structure itself is decent (TEDS_structure_only 0.855); most of the loss
+  is cell-text quality.
+- **Text (0.073 vs 0.044) is mostly matcher collateral**: the harness aligns
+  predicted blocks to ground truth globally, so weaker table/formula regions
+  drag neighbouring text assignments with them. The recognizer stack is the
+  same in both rows.
 
-The CJK rec swap (multilingual head) is the single largest text-side win
-the project has logged. Simplified Chinese went from "effectively
-unrecognised" (0.93) to "comparable to a noisy English page" (0.23).
-Traditional Chinese is mid-pack — the rec head's traditional-glyph
-coverage is partial.
+**Selective escalation — the measured case for it.** Because the formula loss
+is a tail, escalating only the crops the local model flubs recovers almost
+everything: sending the worst 20.5% of formulas (local CDM < 0.5) to the VL
+yields CDM 0.911 of the VL's 0.923, and adding the worst ~15% of tables lifts
+TEDS to 0.837 — a projected **≈ 89 composite at ~6.5–8.5 img/s**, near-hybrid
+accuracy at roughly 3× hybrid speed. These thresholds use true scores
+(an oracle); a production trigger would flag the same tail with
+collapse/repetition detection (which catches the zero-CDM class), decoder
+confidence, and table cell-count sanity — the same escalate-per-crop pattern
+the `auto` ladder already implements for CJK, with a quality trigger and a VL
+rung. Filed as the concrete next accuracy lever.
 
-## Per-layout reading_order Edit_dist (May 17)
+## History
 
-Now with `reading_order[]` exposed on the server JSON, the column splitter
-landed, and tables/figures resolve in-place rather than free-floating.
+| Run | Date | Config | text ↓ | CDM ↑ | TEDS ↑ | RO ↓ | Composite |
+|---|---|---|---:|---:|---:|---:|---:|
+| baseline | 2026-05-14 | pre-integration | 0.509 | 0.449 | 0.027 | 0.519 | 32.3 |
+| model integration | 2026-05-17 | v6 text + first table wiring | 0.160 | 0.063 ‡ | 0.568 | 0.326 | ≈ 49 ‡ |
+| `full_best` | 2026-06-16 | v6 text + VL structure | 0.093 | 0.896 | 0.874 | 0.226 | 89.2 |
+| `v16_paddlevl` | 2026-07 | improved text + VL structure | 0.044 | 0.924 | 0.907 | 0.130 | **92.9** |
+| `medium_auto_0806` | 2026-08-06 | fully local (slanext + plus-S/plus-M) | 0.073 | 0.767 | 0.766 | 0.227 | 82.0 |
 
-| Layout | May 15 optim | May 17 integration | Δ |
-|---|---:|---:|---:|
-| layout: three_column | 0.2418 | **0.2160** | −0.0258 |
-| layout: double_column | 0.3940 | **0.3143** | −0.0797 |
-| layout: 1andmore_column | 0.3798 | **0.3164** | −0.0634 |
-| layout: other_layout | 0.5529 | 0.4526 | −0.1003 |
-| layout: single_column | 0.4460 | **0.2834** | **−0.1626** |
-| data_source: newspaper | 0.5986 | **0.5345** | −0.0641 |
+‡ The May formula 0.063 was an integration bug (output mangled before
+serialisation), fixed in June — the in-process formula stage now scores
+CDM 0.767 full-set / 0.805 on the EN-heavy 125-doc subset. The ≈ 49
+composite embeds that bug and is of historical interest only.
 
-Single-column is the biggest swing — the previous regression (May 15 went
-+0.011 vs baseline on single-column) is gone now that resolved tables and
-figures stop fragmenting the linear sort. three_column is at 0.216, which
-is **inside the leaderboard range** (Youtu-Parsing leads at 0.116, most
-specialised VLMs sit 0.12–0.17).
-
-## 4. Where the gap from "top of board" comes from now
-
-All three forensic line items moved as predicted. The formula stage that
-initially regressed has **since been fixed**. Updated gap attribution
-(full-1651 table cells; formula state from the 125-doc subset):
-
-| Rank | Status | Mechanism | Realistic next step | Composite Δ left |
-|---|---|---|---|---:|
-| 1 | **Realized (+25 pts)** | table TEDS 0.027 → 0.568 (full 1651). Pipeline emits real HTML from PP-StructureV3. TEDS_structure_only 0.711 says structure is in good shape; the rest is cell-text quality. | Tighten cell-text matching, TEDS → 0.80 | +6 |
-| 2 | **Realized (+10 pts)** | CJK head swap landed (full 1651). simplified_chinese 0.935 → 0.234; en_ch_mixed 0.428 → 0.177. | Push traditional CJK (currently 0.486) to parity | +3 |
-| 3 | **Resolved** | The earlier integration bug dropped display_formula CDM to 0.063 on the full 1651 (output mangled before serialisation). It is now fixed: the in-process PP-FormulaNet-S decoder emits literal LaTeX and scores **CDM 0.805 on the 125-doc subset** — above the forensic 0.75 target. | Re-measure the full 1651-page set with the fixed stage to bank the predicted composite gain | +20 (pending re-measure) |
-
-Tally once the remaining repairs land and the formula fix is re-scored on the full set: composite climbs
-from ~49 toward ~78 (close to the Marker tier). Each gap is plumbing-complete; the work is quality and
-re-measurement, not integration.
+The big text-side win in the May integration was the CJK recognizer swap
+(simplified-Chinese page edit 0.935 → 0.234); the structure wins arrived with
+VL routing (June/July) and the in-process local models (June–August).
 
 ## Leaderboard context (OmniDocBench v1.6_full README, 2026-04-30)
-
-Our row moves into the pipeline-tool band — between Marker (78.44) and the
-VLM tier above 85. With the formula fix now landed (CDM 0.805 on the 125-doc
-subset) and a full-1651 re-measure pending, the path to ~70 is visible:
-tables already match Marker's TEDS class (0.568 vs 0.658), English text
-already beats Marker (0.079 vs 0.157), reading order is within striking
-distance (0.326 vs 0.243). All "ours" cells below are the **full 1651-page** run.
 
 | Methods | Class | Overall ↑ | Text Edit ↓ | Formula CDM ↑ | Table TEDS ↑ | Read Order Edit ↓ |
 |---|---|---:|---:|---:|---:|---:|
 | MinerU2.5-Pro | Specialised VLM (1.2B) | **95.75** | 0.036 | **97.45** | **93.42** | 0.120 |
 | GLM-OCR | Specialised VLM (0.9B) | 95.22 | 0.044 | 97.18 | 92.83 | 0.133 |
 | PaddleOCR-VL-1.5 | Specialised VLM (0.9B) | 94.93 | 0.038 | 96.89 | 91.67 | 0.130 |
-| PaddleOCR-VL | Specialised VLM (0.9B) | 94.18 | 0.040 | 95.91 | 90.65 | 0.135 |
 | Youtu-Parsing | Specialised VLM (2.5B) | 93.74 | 0.044 | 93.63 | 92.02 | **0.116** |
-| Ovis2.6-30B-A3B | General VLM (30B) | 93.70 | **0.035** | 95.17 | 89.44 | 0.135 |
+| **TurboOCR hybrid (ours)** | Pipeline + VL crops | **92.9** | 0.044 | 92.4 | 90.7 | 0.130 |
 | Gemini 3 Pro | General VLM | 92.91 | 0.064 | 95.99 | 89.15 | 0.165 |
 | GPT-5.2 | General VLM | 86.59 | 0.114 | 88.21 | 82.95 | 0.193 |
 | Mistral OCR | Specialised VLM | 85.66 | 0.097 | 89.91 | 76.78 | 0.171 |
+| **TurboOCR local (ours)** | Pipeline tool | **82.0** | 0.073 | 76.7 | 76.6 | 0.227 |
 | Marker | Pipeline tool | 78.44 | 0.157 | 85.24 | 65.77 | 0.243 |
-| **TurboOCR (ours, May 17, full 1651)** | **Pipeline tool** | **≈ 49.0** ‡ | **0.160** | re-measure pending § | **0.568** | **0.326** |
-| ours, English-only subset (full 1651) | Pipeline tool | n/a | **0.079** | — | — | — |
 
-‡ Pre formula-fix floor — embeds the since-fixed formula 0.063; pending re-measure with the fixed stage.
-§ Formula stage is fixed (in-process PP-FormulaNet-S); it scores **CDM 0.805 on the 125-doc subset**, but
-the full-1651 set has not yet been re-scored, so this cell is left as a placeholder rather than dropping a
-subset number into a full-set column.
+The hybrid row uses the leaderboard VLMs' own model class for the crops it
+routes out, so landing beside them is expected — the point is that the
+routing keeps the C++ pipeline's speed for everything else. The local row is
+the strongest pipeline-tool (non-VLM) result we know of on this set.
 
-We sit ~29 pts under Marker on the un-re-measured full-1651 row. Roughly +20 of that was the formula
-CDM bug — **now fixed** (CDM 0.805 on the 125-doc subset); banking it on the full set should land us in
-the ~70 band. The remaining ~10 pts to Marker is split between further CJK push (traditional 0.486 → ~0.20)
-and continued reading-order work.
-
-## 5. Bench history (composite, three labelled snapshots)
-
-```mermaid
-xychart-beta
-    title "OmniDocBench composite — round-by-round"
-    x-axis ["v1 baseline (May 14)", "optim R1+R2+R3 (May 15)", "model integration (May 17)"]
-    y-axis "Composite Overall" 0 --> 60
-    bar [32.27, 32.46, 49.0]
-    line [32.27, 32.46, 49.0]
-```
-
-The optim step (+0.19) and the integration step (+16.5) tell the order of
-operations: pure-code wins were small because the floor was held down by
-upstream model availability; once the tables and CJK gates opened, the
-composite jumped accordingly. The intermediate result series in
-`omnidocbench/result/` (v2…v30) records the model-swap and
-re-export iterations that funnelled into the final run — see
-internal engineering notes for the per-attempt diary.
-
-## 6. Reproduce
+## Reproduce
 
 ```bash
-# 1. Start the OCR server with table + formula enabled (else ?tables=1&formulas=1
-#    below returns 400 ...BACKEND_DISABLED). Backend vars auto-resolve the baked
-#    weights — no model paths needed.
+# 1. Server — fully local best config (hybrid: add the routing config from
+#    docs/guides/vl-separate-gpu.md and drop FORMULA_BACKEND/TABLE_BACKEND).
+#    PIPELINE_POOL_SIZE=1: medium + both formula engines are ~23 GB resident;
+#    more replicas OOM a 32 GB card mid-run.
 LD_LIBRARY_PATH="$HOME/TensorRT-10.15.1.29/lib:$LD_LIBRARY_PATH" \
-  TABLE_BACKEND=slanext FORMULA_BACKEND=ppformulanet_s \
-  ./build/turboocr-server --http-port 8000 --log-level warn &
+  OCR_MODEL=medium TABLE_BACKEND=slanext FORMULA_BACKEND=auto \
+  PIPELINE_POOL_SIZE=1 \
+  ./build/turboocr-server --log-level warn &
 
-# 2. Render predictions for all 1651 pages (~18 s wall on RTX 5090)
-timeout 600 python tools/omnidoc_run.py \
-  --in /path/to/omnidocbench/data/v1.7 \
-  --out /tmp/omnidoc_predictions/json \
-  --url 'http://127.0.0.1:8000/ocr/raw?layout=1&reading_order=1&tables=1&formulas=1'
+# 2. Render predictions for all 1651 pages
+python tools/bench/omnidoc_run.py \
+  --server http://127.0.0.1:8080 --concurrency 2 \
+  --images-dir /path/to/omnidocbench/data/images \
+  --out-dir /tmp/omnidoc_predictions/json
 
-# 3. Convert raw JSON → markdown (uses reading_order[], tables[], formulas[])
-timeout 600 python tools/omnidoc_to_md.py \
-  --in /tmp/omnidoc_predictions/json \
-  --out /tmp/omnidoc_predictions/md
+# 3. Convert raw JSON -> markdown (uses reading_order[], tables[], formulas[])
+python tools/bench/omnidoc_to_md.py \
+  --in-dir /tmp/omnidoc_predictions/json \
+  --out-dir /tmp/omnidoc_predictions/md_myrun
 
-# 4. Run the OmniDocBench scorer
+# 4. Score. The result files are named after the predictions dir's basename,
+#    so give it a unique name or you overwrite the previous run's results.
+#    Config template: copy configs/end2end_paddle_optim.yaml and point
+#    dataset.prediction.data_path at your md dir.
 cd /path/to/omnidocbench && \
-  timeout 1800 python -m src.runtime.evaluator \
-    --config configs/end2end_paddle_optim.yaml \
-    --predictions /tmp/omnidoc_predictions/md \
-    --tag md_quick_match
+  .venv/bin/python pdf_validation.py --config /path/to/your_run.yaml
 ```
 
-Results land in `omnidocbench/result/md_quick_match_*`:
+Results land in `omnidocbench/result/<mddir>_quick_match_*`: the main
+`*_metric_result.json` plus per-page/per-sample breakdowns for every metric
+and the run/environment reports.
 
-- `*_metric_result.json` — main metric table (parsed for §1, §3, §4 above)
-- `*_text_block_result.json` / `_per_page_edit.json`
-- `*_display_formula_result.json` / `_per_page_edit.json` / `_per_sample_CDM.json`
-- `*_table_result.json` / `_per_page_edit.json` / `_per_table_TEDS.json`
-- `*_reading_order_result.json` / `_per_page_edit.json`
-- `*_run_summary.json` — timings, per-stage worker counts, fallback counts
-- `*_runtime_environment.{json,log}`, `*_stage_execution.{json,log}`
+## Net read
 
-For the recurring 3-hour autonomous latency sweep that produced the
-history on the [latency page](latency.md):
-
-```bash
-timeout 11000 bash scripts/bench_cua_loop.sh
-```
-
-## 7. Net read
-
-The model integration realized both forensic-predicted wins on text and
-tables (+10 and +25 composite pts respectively), landing the full-1651 composite
-at ~49. The formula CDM regression that depressed that run is **now fixed**: the in-process
-PP-FormulaNet-S decoder emits literal LaTeX and scores **CDM 0.805 on the 125-doc table/formula
-subset** (above the 0.75 forensic target). The single open item is to **re-measure the full 1651-page
-set** with the fixed formula stage — worth ~+20 composite pts on that run — which should put the pipeline
-in the ~70 band, comfortably above Marker and within sight of the specialised-VLM tier. See the
-[formula page](../models/formula.md) for the decoder details.
+The pipeline's best accuracy (92.9) comes from the hybrid: keep detection,
+recognition, layout and reading order local, route the table and formula
+crops to PaddleOCR-VL. The best self-contained accuracy is 82.0 with the
+`auto` formula ladder — and the measured per-crop analysis says the gap
+between them is mostly a detectable failure tail, which is why selective
+escalation (local first, VL only for flagged crops) is the next lever:
+projected ≈ 89 at ~3× hybrid speed. plus-M's role is inside the ladder, never
+as the sole engine.
 
 !!! info "See also"
+    - [Speed vs accuracy](speed-vs-accuracy.md) — dataset, metrics, and the local/hybrid/VL deep dive.
+    - [PaddleOCR-VL on a separate GPU](../guides/vl-separate-gpu.md) — the hybrid's routing config.
+    - [Formula](../models/formula.md) · [Table](../models/table.md) — the local structure models.
     - [Latency](latency.md) — the speed half of the benchmark story.
-    - [Formula](../models/formula.md) — the in-process PP-FormulaNet-S decoder behind the now-fixed CDM (0.805 on the 125-doc subset).
-    - [Table](../models/table.md) — where the +25 composite-point swing landed.
-    - [Architecture overview](../architecture/overview.md) — design context for the pipeline being measured.

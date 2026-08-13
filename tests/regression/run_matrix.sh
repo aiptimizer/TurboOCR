@@ -74,7 +74,7 @@ else
       tail -n 50 /tmp/run_matrix_server.log >&2 || true
       exit 1
     fi
-  elif command -v docker >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/docker/docker-compose.yml" ]]; then
+  elif command -v docker >/dev/null 2>&1 && [[ -f "${REPO_ROOT}/docker/compose.yaml" ]]; then
     log "launching docker compose stack"
     (cd "${REPO_ROOT}/docker" && docker compose up -d --scale ocr=1) >&2
     COMPOSE_DOWN=1

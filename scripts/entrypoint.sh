@@ -20,7 +20,7 @@ if [[ -n "${SELECTED_SCRIPT}" ]] && grep -qw "${SELECTED_SCRIPT}" <<<"${RETAINED
   REC_ONNX="/app/models/rec/${SELECTED_SCRIPT}/rec.onnx"
   if [[ ! -f "${REC_ONNX}" ]]; then
     echo "[entrypoint] ${SELECTED_SCRIPT} rec bundle missing, fetching…"
-    bash /app/scripts/download_models.sh --lang "${SELECTED_SCRIPT}"
+    bash /app/scripts/models/fetch/download_models.sh --lang "${SELECTED_SCRIPT}"
     # chown only when we own uid 0 — the Dockerfile installs the ocr user
     # and today the base image runs as root, but this stays correct if that
     # ever changes.
@@ -47,15 +47,28 @@ if ! [[ "$MAX_BODY_MB" =~ ^[1-9][0-9]*$ ]] || (( MAX_BODY_MB > 102400 )); then
   exit 1
 fi
 
+# The internal backend port. The C++ server reads PORT (default 8080); nginx's
+# upstream must proxy to the SAME value. Rendering it into the template (below)
+# is what makes PORT actually configurable in the container — before this, the
+# upstream was a hardcoded 8080, so `-e PORT=9000` moved Drogon off 8080 while
+# nginx kept proxying to 8080 and every request 502'd. Default 8080 to match the
+# server. (The PUBLISHED port is nginx's `listen 8000`; remap that with docker
+# -p. This variable is the loopback port behind the proxy.)
+export PORT="${PORT:-8080}"
+if ! [[ "$PORT" =~ ^[1-9][0-9]*$ ]] || (( PORT > 65535 )); then
+  echo "[entrypoint] FATAL: PORT must be a positive integer in [1, 65535] (got: '$PORT')" >&2
+  exit 1
+fi
+
 # ---- Preflight: TRT engine cache must be writable -------------------------
-# Mirrors get_engine_cache_dir() in src/engine/onnx_to_trt.cpp:
+# Mirrors get_engine_cache_dir() in src/backends/nvidia/engine/onnx_to_trt.cpp:
 #   $TRT_ENGINE_CACHE → $HOME/.cache/turbo-ocr → /tmp/turbo-ocr-engines
 # A read-only volume mount here makes the first request crash with no clear
 # signal; fail fast at startup with an actionable message instead.
 if [[ -n "${TRT_ENGINE_CACHE:-}" ]]; then
   TRT_CACHE_DIR="${TRT_ENGINE_CACHE}"
 else
-  # Mirror src/engine/onnx_to_trt.cpp::get_engine_cache_dir(), but
+  # Mirror src/backends/nvidia/engine/onnx_to_trt.cpp::get_engine_cache_dir(), but
   # resolve $HOME the way the BINARY will see it after gosu drops to
   # ocr — the entrypoint itself is running as root with HOME=/root,
   # which would point at a path the binary will never touch and that
@@ -91,7 +104,7 @@ fi
 rm -f "${TRT_CACHE_SENTINEL}"
 
 NGINX_CONF=/tmp/nginx.conf
-envsubst '${MAX_BODY_MB}' < /app/docker/nginx.conf.template > "$NGINX_CONF"
+envsubst '${MAX_BODY_MB} ${PORT}' < /app/docker/config/nginx.conf.template > "$NGINX_CONF"
 
 # Start nginx reverse proxy (absorbs connection storms, keep-alive to Drogon)
 nginx -c "$NGINX_CONF"

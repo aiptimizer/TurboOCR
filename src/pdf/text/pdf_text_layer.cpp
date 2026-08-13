@@ -1,7 +1,7 @@
-#include "turbo_ocr/pdf/pdf_text_layer.h"
+#include "turbo_ocr/pdf/text/pdf_text_layer.h"
 
-#include "turbo_ocr/common/geometry/box.h"
-#include "turbo_ocr/common/log/logger.h"
+#include "turbo_ocr/base/geometry/box.h"
+#include "turbo_ocr/base/log/logger.h"
 
 #include <algorithm>
 #include <climits>
@@ -141,6 +141,17 @@ PdfDocument::PdfDocument(const uint8_t *data, size_t len)
 }
 
 PdfDocument::~PdfDocument() noexcept {
+  // Drain any in-flight accessor BEFORE tearing the impl down: every accessor
+  // locks impl_->mtx (then pdfium_lock()), and destroying a mutex another
+  // thread still holds is UB. The per-document mutex exists precisely so page
+  // workers can share one PdfDocument, so "a reader is still inside" is the
+  // intended use, not a caller bug — the current call sites all join their
+  // workers first, but this class must not rely on every future caller
+  // remembering that. (A NEW accessor starting after this drain is still a
+  // caller lifetime bug, as for any object.)
+  if (impl_) {
+    std::lock_guard<std::mutex> drain(impl_->mtx);
+  }
   std::lock_guard<std::mutex> gl(pdfium_lock());
   // Tear down page handles and document under the global lock so any
   // FPDFText_ClosePage / FPDF_ClosePage calls happen while serialized

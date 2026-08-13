@@ -1,23 +1,73 @@
 ---
+# The check list is chosen from what actually went wrong in this tree, not from
+# a preset. It was previously bugprone + cert + cppcoreguidelines + misc +
+# modernize + performance + readability, all wildcarded — a dozen warnings on a
+# 200-line file, almost all of them brace style and missing direct includes.
+# Nothing ran it, so nobody found that out. Wildcarding every family and then
+# not enabling the tool is the same as having no tool, with extra config.
+#
+# Each family below has a corresponding incident in this repo:
+#
+#   bugprone-*    the seam defects — a fabricated return value nobody read, an
+#                 empty result standing in for a contract refusal, a two-phase
+#                 device API used out of order
+#   performance-* a per-request cudaMalloc/cudaFree pair that serialized the
+#                 whole device, and a host decode taken inside a pipeline lease
+#   readability-function-size   five HTTP handlers of 135-323 lines
+#   misc-definitions-in-headers / unused-using-decls   dead code that survived
+#                 because nothing looks: a 155-line header included by nobody,
+#                 a method defined with no caller costing ~14% throughput
+#
+# Left OFF deliberately: modernize-* (churn across 40k lines for no defect this
+# codebase has had), cppcoreguidelines-* and readability-* wholesale (brace and
+# magic-number noise that buries the findings above), and identifier-length —
+# the geometry and kernel code is full of legitimate x/y/w/h/n names, and
+# flagging them teaches people to ignore the tool.
+#
+# performance-enum-size is off for the same reason: it fires on every enum in
+# every header reached from a TU, asking for a uint8_t base type. Those enums
+# live in interfaces, are never stored in bulk, and their size is not a cost
+# this system pays — it was the loudest check by a wide margin.
+#
+# (NOTE: no '#' comments inside the Checks block below. It is a YAML block
+# scalar, so a '#' line becomes a literal check name and silently invalidates
+# the list — which is exactly what happened on the first attempt here.)
+#
+# Short enough that a clean run means something.
 Checks: >
   -*,
   bugprone-*,
   -bugprone-easily-swappable-parameters,
-  cert-*,
-  cppcoreguidelines-*,
-  -cppcoreguidelines-avoid-magic-numbers,
-  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
-  -cppcoreguidelines-pro-type-reinterpret-cast,
-  misc-*,
-  modernize-*,
-  -modernize-use-trailing-return-type,
+  -bugprone-narrowing-conversions,
   performance-*,
-  readability-*,
-  -readability-magic-numbers,
-  -readability-identifier-length
+  -performance-avoid-endl,
+  -performance-enum-size,
+  misc-definitions-in-headers,
+  misc-misplaced-const,
+  misc-redundant-expression,
+  misc-unused-alias-decls,
+  misc-unused-using-decls,
+  readability-function-size,
+  readability-misleading-indentation,
+  readability-redundant-control-flow,
+  readability-simplify-boolean-expr
 
-WarningsAsErrors: ''
+CheckOptions:
+  # MATCHES tools/checks/function_size.py. Two gates measuring the same property
+  # with different limits is worse than either alone — a function passes one and
+  # fails the other, and whichever complains first gets disabled.
+  - key: readability-function-size.LineThreshold
+    value: '180'
+  - key: readability-function-size.NestingThreshold
+    value: '6'
+  - key: readability-function-size.ParameterThreshold
+    value: '12'
 
 HeaderFilterRegex: 'include/turbo_ocr/.*'
+
+# Warnings are the output; the CI step decides what fails. Turning everything
+# into an error on first adoption makes the job un-mergeable on day one, which
+# is how a tool gets switched off and never switched back on.
+WarningsAsErrors: ''
 
 FormatStyle: file

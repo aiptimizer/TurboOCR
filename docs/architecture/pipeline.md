@@ -1,13 +1,23 @@
 # Pipeline
 
-`OcrPipeline::run_with_layout()` (`src/pipeline/ocr_pipeline.cpp:605`)
-is the single entry point that all production callers — HTTP routes,
-gRPC handlers, PDF mode — fan into. This page walks it stage by stage.
+`UnifiedOcrPipeline::run_with_layout()`
+(`src/pipeline/unified/unified_ocr_pipeline.cpp:280`) is the single entry
+point that all production callers — HTTP routes, gRPC handlers, PDF mode —
+fan into. This page walks it stage by stage.
 
-The `want_layout=false` overload `run()` (`ocr_pipeline.cpp:600`) is a
-thin shim that calls `run_with_layout(img, stream).results` — the only
-practical difference is which short-circuits fire. See
+The overload `run()` (`unified_ocr_pipeline.cpp:277`) is a thin shim that
+returns `run_with_layout(img).results` — the only practical difference is
+which short-circuits fire. See
 [the second diagram](#text-only-path) at the bottom for that path.
+
+!!! note "Historic anchors below"
+    The per-stage sections that follow were written against the pre-merge
+    GPU pipeline (`ocr_pipeline.cpp`, members like `img_bufs_` /
+    `rec_event_`), retired in the 2026-07 unified merge. The STAGE ORDER
+    and the reasoning still describe what the unified pipeline does; the
+    device choreography now lives behind the `DeviceQueue` seam, with the
+    NVIDIA specifics in `src/backends/nvidia/`. Treat file:line anchors in
+    those sections as historic.
 
 ## `run_with_layout` — the full graph
 

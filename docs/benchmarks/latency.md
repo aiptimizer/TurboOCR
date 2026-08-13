@@ -133,10 +133,10 @@ LD_LIBRARY_PATH="$HOME/TensorRT-10.15.1.29/lib:$LD_LIBRARY_PATH" \
   ./build/turboocr-server --http-port 8000 --log-level warn &
 
 # Single sweep (~78 s wall)
-timeout 120 bash scripts/bench_cua_loop.sh
+timeout 120 bash scripts/bench/bench_cua_loop.sh
 
 # 3-hour autonomous loop (8–10 sweeps)
-timeout 11000 bash scripts/bench_cua_loop.sh --loop --window 10800
+timeout 11000 bash scripts/bench/bench_cua_loop.sh --loop --window 10800
 ```
 
 Output lands in `/tmp/cua_bench/<ts>.json`; `latest.json` is a symlink to

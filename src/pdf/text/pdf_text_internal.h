@@ -14,8 +14,8 @@
 #include <fpdf_text.h>
 #include <fpdfview.h>
 
-#include "turbo_ocr/common/log/logger.h"
-#include "turbo_ocr/pdf/pdf_text_layer.h"
+#include "turbo_ocr/base/log/logger.h"
+#include "turbo_ocr/pdf/text/pdf_text_layer.h"
 
 namespace turbo_ocr::pdf {
 
@@ -45,11 +45,16 @@ inline void strip_trailing_ws(std::string &s) {
 struct PageHandle {
   FPDF_PAGE     page     = nullptr;
   FPDF_TEXTPAGE textpage = nullptr;
-  // PRE-rotation page extents (MediaBox width/height as PDFium reports them).
+  // NAMING IS HISTORIC AND INVERTED — do not trust the prefixes, trust this
+  // comment (verified against the vendored fpdfview.h:713-748):
+  // FPDF_GetPageWidthF/HeightF report POST-/Rotate extents, so `pre_*_pt`
+  // actually holds the VISUAL (rotated) page size — what PdfRenderer
+  // rasterizes to — and `visual_*_pt` (the 90/270 swap below) reconstructs
+  // the MediaBox (PRE-rotation) extents the text-space transforms need.
+  // Every consumer was written against these CONTENTS and is consistent;
+  // renaming the fields is a mechanical follow-up, not a behavior change.
   float pre_w_pt  = 0.0f;
   float pre_h_pt  = 0.0f;
-  // VISUAL extents after applying /Rotate — these are what PdfRenderer
-  // rasterizes to and what the rest of the pipeline expects to see.
   float visual_w_pt = 0.0f;
   float visual_h_pt = 0.0f;
   int   rotation_deg = 0; // 0 / 90 / 180 / 270 clockwise

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fast static checks on STAGED files only. Budget: < 20 s total (hard-capped).
 # Every check exists because the class of defect it catches has actually
-# occurred in this repo; see docs/dev/pre_commit.md for the rationale and the
+# occurred in this repo; see docs/contributing/pre-commit.md for the rationale and the
 # escape hatch (git commit --no-verify) for intentional exceptions.
 set -u
 

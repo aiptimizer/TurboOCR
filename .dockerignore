@@ -23,7 +23,7 @@ tests/integration/
 tests/regression/
 tests/fixtures/
 
-# Local artifacts never COPYed by docker/Dockerfile.{gpu,cpu} (models are fetched
+# Local artifacts never COPYed by docker/Dockerfile.{nvidia,cpu} (models are fetched
 # at build time, not copied). Excluding them keeps the build context lean.
 models.bak/
 model.cache
@@ -40,3 +40,5 @@ build-coverage/
 # fetch their own pinned CUDA-13 build, and excluding it keeps docker builds
 # byte-equivalent to a clean clone (plus ~275 MB less context).
 third_party/onnxruntime/
+# macOS PDFium is vendored for native darwin builds; Linux images never load it.
+third_party/pdfium/lib/libpdfium.dylib

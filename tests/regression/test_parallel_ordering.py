@@ -3,7 +3,7 @@
 Verifies that when multiple requests are processed concurrently, each
 response contains the correct results for its input image (no cross-
 contamination between requests). Tests both generated images and real
-test data from tests/test_data/ (PNG, JPEG, PDF).
+test data from tests/fixtures/ (PNG, JPEG, PDF).
 """
 
 import concurrent.futures

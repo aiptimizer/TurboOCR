@@ -57,19 +57,43 @@ def grpc_target(request):
 # Image generation helpers
 # ---------------------------------------------------------------------------
 
+# Scalable TTFs, by platform. macOS ships Helvetica/Arial; Linux distros vary.
+_FONT_PATHS = [
+    # Linux
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/TTF/DejaVuSans.ttf",
+    "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
+    # macOS
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/Library/Fonts/Arial.ttf",
+]
+
+
 def _get_font(size=28):
-    """Get a font, falling back to default if no TTF is available."""
-    font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-    ]
-    for p in font_paths:
+    """A real scalable TTF at `size` px — never the bitmap fallback.
+
+    WHY THIS MATTERS: the list used to be Linux-only and silently fell back to
+    ImageFont.load_default(), which on macOS renders ~8px glyphs REGARDLESS of
+    `size`. Every test drawing text then measured the detector's small-glyph
+    limit instead of whatever it meant to test — e.g. test_box_sorting saw one
+    of its two words dropped and read that as a sort-order bug.
+
+    Failing loudly beats degrading silently: a missing font makes the whole
+    suite meaningless, so it should look like a broken environment, not like a
+    broken detector.
+    """
+    for p in _FONT_PATHS:
         if os.path.exists(p):
             return ImageFont.truetype(p, size)
-    return ImageFont.load_default()
+    raise RuntimeError(
+        "no scalable TTF found for text-rendering tests; tried:\n  "
+        + "\n  ".join(_FONT_PATHS)
+        + "\nInstall DejaVu or Liberation fonts (Linux), or run on a system "
+          "with the stock macOS fonts."
+    )
 
 
 @pytest.fixture(scope="session")

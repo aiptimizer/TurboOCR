@@ -15,7 +15,7 @@ forces an implicit GPU sync that stalls the worker thread and kills the
 overlap with `PaddleRec`.
 
 The header comment on `PaddleLayout`
-([`include/turbo_ocr/layout/paddle_layout.h:14-31`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/paddle_layout.h))
+([`src/backends/nvidia/stages/paddle_layout.h:14-31`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_layout.h))
 spells out the contract:
 
 > Usage is split into two phases so the CPU doesn't have to block in the
@@ -40,21 +40,21 @@ zero wall-clock to the text-only invariant.
 | Dynamic profile | batch 1/1/8 (only batch 1 used in v1) |
 | Outputs | `(-1, 7)` detection tensor `[class_id, score, xmin, ymin, xmax, ymax, read_order]` · `(B,)` count · `(N, 200, 200)` mask (allocated and ignored — TRT requires an address) |
 | Precision | FP16 |
-| Max queries | `kMaxDetections = 300` ([`paddle_layout.h:60`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/paddle_layout.h)) |
-| Score threshold | caller-supplied; default `0.3` ([`paddle_layout.h:55`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/paddle_layout.h)) |
-| Post-decode NMS | same-class IoU `0.6`, cross-class IoU `0.98`, containment-drop ≥ 0.8 ([`paddle_layout.cpp:254-296`](https://github.com/aiptimizer/TurboOCR/blob/main/src/layout/paddle_layout.cpp)) |
-| Large-image filter | drops class 14 ("image") covering >82% of portrait pages, >93% of landscape ([`paddle_layout.cpp:299-307`](https://github.com/aiptimizer/TurboOCR/blob/main/src/layout/paddle_layout.cpp)) |
+| Max queries | `kMaxDetections = 300` ([`paddle_layout.h:60`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_layout.h)) |
+| Score threshold | caller-supplied; default `0.3` ([`paddle_layout.h:55`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_layout.h)) |
+| Post-decode NMS | same-class IoU `0.6`, cross-class IoU `0.98`, containment-drop ≥ 0.8 ([`paddle_layout.cpp:254-296`](https://github.com/aiptimizer/TurboOCR/blob/main/src/models/layout/paddle_layout.cpp)) |
+| Large-image filter | drops class 14 ("image") covering >82% of portrait pages, >93% of landscape ([`paddle_layout.cpp:299-307`](https://github.com/aiptimizer/TurboOCR/blob/main/src/models/layout/paddle_layout.cpp)) |
 
 The unused `(N, 200, 200)` mask tensor still has to own a device buffer
 (`d_out2_`) — TRT requires a valid address for every output. The comment at
-[`paddle_layout.h:83-87`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/paddle_layout.h) calls
+[`paddle_layout.h:83-87`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_layout.h) calls
 this out explicitly.
 
 ## Class taxonomy
 
 `class_id` indexes the 25-class PP-DocLayoutV3 label list, defined as
 `kLayoutLabels` in
-[`layout_types.h:19-27`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/layout_types.h).
+[`layout_types.h:19-27`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/core/layout_types.h).
 Order matches `PP-DocLayoutV3/inference.yml` `label_list`, so the index is the
 model's raw class output:
 
@@ -72,13 +72,40 @@ model's raw class output:
 
 Synthetic regions (an OCR result that landed inside no detected box) get the
 sentinel `class_id = -1` / label `SupplementaryRegion`
-([`layout_types.h:34-36`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/layout_types.h)),
+([`layout_types.h:34-36`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/core/layout_types.h)),
 mirroring PaddleX's fallback so every result still points into the layout array.
+
+## Region hierarchy — `parent_id`
+
+The layout model emits genuine children, not just overlapping duplicates: a
+`figure_title` inside a `chart`/`image`, a `formula_number` inside a
+`display_formula`, a `paragraph_title` inside a `content` block. Every region
+carries the `id` of the region containing it as `parent_id`, so clients get the
+nesting instead of a flat list. The field is omitted for top-level regions.
+
+The parent is the **smallest** region that contains a box (same ≥ 90%-of-area
+rule the merge modes use, `layout_box_inside` — one predicate, so the hierarchy
+and the drop rule cannot disagree), which makes a caption inside a figure inside
+a content block point at the figure. Two guarantees hold in every merge mode:
+
+* **No cycles.** A parent must outrank its child in the total order
+  (area descending, index ascending), so parent links strictly ascend a finite
+  order. Two near-duplicate boxes each ≥ 90% inside the other — which NMS only
+  suppresses at IoU ≥ 0.98 across classes — resolve to "larger is the parent";
+  the larger one gets `parent_id: -1` rather than pointing back down.
+* **No dangling ids.** Under `outer`/`inner` a survivor whose parent was dropped
+  inherits the nearest surviving ancestor, or `-1` if the whole chain went.
+
+Note that whether two regions nest is the model's call, not a threshold: on
+ordinary pages PP-DocLayoutV3 tightly crops the `image` box to the picture and
+emits the caption as a separate region *below* it, and puts `formula_number` in
+the right margin *beside* the equation. Those are disjoint boxes — siblings,
+with no containment to record.
 
 ## Nested-box reconciliation — `LAYOUT_MERGE_MODE`
 
 The shared post-decode cleanup
-([`layout_postfilter.h:38-129`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/layout_postfilter.h))
+([`layout_postfilter.h:38-129`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/models/layout/layout_postfilter.h))
 runs NMS, the oversized-`image` drop, then reconciles nested boxes according to
 the `LAYOUT_MERGE_MODE` env var (default `all`). A box A is "inside" B when
 ≥ 90% of A's area overlaps B.
@@ -114,7 +141,7 @@ the default `all` (or use `inner`) for forms.
 
 `display_formula` (5) and `inline_formula` (15) are never counted as nested
 inside a non-formula box
-([`layout_postfilter.h:30-34`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/layout_postfilter.h)),
+([`layout_postfilter.h:30-34`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/models/layout/layout_postfilter.h)),
 so standalone math is never swallowed by a surrounding text or table region.
 
 ## Latency budget
@@ -122,7 +149,7 @@ so standalone math is never swallowed by a surrounding text or table region.
 Per-page layout cost is **hidden under rec** because `layout_stream_` is
 independent. Total wall-clock is bounded by `max(layout, cls + rec)`; on
 typical pages rec dominates so the `cudaEventSynchronize(d2h_event_)` inside
-`collect()` ([`paddle_layout.cpp:166`](https://github.com/aiptimizer/TurboOCR/blob/main/src/layout/paddle_layout.cpp)) is
+`collect()` ([`paddle_layout.cpp:166`](https://github.com/aiptimizer/TurboOCR/blob/main/src/models/layout/paddle_layout.cpp)) is
 a no-op. The bench diary's text-only 6–7 ms p50 figure includes layout runs.
 
 ## C++ surface
@@ -156,7 +183,7 @@ classDiagram
 
 Input/output tensor names are discovered from the engine's binding metadata at
 load time because `paddle2onnx` does not guarantee declaration order
-([`paddle_layout.cpp:19-68`](https://github.com/aiptimizer/TurboOCR/blob/main/src/layout/paddle_layout.cpp)). The `(N, 7)`
+([`paddle_layout.cpp:19-68`](https://github.com/aiptimizer/TurboOCR/blob/main/src/models/layout/paddle_layout.cpp)). The `(N, 7)`
 detection tensor is identified by rank; the `(B,)` count tensor and `(N, 200,
 200)` mask are matched by shape.
 
@@ -195,14 +222,14 @@ Each row's column 6 (`read_order`) is the model's own reading-order index.
 set, `turbo_ocr::layout::assign_reading_order_for_results` re-derives an order
 over the post-NMS regions plus synthetic XY-cut entries for results that did
 not land inside any layout box
-([`ocr_pipeline.cpp:730-734`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/ocr_pipeline.cpp)).
+([`ocr_pipeline.cpp:730-734`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/unified/unified_ocr_pipeline.cpp)).
 
 ### Strata
 
 Before XY-cut runs, classes are partitioned into three strata so page furniture
 lands in the right slot regardless of where the detector placed it. The
 membership is `reading_priority_bucket` in
-[`layout_types.h:66-85`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/layout_types.h):
+[`layout_types.h:66-85`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/core/layout_types.h):
 
 | Stratum | Bucket | Classes |
 | --- | --- | --- |
@@ -215,7 +242,7 @@ bottom of a page — XY-cut places it by geometry. Within each bucket XY-cut
 still applies, so multi-line headers, footers, and reference lists keep their
 natural left-to-right / top-to-bottom order. The class IDs above are pinned
 with `static_assert` against `kLayoutLabels`
-([`layout_types.h:89-96`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/layout/layout_types.h)),
+([`layout_types.h:89-96`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/core/layout_types.h)),
 so a future PaddleX label re-shuffle fails the build instead of silently
 misrouting a class.
 

@@ -20,10 +20,34 @@ package ocr;
 // The legacy grpc::StatusCode + status message remain primary for older
 // clients; "x-error-code" is purely additive. Read it via
 // ClientContext::GetServerTrailingMetadata() after the call completes.
+// TRANSPORT PARITY. Every HTTP inference endpoint has an RPC here, and both
+// transports run the SAME validation core (validation/options_core.h) and the
+// same document builders — gRPC is HTTP over a different wire, not a reduced
+// subset of it. The mapping is:
+//
+//   POST /ocr, /ocr/raw, /ocr/pixels  -> Recognize        (three HTTP ENCODINGS
+//                                                          of one operation;
+//                                                          OCRRequest carries
+//                                                          all three)
+//   POST /ocr/batch                   -> RecognizeBatch
+//   POST /ocr/pdf                     -> RecognizePDF
+//   POST /ocr/markdown                -> RecognizeMarkdown
+//   POST /infer                       -> InferOne
+//   POST /ocr/stream                  -> RecognizeStream  (server-streaming)
+//   GET  /capabilities, /health       -> Health
 service OCRService {
   rpc Recognize (OCRRequest) returns (OCRResponse);
   rpc RecognizeBatch (OCRBatchRequest) returns (OCRBatchResponse);
   rpc RecognizePDF (OCRPDFRequest) returns (OCRPDFResponse);
+  // Faithful Markdown export of one page image (HTTP /ocr/markdown).
+  rpc RecognizeMarkdown (OCRMarkdownRequest) returns (OCRMarkdownResponse);
+  // One crop through one named/inline table|formula backend (HTTP /infer).
+  rpc InferOne (InferOneRequest) returns (InferOneResponse);
+  // NDJSON-equivalent streaming (HTTP /ocr/stream): one message per page AS IT
+  // COMPLETES — out of order — bracketed by meta and end messages. gRPC is the
+  // natural home for this; before now it was the one transport that could not
+  // stream, because the proto declared no streaming method at all.
+  rpc RecognizeStream (OCRStreamRequest) returns (stream OCRStreamEvent);
   rpc Health (HealthRequest) returns (HealthResponse);
 }
 
@@ -58,6 +82,11 @@ message OCRRequest {
   // need recognized text) and is rejected on the CPU build — both mirror the
   // HTTP contract.
   bool layout_only = 16;
+  // NOTE deliberately NO autorotate here: it is a page-level PDF option
+  // (OCRPDFRequest.autorotate), and this RPC OCRs a single already-decoded
+  // image it never rotates. Omitting the field makes the unsupported request
+  // unrepresentable — stronger than accepting-and-rejecting it. Mirrors HTTP,
+  // where ?autorotate=1 on /ocr is an unsupported parameter.
 }
 
 message OCRBatchRequest {
@@ -75,6 +104,7 @@ message OCRBatchRequest {
   // route_formula, applied to every image in the batch.
   string route_table = 8;
   string route_formula = 9;
+  // No autorotate — see the note on OCRRequest.
 }
 
 message BoundingBox {
@@ -132,14 +162,150 @@ message OCRPDFRequest {
   int32 dpi = 3;          // render DPI (default 100)
   bool layout = 4;
   bool as_blocks = 5;     // emit `blocks` aggregate per page (auto-enables layout)
-  bool tables = 6;        // run table recognition (strict opt-in; auto-enables layout)
-  bool formulas = 7;      // run formula recognition (strict opt-in; auto-enables layout)
+  // `optional` = explicit field presence (proto3), wire-compatible with the
+  // previous plain bools (same tags, singular). Presence is what lets
+  // markdown=true distinguish "client said tables=false" from "client said
+  // nothing": without it a client could not DISABLE tables/formulas under
+  // markdown (HTTP ?markdown=1&tables=0 could, so the transports disagreed).
+  optional bool tables = 6;   // run table recognition (strict opt-in; auto-enables layout)
+  optional bool formulas = 7; // run formula recognition (strict opt-in; auto-enables layout)
   bool reading_order = 8; // emit per-page reading_order (auto-enables layout);
                           // previously only available implicitly via as_blocks
+  // De-rotate each page upright with the doc-orientation model before OCR —
+  // same semantics as HTTP /ocr/pdf?autorotate=1. Rejected with
+  // AUTOROTATE_DISABLED when this server cannot rotate. The field name MUST
+  // match the wire name in include/turbo_ocr/capability/capability_table.def
+  // (proto_capability_bridge reads it by reflection).
+  bool autorotate = 9;
+
+  // ---- /ocr/pdf parity (fields 10-18) --------------------------------------
+  // RecognizePDF used to expose 8 of /ocr/pdf's ~25 knobs, so markdown export,
+  // searchable/editable PDF output and form-field proposals were HTTP-only.
+  // These are additive: an old client that sets none of them gets exactly the
+  // previous behaviour.
+
+  // Assemble Markdown per page and return it in OCRPDFResponse.markdown
+  // instead of the per-page envelope (HTTP ?markdown=1).
+  bool markdown = 10;
+  // With markdown: return the per-page JSON envelope rather than one document
+  // (HTTP ?as_pages=1). Requires markdown=true.
+  bool as_pages = 11;
+  // "json" (default) or "pdf". output="pdf" stamps the recognised words back
+  // onto the source document and returns it in OCRPDFResponse.document.
+  string output = 12;
+  // Drop recognised words below this confidence before stamping. Requires
+  // output="pdf" (HTTP ?min_confidence=).
+  float min_confidence = 13;
+  // Propose fillable-field rectangles per page ("Prepare Form", HTTP ?fields=1).
+  bool fields = 14;
+  // With output="pdf": draw the words as real type IN PLACE OF the print rather
+  // than invisibly behind it, so the text can be read and retyped (?editable=1).
+  bool editable = 15;
+  // With output="pdf": re-place each figure/chart/table as its own object so a
+  // viewer can move it, instead of leaving it as pixels (?movable=1).
+  bool movable = 16;
+  // Outline annotation around each figure. Defaults to ON over HTTP, so this is
+  // `optional` — a plain proto3 bool cannot distinguish "unset" from "false"
+  // and every request would silently read as mark_regions=0 (?mark_regions=0).
+  optional bool mark_regions = 17;
+  // Layout-only run: skip recognition and return layout regions (HTTP ?text=0).
+  // Spelled layout_only here for consistency with OCRRequest — `text` is the
+  // one opt-OUT flag and so cannot be a plain proto3 bool either.
+  bool layout_only = 18;
+}
+
+// ---- /ocr/markdown ---------------------------------------------------------
+message OCRMarkdownRequest {
+  bytes image = 1;   // encoded image bytes (PNG/JPEG/WebP/...)
+  // NOTE: no layout/tables/formulas flags, matching HTTP /ocr/markdown. The
+  // endpoint always runs the faithful export — every stage the server actually
+  // LOADED — so per-request flags would imply a control it does not offer.
+  // Assets are always embedded as data: URIs (HTTP rejects embed=0, since
+  // file-ref markdown would reference files the client cannot retrieve).
+}
+
+message OCRMarkdownResponse {
+  string markdown = 1;
+  // Degradation summary, the same string HTTP returns in X-OCR-Degraded. The
+  // markdown body intentionally drops failed regions, so a degraded stage is
+  // INVISIBLE in it — without this a partially-failed page looks clean.
+  string degraded = 2;
+}
+
+// ---- /infer (Tier-B single-crop) -------------------------------------------
+message InferOneRequest {
+  bytes image = 1;             // the crop, encoded
+  string modality = 2;         // "table" or "formula"
+  // A registered backend name from the server's routing table. Inline specs
+  // (HTTP accepts a JSON object here) are deliberately NOT expressible over
+  // gRPC: the inline path exists for operator-supplied OpenAI endpoints and is
+  // an SSRF surface gated by TURBO_ALLOW_ADHOC_BACKENDS. Making it
+  // unrepresentable on this transport is stronger than accepting-then-rejecting.
+  string backend = 3;
+}
+
+message InferOneResponse {
+  string modality = 1;
+  // Exactly one is set, by modality: HTML for "table", LaTeX for "formula".
+  string html = 2;
+  string latex = 3;
+}
+
+// ---- /ocr/stream (server-streaming) ----------------------------------------
+message OCRStreamRequest {
+  // PDF or image bytes — the server content-sniffs (%PDF magic), exactly as the
+  // HTTP endpoint does, so one request shape covers both.
+  bytes data = 1;
+  string mode = 2;        // PDF only: "ocr","geometric","auto","auto_verified"
+  int32 dpi = 3;          // PDF only: render DPI (default 100)
+  bool layout = 4;
+  bool reading_order = 5;
+  bool as_blocks = 6;
+  bool tables = 7;
+  bool formulas = 8;
+  bool autorotate = 9;
+}
+
+// One streamed event. `event` selects which fields are meaningful — the same
+// discriminated shape the NDJSON protocol uses over HTTP, so a client ported
+// between transports reads the same state machine.
+message OCRStreamEvent {
+  // "meta" | "page" | "page_error" | "error" | "end"
+  string event = 1;
+  // meta: "pdf" or "image"; total pages; resolved dpi/mode.
+  string kind = 2;
+  int32 pages = 3;
+  int32 dpi = 4;
+  string mode = 5;
+  // page: 0-based index (pages arrive OUT OF ORDER — this identifies them) and
+  // the page body, byte-identical to an /ocr/pdf pages[] element.
+  int32 page_index = 6;
+  bytes json_response = 7;
+  int32 width = 8;
+  int32 height = 9;
+  // error / page_error: the same x-error-code identifiers listed at the top of
+  // this file. Streamed rather than returned as a status because the RPC has
+  // already begun succeeding by the time a per-page failure is known.
+  string code = 10;
+  // end: totals.
+  int32 failed = 11;
 }
 
 message OCRPDFResponse {
+  // Set unless the request asked for a whole-document form below.
   repeated OCRPageResult pages = 1;
+  // output="pdf": the produced document (searchable, or editable/movable).
+  // `pages` is left empty in this case — the document IS the answer.
+  bytes document = 2;
+  // markdown=true (without as_pages): the assembled Markdown document. With
+  // as_pages=true the per-page JSON envelope lands here instead, matching what
+  // HTTP returns for ?markdown=1&as_pages=1.
+  string markdown = 3;
+  // Degradation summary (HTTP's X-OCR-Degraded). Non-empty means some stage or
+  // some page failed — required for the `document`/`markdown` forms, which
+  // otherwise look complete: a PDF missing its text layer on three pages is
+  // still a byte-valid PDF.
+  string degraded = 4;
 }
 
 message OCRPageResult {

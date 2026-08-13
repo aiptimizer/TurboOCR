@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 300" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" role="img" aria-label="TurboOCR — the fastest GPU document parser. 650+ images per second whole-page OCR, measured on one NVIDIA RTX 5090.">
+  <defs>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2a78d6"/>
+      <stop offset="1" stop-color="#39c6e5"/>
+    </linearGradient>
+    <linearGradient id="trail" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2a78d6" stop-opacity="0"/>
+      <stop offset="0.55" stop-color="#2a78d6" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#39c6e5" stop-opacity="0.95"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2a78d6" stop-opacity="0"/>
+      <stop offset="0.5" stop-color="#39c6e5" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glowBlue" cx="0.78" cy="0.3" r="0.75">
+      <stop offset="0" stop-color="#2a78d6" stop-opacity="0.30"/>
+      <stop offset="0.55" stop-color="#2a78d6" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#2a78d6" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glowViolet" cx="0.12" cy="1.05" r="0.7">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-40%" y="-200%" width="180%" height="500%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <pattern id="dots" width="26" height="26" patternUnits="userSpaceOnUse">
+      <circle cx="1.2" cy="1.2" r="1.2" fill="#1a2634"/>
+    </pattern>
+    <clipPath id="frame"><rect width="1200" height="300" rx="16"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="1200" height="300" fill="#0a0e15"/>
+    <rect width="1200" height="300" fill="url(#dots)" opacity="0.5"/>
+    <rect width="1200" height="300" fill="url(#glowBlue)"/>
+    <rect width="1200" height="300" fill="url(#glowViolet)"/>
+    <!-- top edge light -->
+    <rect x="0" y="0" width="1200" height="2" fill="url(#edge)"/>
+
+    <!-- speed-trail motif: the FUNSD bar chart as motion lines, real proportions
+         (678 / 230 / 86 / 6 img/s), right-anchored so they read as velocity.
+         The 678 bar gets a neon under-glow. -->
+    <g>
+      <rect x="700" y="60" width="440" height="13" rx="6.5" fill="url(#trail)" filter="url(#soft)" opacity="0.8"/>
+      <rect x="700" y="60"  width="440" height="13" rx="6.5" fill="url(#trail)"/>
+      <rect x="991" y="88"  width="149" height="13" rx="6.5" fill="url(#trail)" opacity="0.85"/>
+      <rect x="1084" y="116" width="56" height="13" rx="6.5" fill="url(#trail)" opacity="0.7"/>
+      <rect x="1134" y="144" width="6"  height="13" rx="3"   fill="#39c6e5" opacity="0.55"/>
+    </g>
+    <text x="1140" y="52" text-anchor="end" font-size="12" fill="#5d738c" letter-spacing="0.4">whole-page OCR · img/s</text>
+    <text x="1140" y="174" text-anchor="end" font-size="11.5" fill="#44576d">TurboOCR 678 · next-fastest engine 6</text>
+
+    <!-- wordmark + version chip + tagline -->
+    <text x="58" y="128" font-size="64" font-weight="800" letter-spacing="-1.5" fill="#f4f7fa">Turbo<tspan fill="url(#accent)">OCR</tspan></text>
+    <g>
+      <rect x="418" y="86" width="84" height="26" rx="13" fill="none" stroke="#2a3b52" stroke-width="1.2"/>
+      <text x="460" y="104" text-anchor="middle" font-size="13.5" font-weight="650" fill="#8fd0ec">v4 alpha</text>
+    </g>
+    <text x="60" y="166" font-size="17.5" fill="#b8c4d2">The fastest GPU document parser — OCR · layout · tables · formulas → Markdown</text>
+    <text x="60" y="190" font-size="13" fill="#5d738c">C++ · NVIDIA CUDA/TensorRT · Apple Metal + Neural Engine · Intel OpenVINO · fully local, no VLM</text>
+
+    <!-- hero stats + hardware attribution -->
+    <g>
+      <line x1="60" y1="216" x2="1140" y2="216" stroke="#1c2735" stroke-width="1"/>
+      <text x="60" y="258" font-size="27" font-weight="750" fill="url(#accent)">650+<tspan font-size="12.5" font-weight="400" fill="#7f92a6" dx="7">img/s · FUNSD forms</tspan></text>
+      <text x="400" y="258" font-size="27" font-weight="750" fill="url(#accent)">200+<tspan font-size="12.5" font-weight="400" fill="#7f92a6" dx="7">img/s · OmniDocBench</tspan></text>
+      <text x="736" y="258" font-size="27" font-weight="750" fill="url(#accent)">20<tspan font-size="12.5" font-weight="400" fill="#7f92a6" dx="7">pages/s · full parse</tspan></text>
+      <g>
+        <rect x="962" y="234" width="178" height="32" rx="16" fill="#101826" stroke="#2a3b52" stroke-width="1.2"/>
+        <circle cx="981" cy="250" r="4" fill="url(#accent)"/>
+        <text x="993" y="255" font-size="12.5" font-weight="550" fill="#c4d2e2">tested on one RTX 5090</text>
+      </g>
+    </g>
+  </g>
+</svg>

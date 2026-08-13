@@ -1,6 +1,19 @@
 # CUDA streams
 
-TurboOCR uses **five named CUDA streams plus six CUDA events** to fan computation out and back in. The text-only path uses three of the streams and pays zero cost for the unused two — the constraint that the entire stream graph is engineered around.
+!!! warning "Historic design record"
+    This page describes the **pre-merge GPU pipeline** (`OcrPipeline`,
+    `ocr_pipeline.cpp`), which was retired in the 2026-07 unified
+    multi-backend merge — the named stream/event members and line anchors
+    below no longer exist in the tree. The fan-out/fan-in design itself
+    survives: ordering is now expressed through the device-agnostic
+    `DeviceQueue`/`DeviceEvent` seam
+    (`include/turbo_ocr/backend/device_queue.h`), which the NVIDIA backend
+    maps onto CUDA streams and events
+    (`src/backends/nvidia/queue/cuda_device_queue.h`). The page is kept
+    because it is the only written rationale for WHY the graph is shaped
+    this way.
+
+The design used **five named CUDA streams plus six CUDA events** to fan computation out and back in. The text-only path uses three of the streams and pays zero cost for the unused two — the constraint that the entire stream graph is engineered around.
 
 ## The five streams
 

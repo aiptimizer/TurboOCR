@@ -5,8 +5,12 @@ on:
     branches: ["**"]
     tags: ["v*"]
   pull_request:
+  # Manual trigger, so the CUDA compile gate can be run on demand against a PR
+  # without waiting for the nightly.
+  workflow_dispatch:
   schedule:
-    # Nightly sanitizer run (ASAN/TSAN are too slow for every push).
+    # Nightly: sanitizers (ASAN/TSAN) + the CUDA compile gate. Both are too slow
+    # for every push; the CUDA arm additionally pulls a ~10 GB base image.
     - cron: "0 3 * * *"
 
 concurrency:
@@ -17,7 +21,7 @@ jobs:
   # CPU build + the C++ unit suite. GitHub runners have no GPU, so the GPU build
   # (TRT/CUDA) cannot run here — this gate covers the portable CPU path and every
   # CPU-testable unit. Deps (Drogon from source, ONNX Runtime, PDFium) are
-  # installed by the composite action that mirrors docker/Dockerfile.cpu.
+  # installed by the composite action that mirrors docker/Dockerfile --target cpu.
   build-and-test:
     runs-on: ubuntu-latest
     steps:
@@ -30,7 +34,7 @@ jobs:
       - name: Run unit tests
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
-  # CPU server smoke: boot turboocr-cpu-server and curl the endpoint matrix.
+  # CPU server smoke: boot turboocr-server and curl the endpoint matrix.
   # Requires the model bundle, so it is gated on MODELS_RELEASE_URL being set.
   cpu-smoke:
     runs-on: ubuntu-latest
@@ -42,22 +46,59 @@ jobs:
       - name: Fetch models
         env:
           MODELS_RELEASE_URL: ${{ vars.MODELS_RELEASE_URL }}
-        run: bash scripts/fetch_release_models.sh
+        run: bash scripts/models/fetch/fetch_release_models.sh
       - name: Build CPU server
         run: |
           cmake -S . -B build-cpu -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DNATIVE_ARCH=OFF -DUSE_CPU_ONLY=ON
-          cmake --build build-cpu --target turboocr-cpu-server -j"$(nproc)"
+          cmake --build build-cpu --target turboocr-server -j"$(nproc)"
       - name: Endpoint matrix smoke test
         run: |
           PORT=18080 GRPC_PORT=18051 BIND_HOST=127.0.0.1 OCR_MODEL=tiny \
-            ./build-cpu/turboocr-cpu-server &
+            ./build-cpu/turboocr-server &
           SERVER_PID=$!
           for i in $(seq 1 60); do
             curl -sf http://127.0.0.1:18080/health && break || sleep 1
           done
-          python3 tests/docker_endpoint_matrix.py --base-url http://127.0.0.1:18080
+          python3 tests/e2e/docker_endpoint_matrix.py --base-url http://127.0.0.1:18080
           kill "$SERVER_PID" 2>/dev/null || true
+
+  # THE accuracy gates. Without this job, ctest registers only the unit suite
+  # and backend_probe — every F1 floor, golden diff and conformance check sits
+  # behind -DTURBO_FUNSD_CACHE, which no other configure sets, so an accuracy
+  # regression on any backend shipped green. The FUNSD corpus is rebuilt
+  # reproducibly from the official dataset zip (pinned sha256; the 50 testing
+  # pages, sorted and renamed — the order tests/benchmark/funsd_gt_words.json
+  # is indexed by). Gated on the same models var as cpu-smoke.
+  accuracy-gates:
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: ${{ vars.MODELS_RELEASE_URL != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-cpp-deps
+      - name: Fetch models
+        env:
+          MODELS_RELEASE_URL: ${{ vars.MODELS_RELEASE_URL }}
+        run: bash scripts/models/fetch/fetch_release_models.sh
+      - name: Cache FUNSD corpus
+        uses: actions/cache@v4
+        with:
+          path: funsd_cache
+          key: funsd-cache-c317356-v1   # first 7 of the zip's pinned sha256
+      - name: Fetch FUNSD testing set
+        run: bash scripts/models/fetch/fetch_funsd_cache.sh funsd_cache
+      - name: Configure with accuracy gates
+        run: |
+          cmake -S . -B build-gates -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DNATIVE_ARCH=OFF -DUSE_CPU_ONLY=ON \
+            -DTURBO_FUNSD_CACHE="$PWD/funsd_cache"
+      - name: Build gate binaries
+        run: cmake --build build-gates --target turbo_bench turbo_conformance turbo_golden -j"$(nproc)"
+      - name: Run accuracy gates
+        # funsd_cpu_* on this runner; conformance/golden register too and skip
+        # cleanly (SKIP_RETURN_CODE 77) where they need a second backend.
+        run: ctest --test-dir build-gates -R 'funsd_|backend_conformance|golden_' --output-on-failure --no-tests=error
 
   # Static analysis: cppcheck (dead code + quality). Report-only.
   static-analysis:
@@ -79,14 +120,14 @@ jobs:
         run: |
           cppcheck --enable=all --std=c++20 --max-configs=1 \
             --suppress=missingIncludeSystem --suppress=missingInclude \
-            -i third_party -i src/decode/fast_png_decoder.cpp \
+            -i third_party -i src/image/fast_png_decoder.cpp \
             -I include src include 2>cppcheck.txt || true
           echo "::group::cppcheck summary"; grep -E "\(error\)|unusedFunction" cppcheck.txt || echo "no error-severity / dead-code findings"; echo "::endgroup::"
 
-  # Docker image: build via docker/Dockerfile.cpu using buildx (the single source
+  # Docker image: build via docker/Dockerfile --target cpu using buildx (the single source
   # of truth for the toolchain). Builds linux/amd64 to gate every push/PR; on a
   # version tag it builds the full multi-arch (amd64 + arm64) image and pushes it
-  # to GHCR. The GPU image (TRT/CUDA, docker/Dockerfile.gpu) is published from a
+  # to GHCR. The NVIDIA image (TRT/CUDA, docker/Dockerfile --target nvidia) is published from a
   # maintainer machine — it is too large/slow for the standard runner.
   docker-cpu-image:
     # Heavy (Drogon/ORT/PDFium + compile in-image). Run on PRs to validate the
@@ -112,7 +153,8 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: docker/Dockerfile.cpu
+          file: docker/Dockerfile
+          target: cpu
           platforms: ${{ startsWith(github.ref, 'refs/tags/v') && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           push: ${{ startsWith(github.ref, 'refs/tags/v') }}
           # PR refs (e.g. "20/merge") aren't valid Docker tags; only tag builds
@@ -142,3 +184,182 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=0
           TSAN_OPTIONS: halt_on_error=0
         run: ctest --test-dir build-san --output-on-failure --no-tests=error
+
+  # ---------------------------------------------------------------------------
+  # THE CUDA COMPILE GATE.
+  #
+  # Why this exists: until it did, NOTHING anywhere compiled the USE_CPU_ONLY=OFF
+  # configure — not CI, not any dev machine (the maintainers work on macOS, which
+  # has no CUDA toolkit). That is the arm docker/Dockerfile --target nvidia ships, so the
+  # NVIDIA product had no compile gate of any kind.
+  #
+  # It is not hypothetical: src/analysis/forms/field_model.cpp was listed only in
+  # turbo_ocr_cpu while src/service/http/pdf/pdf_json.cpp (in TURBO_HTTP_COMMON_SRCS,
+  # compiled into BOTH servers) called forms::FieldModel::load/run unguarded. The
+  # GPU server could not link, and it reached the tree invisibly. tools/syntax_shims
+  # cannot catch that class of bug — it type-checks, it never links.
+  #
+  # NO GPU IS REQUIRED. Compiling and linking CUDA/TensorRT code needs only the
+  # toolkit and headers, which the nvcr base image carries. Nothing here runs a
+  # kernel, so a standard runner is sufficient.
+  #
+  # Scheduled + manual + PR-labelled rather than every push: the base image is
+  # ~10 GB and the full build is ~30 min. Per-push cost was judged not worth it;
+  # per-PR-on-demand plus nightly is. Trigger manually with the Actions "Run
+  # workflow" button, or add the "cuda" label to a PR.
+  # ---------------------------------------------------------------------------
+  cuda-compile-gate:
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'cuda')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: nvcr.io/nvidia/tensorrt:26.03-py3@sha256:ade1b30517b3d66b911a3cd7faf0146484ab8956098abe66b96b944fa36f4861
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk (the base image is large)
+        run: |
+          df -h /
+          rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android 2>/dev/null || true
+          df -h /
+
+      # Mirrors docker/Dockerfile --target nvidia's dependency layer. Kept in step with it
+      # by hand; if that file gains a dependency, add it here too.
+      - name: Install build dependencies
+        run: |
+          apt-get update && apt-get install -y --no-install-recommends \
+            build-essential pkg-config libopencv-dev nginx gosu libwebp-dev \
+            libturbojpeg0-dev libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc \
+            libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev libc-ares-dev git wget \
+            curl libcurl4-openssl-dev gettext-base
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Install CMake (base image ships 3.24; CUDA C++20 needs newer)
+        run: |
+          CMAKE_VERSION=3.31.6
+          wget -q "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz"
+          tar xzf cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz
+          cp -r cmake-${CMAKE_VERSION}-linux-x86_64/bin/* /usr/local/bin/
+          cp -r cmake-${CMAKE_VERSION}-linux-x86_64/share/* /usr/local/share/
+
+      - name: Install Drogon
+        run: |
+          git clone --depth 1 --branch v1.9.12 https://github.com/drogonframework/drogon.git /tmp/drogon
+          cd /tmp/drogon && git submodule update --init
+          cmake -S . -B build -DBUILD_EXAMPLES=OFF -DBUILD_CTL=OFF -DBUILD_ORM=OFF \
+                -DBUILD_POSTGRESQL=OFF -DBUILD_MYSQL=OFF -DBUILD_SQLITE=OFF \
+                -DBUILD_REDIS=OFF -DBUILD_TESTING=OFF
+          cmake --build build -j"$(nproc)" && cmake --install build
+
+      # The CUDA-enabled ORT build. The plain CPU tarball configures and links,
+      # then fails at runtime — CMake hard-requires the CUDA EP at configure time,
+      # so using the wrong asset here would fail this job loudly, which is correct.
+      - name: Install ONNX Runtime (CUDA build)
+        run: |
+          # Match the shipped version (docker/Dockerfile + CMakeLists ORT_VERSION):
+          # CI testing an older ORT than production has bitten before (CoreML NaN
+          # on 1.24.4, clean on 1.27).
+          ORT_VERSION=1.28.0
+          ORT_SHA256=1a3227e1dc2f53d9f877c93278af500b15e26d99aa5ade877692138b3ab7d351
+          PKG=onnxruntime-linux-x64-gpu_cuda13-${ORT_VERSION}
+          wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${PKG}.tgz" -O ort.tgz
+          echo "${ORT_SHA256}  ort.tgz" | sha256sum -c -
+          tar xzf ort.tgz
+          cp -r ${PKG}/include/* /usr/local/include/
+          cp -P ${PKG}/lib/libonnxruntime*.so* /usr/local/lib/
+          ldconfig
+
+      - name: Install PDFium
+        run: TARGETARCH=amd64 bash scripts/setup/install_pdfium.sh
+
+      # THE GATE. Configure + compile the CUDA arm. -DFETCH_MODELS=OFF because
+      # compiling needs no weights. This is what P0 would have failed on.
+      - name: Configure (CUDA arm, USE_CPU_ONLY=OFF)
+        run: |
+          cmake -S . -B build-cuda -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DNATIVE_ARCH=OFF -DFETCH_MODELS=OFF \
+            -DTENSORRT_DIR=/usr/lib/x86_64-linux-gnu
+
+      - name: Build turboocr-server (link is the point — P0 was a link failure)
+        run: cmake --build build-cuda --target turboocr-server -j"$(nproc)"
+
+      - name: Build the C++ unit suite for the CUDA arm
+        run: cmake --build build-cuda --target turbo_ocr_tests -j"$(nproc)"
+
+      # The device-requiring cases SKIP themselves when cudaSetDevice fails (see
+      # test_gpu_safety.cpp), so on this GPU-less runner they report as skipped
+      # and everything else runs for real.
+      #
+      # NO `|| true`. It used to be there, and it made this step incapable of
+      # failing: a genuine regression in any of the ~529 device-free cases would
+      # have been reported as a pass. Skipping is the test's job, not the shell's.
+      - name: Run device-free unit tests
+        run: ./build-cuda/turbo_ocr_tests
+
+  # The cross-vendor type-check. Cheap (no SDKs — it compiles every vendor source
+  # against stub headers in tools/syntax_shims/) and it is the ONLY signal that
+  # covers the AMD and Intel arms at all, neither of which is built anywhere.
+  # Runs on every push: it takes seconds and has caught real breakage repeatedly.
+  vendor-syntax-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install a C++20 compiler + OpenCV headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 libopencv-dev
+      - name: Type-check every vendor source against stub SDK headers
+        run: CXX=clang++-18 bash tools/syntax_shims/check.sh
+
+      # Architectural invariants a compiler cannot state. Every rule it checks is
+      # one this tree already broke once — see the file. Runs on every push
+      # because it takes about a second and needs no toolchain.
+      # All seven rules: layering, dead headers, file size, debt markers, env
+      # reads, http status, private paths. Named generically on purpose — the
+      # previous name listed three of them and silently went stale as the file
+      # grew, which is the same failure mode the rules themselves exist to stop.
+      - name: Architecture checks
+        run: bash tools/checks/architecture.sh
+
+      - name: Function-length ratchet
+        run: python3 tools/checks/function_size.py
+
+      - name: Backend layout check (vendor-rooted includes)
+        run: python3 src/backends/layout_check.py
+
+  # clang-tidy over the device-neutral core: src/pipeline + src/service +
+  # src/analysis + src/pdf + src/document — what compiles in the CPU configure,
+  # which is the one CI can build; the vendor backends are covered by the
+  # syntax-shim type-check above. Advisory on purpose FOR NOW (`|| true` is
+  # deliberate here and documented, unlike the one removed from the CUDA gate):
+  # the check list was just narrowed from six wildcarded families to four
+  # targeted ones and the backlog has never been triaged. Drop the `|| true`
+  # once it reads clean — leaving it forever is how a tool becomes decoration.
+  clang-tidy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-cpp-deps
+      - name: Install clang-tidy
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang-tidy-18
+      - name: Configure (for compile_commands.json)
+        run: cmake -S . -B build -G Ninja -DNATIVE_ARCH=OFF -DUSE_CPU_ONLY=ON
+      - name: Run clang-tidy
+        run: |
+          # NOTE 'dir/*.cpp' not 'dir/**/*.cpp': git's `*` already crosses `/`,
+          # while `**` requires an intervening directory and silently dropped
+          # the files sitting directly in src/pipeline/ (finalize_deferred.cpp,
+          # ocr_pipeline_detail.cpp).
+          mapfile -t files < <(git ls-files 'src/pipeline/*.cpp' \
+                                            'src/service/*.cpp' \
+                                            'src/analysis/*.cpp' \
+                                            'src/pdf/*.cpp' \
+                                            'src/document/*.cpp')
+          echo "linting ${#files[@]} files"
+          clang-tidy-18 -p build --quiet "${files[@]}" 2>&1 | tee tidy.log || true
+          echo "findings: $(grep -c 'warning:' tidy.log || true)"

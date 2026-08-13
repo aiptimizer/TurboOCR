@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="TurboOCR">
+  <defs>
+    <linearGradient id="lg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2a78d6"/>
+      <stop offset="1" stop-color="#39c6e5"/>
+    </linearGradient>
+  </defs>
+  <rect width="48" height="48" rx="11" fill="#0a0e15"/>
+  <rect x="9"  y="13" width="30" height="5.5" rx="2.75" fill="url(#lg)"/>
+  <rect x="17" y="22" width="22" height="5.5" rx="2.75" fill="url(#lg)" opacity="0.75"/>
+  <rect x="27" y="31" width="12" height="5.5" rx="2.75" fill="url(#lg)" opacity="0.5"/>
+</svg>

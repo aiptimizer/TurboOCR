@@ -2,13 +2,13 @@
 // the auto_verified per-item replacement pass. Pure consumers of the public
 // PdfDocument API — no direct PDFium calls, so no pdfium_lock here.
 
-#include "turbo_ocr/pdf/pdf_text_layer.h"
+#include "turbo_ocr/pdf/text/pdf_text_layer.h"
 
 #include <algorithm>
 #include <string>
 #include <vector>
 
-#include "turbo_ocr/common/geometry/box.h"
+#include "turbo_ocr/base/geometry/box.h"
 
 namespace turbo_ocr::pdf {
 

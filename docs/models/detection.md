@@ -4,7 +4,9 @@ The first stage of every OCR call. Locates text-bearing pixels and emits
 quadrilateral boxes for the downstream recognizer. Everything else in the
 pipeline runs only on what `PaddleDet` decides is text — false negatives here
 are unrecoverable, so the detector runs at full input resolution capped only by
-`DET_MAX_SIDE` (default 960 px, configurable via env). It is the only stage
+the shared resize policy (`{"min", 64, max_side 1280}`,
+`detection::kDetResizeDefault`; `DET_MAX_SIDE` / `DET_MAX_SIDE_LIMIT`
+override). It is the only stage
 that scales preprocessing to the source image; classification, layout, and
 recognition all use fixed input shapes.
 
@@ -23,9 +25,9 @@ runtime via the `GPU_CCL` env var:
 | `2` | All-GPU JFA unclip | Jump-flooding per-component Euclidean unclip. No pred_map download, no `findContours`. Axis-aligned quads. F1 within run-to-run noise of mode 1 on FUNSD (≈0.900 vs 0.902). |
 
 The mode docstring is in
-[`include/turbo_ocr/detection/paddle_det.h:46-54`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/detection/paddle_det.h);
+[`src/backends/nvidia/stages/paddle_det.h:46-54`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_det.h);
 the three implementations live in
-[`src/detection/paddle_det.cpp:103-321`](https://github.com/aiptimizer/TurboOCR/blob/main/src/detection/paddle_det.cpp).
+[`src/backends/nvidia/stages/paddle_det.cpp:103-321`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_det.cpp).
 
 ## Model card
 
@@ -37,8 +39,8 @@ the three implementations live in
 | Dynamic profile | MIN `(1,3,32,32)` · OPT/MAX `(1,3,960,960)` — `kMaxSideLen_` is read from `DET_MAX_SIDE` at `paddle_det.cpp:30-33` |
 | Output tensor | `(N, 1, H, W)` float32 probability map |
 | Precision | FP16 |
-| Batch | up to `kMaxBatchSize = 8` ([`paddle_det.h:61`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/detection/paddle_det.h)); per-batch H/W unified to the max, rounded to 32 |
-| DB thresholds | `kDetDbThresh = 0.3`, `kDetDbBoxThresh = 0.6`, `kDetDbUnclipRatio = 1.5` ([`paddle_det.h:40-45`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/detection/paddle_det.h)) |
+| Batch | up to `kMaxBatchSize = 8` ([`paddle_det.h:61`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_det.h)); per-batch H/W unified to the max, rounded to 32 |
+| DB thresholds | shared `detection::kDbDefaults{thresh 0.2, box_thresh 0.45, unclip 1.4}` (`det_config.h`; per-tier box_thresh varies — tiny 0.40) — env `DET_DB_THRESH`/`DET_BOX_THRESH`/`DET_UNCLIP` |
 | Min box side | `kMinBoxSide = 3 px`, `kMinUnclippedSide = 5 px` |
 
 The unified-batch-shape trick (`paddle_det.cpp:413-416`) lets `run_batch` use a
@@ -86,7 +88,7 @@ classDiagram
 
 `CudaPtr<T>` / `CudaHostPtr<T>` are RAII handles for `cudaMalloc` and
 `cudaMallocHost` allocations — `~PaddleDet()` is `= default`
-([`paddle_det.h:22`](https://github.com/aiptimizer/TurboOCR/blob/main/include/turbo_ocr/detection/paddle_det.h)) because
+([`paddle_det.h:22`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_det.h)) because
 every device buffer cleans itself up.
 
 ## Per-image flow
@@ -119,14 +121,14 @@ sequenceDiagram
 ```
 
 `run(...)` is at
-[`paddle_det.cpp:323-366`](https://github.com/aiptimizer/TurboOCR/blob/main/src/detection/paddle_det.cpp) and ends with a
+[`paddle_det.cpp:323-366`](https://github.com/aiptimizer/TurboOCR/blob/main/src/backends/nvidia/stages/paddle_det.cpp) and ends with a
 CJK-trad vertical-column merge pass that fuses fragmented vertical text columns
 before the boxes leave the stage.
 
 ## Where it plugs in
 
 Called from `OcrPipeline::run_with_layout` immediately after `upload_image`
-([`ocr_pipeline.cpp:626`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/ocr_pipeline.cpp)). The caller's
+([`ocr_pipeline.cpp:626`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/unified/unified_ocr_pipeline.cpp)). The caller's
 CUDA stream owns the upload and the detection. Everything downstream
 (`PaddleCls`, `PaddleLayout`, `PaddleRec`) runs on a separate stream and waits
 on `det_event_` / `det_only_event_` — see

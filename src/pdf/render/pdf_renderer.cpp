@@ -21,7 +21,7 @@
 #include <unistd.h>
 
 #include "pdf_renderer_internal.h"
-#include "turbo_ocr/common/errors.h"
+#include "turbo_ocr/base/errors.h"
 
 using namespace turbo_ocr::render;
 using turbo_ocr::render::pdfrdetail::kMaxDaemonPages;
@@ -90,6 +90,8 @@ struct TempGuard {
 
 } // namespace
 
+bool PdfRenderer::can_render() noexcept { return true; }
+
 std::vector<cv::Mat> PdfRenderer::render(const uint8_t *data, size_t len,
                                          int dpi) {
   TempGuard tmpfile(write_temp_pdf(data, len), false);
@@ -108,6 +110,25 @@ std::vector<cv::Mat> PdfRenderer::render(const uint8_t *data, size_t len,
     throw turbo_ocr::PdfRenderError(std::format("PDF render failed: {}", resp));
 
   const int num_pages = parse_daemon_page_count(resp);
+
+  // Same completeness guard render_streamed uses: the fastpdf2png daemon can
+  // reply "OK N" before its forked workers finish flushing the last PPM, so a
+  // read immediately after "OK" can hit a half-written file. Wait for each PPM
+  // to be fully written (header + declared payload) before the read section
+  // below, bounded by the same 30 s cap. render_streamed had this net and this
+  // blocking path did not — it survived only because the daemon has usually
+  // flushed by the time a caller gets here, which is the fragile-ordering shape
+  // this removes.
+  {
+    using clock = std::chrono::steady_clock;
+    const auto deadline = clock::now() + std::chrono::seconds(30);
+    for (int i = 0; i < num_pages; ++i) {
+      const std::string ppm_path =
+          std::format("{}/p_{:04d}.ppm", tmpdir.path, i + 1);
+      while (!ppm_is_complete(ppm_path) && clock::now() < deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
 
   // Read PPM files — parallel for multi-page PDFs (each read_ppm is
   // independent: thread-safe fopen/fread, creates its own cv::Mat).
@@ -181,8 +202,18 @@ PdfRenderer::render_streamed(const uint8_t *data, size_t len, int dpi,
   std::string pattern = std::format("{}/p_%04d.ppm", tmpdir.path);
 
   // Set up inotify BEFORE sending RENDER to avoid missing early pages.
-  // CLOSE_WRITE fires when a worker finishes writing a PPM file. The
-  // RAII guard ensures the fd is closed even if any later step throws
+  // We watch BOTH completion signals a renderer can emit for a finished PPM:
+  //   * IN_CLOSE_WRITE — a worker wrote p_NNNN.ppm in place and closed it
+  //     (the fastpdf2png builds that write the final path directly).
+  //   * IN_MOVED_TO   — a worker wrote p_NNNN.ppm.tmp and rename()'d it onto
+  //     the final name (the atomic-publish builds). A rename fires MOVED_TO,
+  //     NOT CLOSE_WRITE, so watching CLOSE_WRITE alone would miss every page
+  //     from an atomic renderer and silently fall back to the 30 s safety-net
+  //     scan — losing all streaming overlap. The .tmp's own CLOSE_WRITE is
+  //     filtered by the ".ppm" suffix check below, and `delivered[]` dedups,
+  //     so a renderer that somehow emitted both events for one page is safe.
+  // This keeps the consumer agnostic to the renderer's write strategy.
+  // The RAII guard ensures the fd is closed even if any later step throws
   // (acquire_daemon, std::thread ctor, std::stoi on the daemon reply).
   struct InotifyFdGuard {
     int fd = -1;
@@ -196,7 +227,8 @@ PdfRenderer::render_streamed(const uint8_t *data, size_t len, int dpi,
   inotify.fd = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
   if (inotify.fd < 0)
     throw turbo_ocr::PdfRenderError("inotify_init1 failed");
-  inotify.wd = ::inotify_add_watch(inotify.fd, tmpdir.path.c_str(), IN_CLOSE_WRITE);
+  inotify.wd = ::inotify_add_watch(inotify.fd, tmpdir.path.c_str(),
+                                   IN_CLOSE_WRITE | IN_MOVED_TO);
   if (inotify.wd < 0)
     throw turbo_ocr::PdfRenderError("inotify_add_watch failed");
   const int inotify_fd = inotify.fd;
@@ -240,7 +272,13 @@ PdfRenderer::render_streamed(const uint8_t *data, size_t len, int dpi,
       for (char *ptr = ev_buf; ptr < ev_buf + nread; ) {
         auto *event = reinterpret_cast<struct inotify_event *>(ptr);
         ptr += sizeof(struct inotify_event) + event->len;
-        if (event->len == 0 || !(event->mask & IN_CLOSE_WRITE)) continue;
+        // Accept either completion signal (see the watch mask above): a direct
+        // in-place write (IN_CLOSE_WRITE) or an atomic rename into place
+        // (IN_MOVED_TO). The .tmp sibling's CLOSE_WRITE is dropped by the
+        // ".ppm" suffix check below, so only finished pages get through.
+        if (event->len == 0 ||
+            !(event->mask & (IN_CLOSE_WRITE | IN_MOVED_TO)))
+          continue;
 
         // Parse page number from "p_NNNN.ppm"
         std::string_view name(event->name);

@@ -22,7 +22,11 @@ python tests/run_all.py --suite accuracy
 pytest tests/accuracy -v
 ```
 
-Layout tests require the server to be started with `ENABLE_LAYOUT=1`.
+Layout is on by default; the layout suite additionally needs
+`ENABLE_LAYOUT=1` **in the test environment** (the pytest gate in
+`test_layout_accuracy.py`), not on the server — setting `ENABLE_LAYOUT` on
+the server is a **fatal boot error** (the variable was retired; layout is
+always on and `LAYOUT_DISABLED=1` is the off switch).
 
 ## Re-capturing the baseline
 

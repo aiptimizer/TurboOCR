@@ -21,8 +21,8 @@
 #include <unistd.h>
 
 #include "pdf_renderer_internal.h"
-#include "turbo_ocr/common/env_utils.h"
-#include "turbo_ocr/common/errors.h"
+#include "turbo_ocr/base/env_utils.h"
+#include "turbo_ocr/base/errors.h"
 
 using namespace turbo_ocr::render;
 
@@ -32,7 +32,7 @@ std::string find_binary() {
   // Explicit override — used by tests and by deployments that put the binary
   // in a non-standard location. Fails fast if the configured path is missing
   // rather than falling back to the default search (surprises hurt in prod).
-  if (const char *env = std::getenv("FASTPDF2PNG_PATH"); env && *env) {  // pre-commit-allow-getenv
+  if (std::string env = turbo_ocr::env::env_or("FASTPDF2PNG_PATH", ""); !env.empty()) {
     if (std::filesystem::exists(env)) return env;
     throw turbo_ocr::PdfRenderError(
         std::format("FASTPDF2PNG_PATH does not exist: {}", env));

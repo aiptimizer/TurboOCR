@@ -7,30 +7,15 @@ only adds integration-specific fixtures.
 
 import base64
 import io
-import os
 
 import pytest
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
-
-# ---------------------------------------------------------------------------
-# Font helper
-# ---------------------------------------------------------------------------
-
-
-def _get_font(size=28):
-    """Get a font, falling back to default if no TTF is available."""
-    font_paths = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-    ]
-    for p in font_paths:
-        if os.path.exists(p):
-            return ImageFont.truetype(p, size)
-    return ImageFont.load_default()
+# ONE font resolver for the whole tree, in the root conftest. This file used to
+# carry a byte-identical copy of `_FONT_PATHS` + `_get_font`, comment included —
+# so the macOS bitmap-fallback trap documented there could be fixed in one
+# conftest and still bite every test loaded through the other.
+from conftest import _get_font
 
 
 # ---------------------------------------------------------------------------

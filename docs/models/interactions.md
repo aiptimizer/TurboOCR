@@ -1,5 +1,12 @@
 # Model Interactions — End-to-End Lifecycle
 
+!!! note "Line anchors are historic"
+    The `ocr_pipeline.cpp:NNN` anchors on this page refer to the pre-merge
+    GPU pipeline, retired in the 2026-07 unified-backend merge. The logic
+    they describe lives on in `src/pipeline/unified/unified_ocr_pipeline.cpp`
+    and the router sources; the design described here is current, the line
+    numbers are not.
+
 _How seven C++ classes coordinate one upload into one JSON response across four CUDA streams._
 
 !!! abstract "TL;DR"
@@ -88,11 +95,11 @@ sequenceDiagram
 ```
 
 Call sites in source:
-[`OcrPipeline::run_with_layout`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/ocr_pipeline.cpp) at line
-605, [`dispatch_router_`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/ocr_pipeline.cpp) at line 430,
-[`dispatch_rec_`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/ocr_pipeline.cpp) at line 517,
-[`TableStage::run`](https://github.com/aiptimizer/TurboOCR/blob/main/src/table/table_stage.cpp) at line 488, and
-[`FormulaNet::run`](https://github.com/aiptimizer/TurboOCR/blob/main/src/formula/formulanet.cpp) at line 479.
+[`OcrPipeline::run_with_layout`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/unified/unified_ocr_pipeline.cpp) at line
+605, [`dispatch_router_`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/unified/unified_ocr_pipeline.cpp) at line 430,
+[`dispatch_rec_`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/unified/unified_ocr_pipeline.cpp) at line 517,
+[`TableStage::run`](https://github.com/aiptimizer/TurboOCR/blob/main/src/models/table/table_stage.cpp) at line 488, and
+[`FormulaNet::run`](https://github.com/aiptimizer/TurboOCR/blob/main/src/models/formula/formulanet.cpp) at line 479.
 
 ## Text-only short-circuit — preserving the 6 ms p50
 
@@ -128,7 +135,7 @@ sequenceDiagram
 ```
 
 The three guards that make this bit-identical to the no-router pipeline are at
-[`ocr_pipeline.cpp:436-453`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/ocr_pipeline.cpp):
+[`ocr_pipeline.cpp:436-453`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/unified/unified_ocr_pipeline.cpp):
 
 1. `if (!router_) return;` — router not loaded.
 2. `if (out.layout.empty()) return;` — layout disabled per call.
@@ -175,10 +182,10 @@ Key observations:
   with cls and rec.
 - `TBL` blocks on `det_only_event_` AND on `REC` (it needs `ocr_lines` for
   cell↔OCR matching). The event ordering is enforced inside `TableStage::run`
-  ([`table_stage.cpp:513-514`](https://github.com/aiptimizer/TurboOCR/blob/main/src/table/table_stage.cpp)); the data
+  ([`table_stage.cpp:513-514`](https://github.com/aiptimizer/TurboOCR/blob/main/src/models/table/table_stage.cpp)); the data
   dependency on `REC` is enforced by `OcrPipeline::dispatch_router_` running
   it *after* `dispatch_rec_` finishes
-  ([`ocr_pipeline.cpp:687, 724`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/ocr_pipeline.cpp)).
+  ([`ocr_pipeline.cpp:687, 724`](https://github.com/aiptimizer/TurboOCR/blob/main/src/pipeline/unified/unified_ocr_pipeline.cpp)).
 - `FRM` blocks on `det_only_event_` only. It runs before `TBL` so absorbed
   formulas can be flagged `owned_by_cell` and dropped from the top-level array.
 
@@ -196,8 +203,8 @@ struct OcrPipelineResult {
 };
 ```
 
-The HTTP route serialises this struct directly (see [HTTP API](../api/http.md)).
-gRPC mirrors the same field set in `proto/turbo_ocr.proto`. None of the
+The HTTP route serialises this struct directly (see [HTTP API](../reference/http.md)).
+gRPC mirrors the same field set in `proto/ocr.proto`. None of the
 downstream consumers needs to know which CUDA stream produced which field —
 the `OcrPipeline` is the merge point.
 

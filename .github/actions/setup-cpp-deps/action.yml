@@ -28,7 +28,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/.cpp-deps
-        key: cppdeps-drogon1.9.12-ort1.22.0-${{ runner.os }}-${{ runner.arch }}
+        key: cppdeps-drogon1.9.12-ort1.28.0-${{ runner.os }}-${{ runner.arch }}
 
     - name: Build + install Drogon v1.9.12 (into prefix)
       if: steps.deps-cache.outputs.cache-hit != 'true'
@@ -46,18 +46,18 @@ runs:
         make -j"$(nproc)"
         make install
 
-    - name: Install ONNX Runtime 1.22.0 x64 (into prefix)
+    - name: Install ONNX Runtime 1.28.0 x64 (into prefix)
       if: steps.deps-cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
         PREFIX="${{ github.workspace }}/.cpp-deps"
         mkdir -p "$PREFIX/include" "$PREFIX/lib"
         cd /tmp
-        wget -q "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz" -O ort.tgz
+        wget -q "https://github.com/microsoft/onnxruntime/releases/download/v1.28.0/onnxruntime-linux-x64-1.28.0.tgz" -O ort.tgz
         echo "8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3  ort.tgz" | sha256sum -c -
         tar xzf ort.tgz
-        cp -r onnxruntime-linux-x64-1.22.0/include/* "$PREFIX/include/"
-        cp onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so* "$PREFIX/lib/"
+        cp -r onnxruntime-linux-x64-1.28.0/include/* "$PREFIX/include/"
+        cp onnxruntime-linux-x64-1.28.0/lib/libonnxruntime.so* "$PREFIX/lib/"
 
     # Publish the prefix so every later step in the job (and cmake) finds it.
     - name: Export prefix to environment
@@ -72,8 +72,8 @@ runs:
     - name: Install PDFium + fastpdf2png
       shell: bash
       run: |
-        TARGETARCH=amd64 bash scripts/install_pdfium.sh
+        TARGETARCH=amd64 bash scripts/setup/install_pdfium.sh
         sudo cp third_party/pdfium/lib/libpdfium.so /usr/lib/
-        TARGETARCH=amd64 bash scripts/install_fastpdf2png.sh || true
+        TARGETARCH=amd64 bash scripts/setup/install_fastpdf2png.sh || true
         sudo cp bin/libpdfium.so /usr/lib/ 2>/dev/null || true
         sudo ldconfig

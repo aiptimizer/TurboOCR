@@ -5,18 +5,25 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include <opencv2/imgproc.hpp>
 
+// decode_ppm mmaps on POSIX and reads on Windows — see the branch there. The
+// completeness probe above it also uses open/fstat, so both need the POSIX
+// headers only on the platforms that have them.
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include "pdf_renderer_internal.h"
-#include "turbo_ocr/common/env_utils.h"
-#include "turbo_ocr/common/log/logger.h"
+#include "turbo_ocr/base/env_utils.h"
+#include "turbo_ocr/base/log/logger.h"
 
 using namespace turbo_ocr::render;
 
@@ -28,8 +35,8 @@ namespace {
 // CPU-only path — no GPU required.
 bool ppm_swap_use_simd() {
   static const bool simd = [] {
-    const char *e = std::getenv("TURBO_PPM_SWAP");  // pre-commit-allow-getenv
-    return !(e && std::strcmp(e, "scalar") == 0);
+    std::string e = turbo_ocr::env::env_or("TURBO_PPM_SWAP", "");
+    return !(!e.empty() && e == "scalar");
   }();
   return simd;
 }
@@ -40,18 +47,22 @@ bool ppm_swap_use_simd() {
 // rejects such pages (decode_ppm returns empty → the route reports a decode
 // failure). Reads MAX_PDF_PAGE_PIXELS_MP (megapixels); ServerConfig validates
 // it to [1,268] at startup. Default 40 MP (e.g. 5000x8000 at ~600 DPI A4).
-int64_t ppm_max_pixels() {
+} // namespace
+
+// Shared with the darwin in-process renderer via pdf_renderer_internal.h —
+// both platforms must read ONE area cap.
+int64_t turbo_ocr::render::pdfrdetail::ppm_max_pixels() {
   static const int64_t px = [] {
     // env_int clamps to [1,268] and returns the default (40) on any malformed
     // value; a garbage value would previously revert to 40 with no diagnostic.
     const int def = 40;
     const int mp = turbo_ocr::env::env_int("MAX_PDF_PAGE_PIXELS_MP", def, 1, 268);
-    if (const char *e = std::getenv("MAX_PDF_PAGE_PIXELS_MP");  // pre-commit-allow-getenv
-        e && *e && mp == def) {
+    if (std::string e = turbo_ocr::env::env_or("MAX_PDF_PAGE_PIXELS_MP", "");
+        !e.empty() && mp == def) {
       // Distinguish "explicitly set to 40" from "malformed -> default".
       char *end = nullptr;
-      std::strtol(e, &end, 10);
-      if (end == e || *end != '\0')
+      std::strtol(e.c_str(), &end, 10);
+      if (end == e.c_str() || *end != '\0')
         TOCR_LOG_WARN("MAX_PDF_PAGE_PIXELS_MP malformed; using default",
                       "value", e, "default", def);
     }
@@ -60,18 +71,10 @@ int64_t ppm_max_pixels() {
   return px;
 }
 
-// Parsed PPM (P5/P6) header. `valid` is false for a malformed or bomb-sized
-// header; `payload_offset` is the byte index where pixel data begins and
-// `payload_bytes` its exact declared length, so a complete file is exactly
-// payload_offset + payload_bytes long. One parser shared by decode_ppm and
-// the streamed safety-net's completeness check.
-struct PpmHeader {
-  bool   valid = false;
-  bool   gray = false;
-  int    w = 0, h = 0;
-  size_t payload_offset = 0;
-  size_t payload_bytes = 0;
-};
+// PpmHeader + parse_ppm_header now live in the pdfrdetail namespace (declared in
+// pdf_renderer_internal.h) so the fuzz target and unit tests can reach the pure
+// parser directly. The body is unchanged.
+namespace turbo_ocr::render::pdfrdetail {
 
 PpmHeader parse_ppm_header(const unsigned char *base, size_t len) {
   PpmHeader hdr;
@@ -122,6 +125,21 @@ PpmHeader parse_ppm_header(const unsigned char *base, size_t len) {
 namespace turbo_ocr::render::pdfrdetail {
 
 bool ppm_is_complete(const std::string &path) {
+  // Reads the first 128 bytes (enough for any PPM header) and compares the
+  // declared payload against the file size — the writer may still be flushing.
+  // Same logic either way; only the file access differs.
+#if defined(_WIN32)
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  if (!f) return false;
+  const std::streamoff sz = f.tellg();
+  if (sz <= 0) return false;
+  const auto file_size = static_cast<size_t>(sz);
+  unsigned char buf[128];
+  f.seekg(0);
+  f.read(reinterpret_cast<char *>(buf), sizeof(buf));
+  const std::streamsize got = f.gcount();
+  if (got <= 0) return false;
+#else
   int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (fd < 0) return false;
   struct stat st{};
@@ -131,6 +149,7 @@ bool ppm_is_complete(const std::string &path) {
   const ssize_t got = ::read(fd, buf, sizeof(buf));
   ::close(fd);
   if (got <= 0) return false;
+#endif
   const PpmHeader hdr = parse_ppm_header(buf, static_cast<size_t>(got));
   return hdr.valid && file_size >= hdr.payload_offset + hdr.payload_bytes;
 }
@@ -143,6 +162,30 @@ bool ppm_is_complete(const std::string &path) {
 // workers rather than the total page count — critical for large PDFs
 // where N × ~3 MB/page would exhaust the default 64 MB Docker shm.
 cv::Mat PdfRenderer::decode_ppm(const std::string &path) {
+  // Everything below the acquisition is platform-neutral: it wants `base` and
+  // `file_size` for a read-only PPM whose file has already been deleted. Only
+  // HOW those bytes are obtained differs.
+#if defined(_WIN32)
+  // No mmap. The mapping is a zero-copy optimization whose second purpose —
+  // freeing /dev/shm the instant the page is claimed — has no Windows analogue,
+  // so a plain read costs one memcpy of a page-sized buffer and nothing else.
+  // The buffer must outlive the parse below, hence function scope.
+  std::vector<unsigned char> owned;
+  {
+    std::ifstream f(path, std::ios::binary | std::ios::ate);
+    if (!f) return {};
+    const std::streamoff sz = f.tellg();
+    if (sz < 3) return {};
+    owned.resize(static_cast<size_t>(sz));
+    f.seekg(0);
+    if (!f.read(reinterpret_cast<char *>(owned.data()),
+                static_cast<std::streamsize>(sz)))
+      return {};
+  }
+  std::remove(path.c_str());
+  const size_t file_size = owned.size();
+  const unsigned char *base = owned.data();
+#else
   int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
   if (fd < 0) return {};
   struct stat st{};
@@ -165,7 +208,8 @@ cv::Mat PdfRenderer::decode_ppm(const std::string &path) {
   } guard{map, file_size};
 
   const unsigned char *base = static_cast<const unsigned char *>(map);
-  const PpmHeader hdr = parse_ppm_header(base, file_size);
+#endif
+  const pdfrdetail::PpmHeader hdr = pdfrdetail::parse_ppm_header(base, file_size);
   if (!hdr.valid) return {};
   const bool gray = hdr.gray;
   const int w = hdr.w, h = hdr.h;

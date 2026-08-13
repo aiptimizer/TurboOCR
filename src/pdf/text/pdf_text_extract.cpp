@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-#include "turbo_ocr/common/log/logger.h"
+#include "turbo_ocr/base/log/logger.h"
 
 namespace turbo_ocr::pdf {
 

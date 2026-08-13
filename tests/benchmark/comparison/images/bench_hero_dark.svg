@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 470" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif" role="img" aria-label="Whole-page OCR throughput on one RTX 5090: TurboOCR 678 images per second on FUNSD vs 2 to 6 for other engines">
+<text x="30" y="52" font-size="19" font-weight="650" fill="#ffffff">Whole-page OCR throughput</text>
+<text x="30" y="76" font-size="12.5" fill="#c3c2b7">FUNSD forms · one RTX 5090 · word-F1 beside each engine</text>
+<text x="640" y="52" font-size="24" font-weight="700" fill="#ffffff">650+</text>
+<text x="640" y="72" font-size="11" fill="#c3c2b7">img/s · FUNSD</text>
+<text x="830" y="52" font-size="24" font-weight="700" fill="#ffffff">200+</text>
+<text x="830" y="72" font-size="11" fill="#c3c2b7">img/s · OmniDocBench</text>
+<text x="1040" y="52" font-size="24" font-weight="700" fill="#ffffff">20</text>
+<text x="1040" y="72" font-size="11" fill="#c3c2b7">pages/s · full parse</text>
+<line x1="360" y1="122" x2="360" y2="428" stroke="#3a3936" stroke-width="1"/>
+<text x="348" y="142.0" text-anchor="end" font-size="13" font-weight="600" fill="#ffffff">TurboOCR tiny <tspan font-size="11" font-weight="400" fill="#8a897f">default tier</tspan></text>
+<text x="348" y="155.0" text-anchor="end" font-size="10.5" fill="#8a897f">F1 85.4%</text>
+<rect x="360" y="132" width="660.0" height="22" rx="4" fill="#3987e5"/>
+<text x="1030.0" y="147.5" font-size="13" font-weight="700" fill="#ffffff">678<tspan font-size="10.5" font-weight="400" fill="#8a897f"> img/s</tspan></text>
+<text x="348" y="180.0" text-anchor="end" font-size="13" font-weight="600" fill="#ffffff">TurboOCR small</text>
+<text x="348" y="193.0" text-anchor="end" font-size="10.5" fill="#8a897f">F1 90.3%</text>
+<rect x="360" y="170" width="223.9" height="22" rx="4" fill="#3987e5"/>
+<text x="593.9" y="185.5" font-size="13" font-weight="700" fill="#ffffff">230<tspan font-size="10.5" font-weight="400" fill="#8a897f"> img/s</tspan></text>
+<text x="348" y="218.0" text-anchor="end" font-size="13" font-weight="600" fill="#ffffff">TurboOCR medium <tspan font-size="11" font-weight="400" fill="#8a897f">most accurate</tspan></text>
+<text x="348" y="231.0" text-anchor="end" font-size="10.5" fill="#8a897f">F1 91.9%</text>
+<rect x="360" y="208" width="83.7" height="22" rx="4" fill="#3987e5"/>
+<text x="453.7" y="223.5" font-size="13" font-weight="700" fill="#ffffff">86<tspan font-size="10.5" font-weight="400" fill="#8a897f"> img/s</tspan></text>
+<text x="348" y="256.0" text-anchor="end" font-size="13" font-weight="400" fill="#c3c2b7">PaddleOCR PP-OCRv5 <tspan font-size="11" font-weight="400" fill="#8a897f">Python</tspan></text>
+<text x="348" y="269.0" text-anchor="end" font-size="10.5" fill="#8a897f">F1 86.6%</text>
+<rect x="360" y="246" width="5.8" height="22" rx="1.5" fill="#75746c"/>
+<text x="375.8" y="261.5" font-size="13" font-weight="500" fill="#ffffff">6<tspan font-size="10.5" font-weight="400" fill="#8a897f"> img/s</tspan></text>
+<text x="348" y="294.0" text-anchor="end" font-size="13" font-weight="400" fill="#c3c2b7">PaddleOCR-VL 1.6 <tspan font-size="11" font-weight="400" fill="#8a897f">VLM</tspan></text>
+<text x="348" y="307.0" text-anchor="end" font-size="10.5" fill="#8a897f">F1 91.6%</text>
+<rect x="360" y="284" width="4.9" height="22" rx="1.5" fill="#75746c"/>
+<text x="374.9" y="299.5" font-size="13" font-weight="500" fill="#ffffff">5<tspan font-size="10.5" font-weight="400" fill="#8a897f"> img/s</tspan></text>
+<text x="348" y="332.0" text-anchor="end" font-size="13" font-weight="400" fill="#c3c2b7">EasyOCR</text>
+<text x="348" y="345.0" text-anchor="end" font-size="10.5" fill="#8a897f">F1 59.8%</text>
+<rect x="360" y="322" width="3.0" height="22" rx="1.5" fill="#75746c"/>
+<text x="373.0" y="337.5" font-size="13" font-weight="500" fill="#ffffff">3<tspan font-size="10.5" font-weight="400" fill="#8a897f"> img/s</tspan></text>
+<text x="348" y="370.0" text-anchor="end" font-size="13" font-weight="400" fill="#c3c2b7">RapidOCR <tspan font-size="11" font-weight="400" fill="#8a897f">GPU</tspan></text>
+<text x="348" y="383.0" text-anchor="end" font-size="10.5" fill="#8a897f">F1 69.1%</text>
+<rect x="360" y="360" width="3.0" height="22" rx="1.5" fill="#75746c"/>
+<text x="373.0" y="375.5" font-size="13" font-weight="500" fill="#ffffff">2<tspan font-size="10.5" font-weight="400" fill="#8a897f"> img/s</tspan></text>
+<text x="348" y="408.0" text-anchor="end" font-size="13" font-weight="400" fill="#c3c2b7">Tesseract</text>
+<text x="348" y="421.0" text-anchor="end" font-size="10.5" fill="#8a897f">F1 62.3%</text>
+<rect x="360" y="398" width="3.0" height="22" rx="1.5" fill="#75746c"/>
+<text x="373.0" y="413.5" font-size="13" font-weight="500" fill="#ffffff">2<tspan font-size="10.5" font-weight="400" fill="#8a897f"> img/s</tspan></text>
+<text x="30" y="458" font-size="10.5" fill="#8a897f">Same 50 FUNSD pages for every engine · ≥15 s timed windows with a dual-clock cross-check · methodology: docs/benchmarks/comparison.md</text>
+</svg>

@@ -1,0 +1,166 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "turboocr"
+version = "4.0.0a1"
+description = "TurboOCR for Python — in-process OCR engine, and a typed client for the TurboOCR server"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    { name = "turbo-ocr contributors" },
+]
+keywords = ["ocr", "paddleocr", "tensorrt", "layout", "pdf", "markdown"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: GPU",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Typing :: Typed",
+]
+dependencies = [
+    "httpx>=0.28",
+    "pydantic>=2.10",
+    # CLI (small, pure-Python — bundled by default for the `turbo-ocr` command)
+    "typer>=0.15",
+    "rich>=14",
+    # Searchable PDF generation (small, pure-Python — bundled by default for
+    # `make_searchable_pdf` + pypdf round-trip verification)
+    "pypdf>=5.0",
+    "reportlab>=4.2",
+]
+
+[project.optional-dependencies]
+# gRPC transport — opt-in because grpcio is large (~18 MB) and ships a C
+# extension that occasionally fails to wheel on niche platforms.
+grpc = [
+    "grpcio>=1.66",
+    "protobuf>=5.27",
+]
+# --- in-process engine -----------------------------------------------------
+# The native engine is a SEPARATE distribution per hardware target, pulled in
+# by these extras. It is not a base dependency on purpose: this package must
+# stay `py3-none-any` so it installs on any Python and any OS for client-only
+# use, and so `pip install turboocr` never drags a CUDA runtime onto a machine
+# that only wants to call a server. `turboocr doctor` names the right one.
+cpu = ["turboocr-engine-cpu==4.0.0a1"]
+cuda = ["turboocr-engine-cuda==4.0.0a1"]
+openvino = ["turboocr-engine-openvino==4.0.0a1"]
+rocm = ["turboocr-engine-rocm==4.0.0a1"]
+# Engine feature extras mirrored at the umbrella, so backend + feature combine
+# in one spec: `pip install "turboocr[cuda,pdf]"`. The engine wheels declare
+# their own [pdf]/[pandas] with the same contents; reportlab is already a base
+# dependency here but is restated so the mirror stays complete on its own.
+pdf = ["pypdfium2>=4", "reportlab>=4.2"]
+pandas = ["pandas>=1.3"]
+# Convenience alias: everything optional that is safe everywhere. Deliberately
+# does NOT pull an engine — there is no single right one, and picking would
+# make `[all]` fail on unsupported platforms.
+all = [
+    "turboocr[grpc]",
+]
+# API reference site (mkdocs + mkdocstrings + mike for versioned deploys).
+# Build with:   uv run --extra docs mkdocs build -f docs/mkdocs.yml
+# Serve with:   uv run --extra docs mkdocs serve -f docs/mkdocs.yml
+docs = [
+    "mkdocs>=1.6",
+    "mkdocs-material>=9.5",
+    "mkdocstrings[python]>=0.27",
+    "mike>=2.1",
+]
+dev = [
+    "turboocr[grpc]",  # so mypy / tests can see gRPC paths
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "respx>=0.22",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "grpcio-tools>=1.66",
+    "pypdfium2>=4.30",  # examples/sample/generate.py only — renders PDF page to PNG
+    "fonttools>=4.55",  # scripts/generate_glyphless_font.py only — build-time font gen
+]
+
+[project.scripts]
+turbo-ocr = "turboocr.cli:app"
+
+[project.urls]
+Homepage = "https://turboocr.com"
+Repository = "https://github.com/aiptimizer/TurboOCR"
+Issues = "https://github.com/aiptimizer/TurboOCR/issues"
+Documentation = "https://turboocr.com"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/turboocr"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/turboocr/_data/glyphless.ttf" = "turboocr/_data/glyphless.ttf"
+
+[tool.hatch.build.targets.sdist]
+include = ["src/turboocr", "tests", "examples", "docs", "README.md", "LICENSE"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "B", "UP", "SIM", "PL", "RUF"]
+ignore = [
+    "PLR0913",  # too many arguments (matches server's wide option surface)
+    "PLR2004",  # magic value comparisons (fine in tests/validators)
+    "PLC0415",  # import-not-at-top (CLI imports are gated behind `cli` extra)
+    "N818",     # exception names without Error suffix (deliberate API: `LayoutDisabled`)
+    "SIM108",   # ternary preferred-over-if (less readable for header dicts)
+    "B904",     # raise-without-from (deliberate in CLI helpers)
+    "PLR0911",  # many-returns (dispatch tables in markdown classifier)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004", "S101"]
+# gRPC servicer methods are PascalCase by proto contract (N802); test
+# handlers occasionally assert on bare Exception to verify the SDK raised
+# *something* without caring which subclass (B017); and the staticmethod
+# `_maybe_await` accepts Any from an arbitrary handler return (F811).
+"tests/_grpc/*" = ["N802", "B017", "F811"]
+"src/turboocr/_grpc/_stubs/*" = ["ALL"]  # generated
+# examples/ scripts include verbatim server stdout as `# Output:` comments.
+# Some response reprs (RetryPolicy, raw markdown tables, escaped \n strings)
+# wrap past 100 chars; faithfully pasting them is the point.
+"examples/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["grpc", "grpc.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "turboocr._grpc._stubs.*"
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["reportlab", "reportlab.*", "pypdfium2", "pypdfium2.*", "fontTools", "fontTools.*"]
+ignore_missing_imports = true
+
+# Tests get type-discipline relief — strict mypy applies to src/ only,
+# which is where the typed-API guarantee lives. Hand-annotating every test
+# fn with `-> None` and propagating types through the untyped grpc-stub
+# generated classes is mechanical churn that adds no safety.
+# (Matches httpx, pydantic, anthropic-sdk-python conventions.)
+[[tool.mypy.overrides]]
+module = ["tests", "tests.*"]
+ignore_errors = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

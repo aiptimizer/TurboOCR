@@ -1,0 +1,238 @@
+/* TurboOCR install selector — PyTorch-style matrix.
+ * Two pill rows (hardware, install method) drive one command card.
+ * Initialized through Material's document$ observable so it re-binds after
+ * navigation.instant page swaps. */
+
+(function () {
+  "use strict";
+
+  var CONFIG = {
+    nvidia: {
+      label: "NVIDIA GPU",
+      status: "shipped",
+      methods: {
+        docker: {
+          command:
+            "docker run --gpus all -p 8000:8000 -p 50051:50051 \\\n" +
+            "  -v trt-cache:/home/ocr/.cache/turbo-ocr \\\n" +
+            "  ghcr.io/aiptimizer/turboocr:latest",
+          note:
+            "First start builds TensorRT engines (~90 s on a 5090; TRT_OPT_LEVEL=3 cuts it 3–5x on older cards) and caches them in the volume. " +
+            "Add stages with -e TABLE_BACKEND=slanext, -e FORMULA_BACKEND=ppformulanet_s, -e OCR_MODEL=medium.",
+        },
+        source: {
+          command:
+            "cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt\n" +
+            "cmake --build build -j$(nproc)\n" +
+            "LD_LIBRARY_PATH=/usr/local/tensorrt/lib ./build/turboocr-server",
+          note:
+            "Needs GCC 13.3+/C++20, CUDA + TensorRT 10.2+, OpenCV 4.x, Drogon 1.9+, gRPC. Models are auto-fetched into ./models/ on first build.",
+        },
+        python: {
+          command:
+            "scripts/python/build_backend_wheel.sh cuda\n" +
+            "pip install build-wheels/cuda/fixed/*.whl\n" +
+            'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'cuda\').read(\'doc.png\'))"',
+          note:
+            "Builds the turboocr-engine-cuda wheel from this checkout (the helper also repairs it — a bare pip wheel only runs on the machine that built it). backend=\u0027cuda\u0027 is the instant-start CUDA execution provider; backend=\u0027turbo\u0027 is native TensorRT with a one-time cached engine build. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[cuda]\".",
+        },
+      },
+    },
+    apple: {
+      label: "Apple Silicon",
+      status: "testing",
+      noDocker: "macOS containers have no GPU passthrough — the Apple backend runs natively.",
+      methods: {
+        source: {
+          command:
+            "brew install cmake opencv drogon jsoncpp protobuf grpc c-ares jpeg-turbo\n" +
+            "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON\n" +
+            'cmake --build build -j"$(sysctl -n hw.ncpu)"\n' +
+            "export TURBO_APPLE_REC_BUCKETS=320,480,800,1200,1600,2000,2500,3200,4000\n" +
+            "./build/turboocr-server --backend apple",
+          note:
+            "One-time prereqs: full Xcode + Metal toolchain (`xcodebuild -downloadComponent MetalToolchain`) and an osx-arm64 ONNX Runtime ≥ 1.27 — " +
+            "see Native build → macOS. Detection runs on Metal + MPSGraph; recognition is a GPU + Neural Engine hybrid (narrow crops on the ANE via CoreML, in parallel). " +
+            "TURBO_APPLE_ANE_MAXW tunes the split (default 800).",
+        },
+        python: {
+          command:
+            "scripts/python/build_backend_wheel.sh cpu\n" +
+            "pip install build-wheels/cpu/fixed/*.whl\n" +
+            'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'apple\', replicas=3).read(\'doc.png\'))"',
+          note:
+            "Needs the same one-time macOS prereqs as the source build (brew packages, Xcode + Metal toolchain, osx-arm64 ONNX Runtime — see Native build → macOS): the wheel compiles the same C++ tree. " +
+            "The macOS arm64 build of turboocr-engine-cpu bundles the Metal shader library; models auto-download per tier (~6 MB for tiny). replicas=3 measured at 94% of the server's multi-replica throughput. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[cpu]\".",
+        },
+      },
+    },
+    intel: {
+      label: "Intel CPU / iGPU / Arc",
+      status: "testing",
+      methods: {
+        docker: {
+          command:
+            "docker build -f docker/Dockerfile --target intel -t turboocr:intel .\n" +
+            "docker run --device /dev/dri -p 8000:8000 -p 50051:50051 turboocr:intel",
+          note:
+            "Built from this repo (no published Intel image yet). --device /dev/dri passes the iGPU/Arc into the container; OV_DEVICE=CPU|GPU|NPU picks the device.",
+        },
+        source: {
+          command:
+            'cmake -S . -B build-intel -DTURBO_BACKENDS="cpu;intel"\n' +
+            "cmake --build build-intel -j$(nproc)\n" +
+            "./build-intel/turboocr-server --backend intel",
+          note:
+            "OpenVINO runtime must be on CMAKE_PREFIX_PATH. OV_DEVICE=CPU|GPU|NPU picks the device; the native OpenVINO path beats ONNX Runtime on the same silicon.",
+        },
+        python: {
+          command:
+            "scripts/python/build_backend_wheel.sh openvino\n" +
+            "pip install build-wheels/openvino/fixed/*.whl\n" +
+            'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'openvino\').read(\'doc.png\'))"',
+          note: "Builds the turboocr-engine-openvino wheel from this checkout (needs the OpenVINO runtime installed). OV_DEVICE=CPU|GPU|NPU picks the device at run time. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[openvino]\".",
+        },
+      },
+    },
+    amd: {
+      label: "AMD GPU",
+      status: "not yet hardware-tested",
+      methods: {
+        docker: {
+          command:
+            "docker build -f docker/Dockerfile --target amd -t turboocr:amd .\n" +
+            "docker run --device /dev/kfd --device /dev/dri --group-add video \\\n" +
+            "  -v ocr-cache:/home/ocr/.cache/turbo-ocr \\\n" +
+            "  -p 8000:8000 -p 50051:50051 turboocr:amd",
+          note:
+            "Built from this repo (no published AMD image yet). /dev/kfd + /dev/dri expose the GPU to ROCm inside the container. First run compiles ~42 MIGraphX graphs; the named volume persists that cache so only the first start pays.",
+        },
+        source: {
+          command:
+            "cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON \\\n" +
+            '      -DTURBO_BACKENDS="cpu;amd" \\\n' +
+            "      -DCMAKE_HIP_ARCHITECTURES=\"$(rocminfo | grep -om1 'gfx[0-9a-f]*')\" \\\n" +
+            "      -DCMAKE_PREFIX_PATH=/opt/rocm\n" +
+            "cmake --build build -j$(nproc)\n" +
+            "./build/turboocr-server --backend amd",
+          note:
+            "HIP kernels + MIGraphX engine. The first run compiles the graphs and caches them under ~/.cache/turbo-ocr/mgx_*.mxr; steady state starts instantly. First-machine checklist: src/backends/amd/BRINGUP.md.",
+        },
+        python: {
+          command:
+            "scripts/python/build_backend_wheel.sh rocm\n" +
+            "pip install build-wheels/rocm/fixed/*.whl\n" +
+            'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'rocm\').read(\'doc.png\'))"',
+          note: "Builds the turboocr-engine-rocm wheel from this checkout (needs ROCm on the host; compiles clean but not yet validated on AMD hardware). Once the engine wheels reach PyPI this becomes: pip install \"turboocr[rocm]\".",
+        },
+      },
+    },
+    cpu: {
+      label: "CPU only",
+      status: "shipped",
+      methods: {
+        docker: {
+          command:
+            "docker build -f docker/Dockerfile --target cpu -t turboocr:cpu .\n" +
+            "docker run -p 8000:8000 -p 50051:50051 turboocr:cpu",
+          note: "Built from this repo. No devices to pass through — runs anywhere Docker runs.",
+        },
+        source: {
+          command:
+            "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON\n" +
+            "cmake --build build -j$(nproc)\n" +
+            "./build/turboocr-server",
+          note: "ONNX Runtime + OpenCV, no GPU required. Runs anywhere.",
+        },
+        python: {
+          command:
+            "scripts/python/build_backend_wheel.sh cpu\n" +
+            "pip install build-wheels/cpu/fixed/*.whl\n" +
+            'python -c "import turboocr_engine; print(turboocr_engine.OCR().read(\'doc.png\'))"',
+          note: "The portable default — works on any machine. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[cpu]\".",
+        },
+      },
+    },
+  };
+
+  var METHOD_LABELS = { docker: "Docker", source: "Build from source", python: "Python library" };
+
+  function init(root) {
+    var state = { hw: "nvidia", method: "docker" };
+    var hwRow = root.querySelector('[data-row="hw"]');
+    var methodRow = root.querySelector('[data-row="method"]');
+    var cmdEl = root.querySelector(".phc-sel-cmd code");
+    var noteEl = root.querySelector(".phc-sel-note");
+    var statusEl = root.querySelector(".phc-sel-status");
+    var copyBtn = root.querySelector(".phc-sel-copy");
+
+    function pill(row, key, label) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "phc-pill";
+      b.dataset.key = key;
+      b.textContent = label;
+      row.appendChild(b);
+      return b;
+    }
+
+    Object.keys(CONFIG).forEach(function (k) {
+      pill(hwRow, k, CONFIG[k].label);
+    });
+    Object.keys(METHOD_LABELS).forEach(function (k) {
+      pill(methodRow, k, METHOD_LABELS[k]);
+    });
+
+    function render() {
+      var hw = CONFIG[state.hw];
+      if (!hw.methods[state.method]) state.method = "source";
+      var entry = hw.methods[state.method];
+
+      hwRow.querySelectorAll(".phc-pill").forEach(function (b) {
+        b.classList.toggle("phc-pill--on", b.dataset.key === state.hw);
+      });
+      methodRow.querySelectorAll(".phc-pill").forEach(function (b) {
+        var enabled = !!hw.methods[b.dataset.key];
+        b.classList.toggle("phc-pill--on", b.dataset.key === state.method);
+        b.classList.toggle("phc-pill--off", !enabled);
+        b.title = enabled ? "" : hw.noDocker || "";
+      });
+
+      cmdEl.textContent = entry.command;
+      noteEl.textContent = entry.note;
+      statusEl.textContent = hw.status;
+      statusEl.dataset.status = hw.status === "shipped" ? "good" : "note";
+    }
+
+    hwRow.addEventListener("click", function (e) {
+      var b = e.target.closest(".phc-pill");
+      if (b) { state.hw = b.dataset.key; render(); }
+    });
+    methodRow.addEventListener("click", function (e) {
+      var b = e.target.closest(".phc-pill");
+      if (b && !b.classList.contains("phc-pill--off")) { state.method = b.dataset.key; render(); }
+    });
+    copyBtn.addEventListener("click", function () {
+      navigator.clipboard.writeText(cmdEl.textContent).then(function () {
+        copyBtn.textContent = "copied";
+        setTimeout(function () { copyBtn.textContent = "copy"; }, 1200);
+      });
+    });
+
+    render();
+  }
+
+  function boot() {
+    var root = document.querySelector(".phc-installer");
+    if (root && !root.dataset.ready) {
+      root.dataset.ready = "1";
+      init(root);
+    }
+  }
+
+  if (window.document$ && window.document$.subscribe) {
+    window.document$.subscribe(boot);
+  } else {
+    document.addEventListener("DOMContentLoaded", boot);
+  }
+})();

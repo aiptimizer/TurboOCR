@@ -24,13 +24,29 @@ def _ocr_text(server_url, text, width=500, height=100, font_size=40):
 
 
 def _char_accuracy(expected, detected):
+    """Ordered character recall: LCS(expected, detected) / len(expected).
+
+    This was a per-character MEMBERSHIP test against the whole detected string
+    (``c in d``), which is order-blind and duplicate-blind: "HELLO" vs "OLLEH"
+    scored 1.0, and a model that returned the alphabet for every image passed
+    every case — the exact totally-broken-model failure this suite exists to
+    catch. The longest-common-subsequence ratio punishes both scrambling and
+    padding while still tolerating OCR dropping or mangling a character.
+    """
     if not expected:
         return 1.0
     e = expected.lower().replace(" ", "")
     d = detected.lower().replace(" ", "")
     if not e:
         return 1.0
-    return sum(1 for c in e if c in d) / len(e)
+    # O(len(e)*len(d)) DP over two short strings.
+    prev = [0] * (len(d) + 1)
+    for ch_e in e:
+        cur = [0]
+        for j, ch_d in enumerate(d):
+            cur.append(max(prev[j] + 1 if ch_e == ch_d else 0, prev[j + 1], cur[-1]))
+        prev = cur
+    return prev[-1] / len(e)
 
 
 class TestAccuracyRegression:

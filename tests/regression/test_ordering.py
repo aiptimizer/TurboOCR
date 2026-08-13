@@ -2,7 +2,7 @@
 
 Verifies that OCR results are returned in reading order (top-to-bottom,
 left-to-right). Tests both generated images (original) and real test data
-from tests/test_data/ (business_letter.png, dense_text.png).
+from tests/fixtures/images/ (business_letter.png, dense_text.png).
 """
 
 import os

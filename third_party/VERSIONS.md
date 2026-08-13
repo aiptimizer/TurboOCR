@@ -8,7 +8,8 @@ exact version/commit you pulled.
 |---|---|---|---|
 | nlohmann/json | `nlohmann/json.hpp` (single header) | 3.12.0 | https://github.com/nlohmann/json/releases/tag/v3.12.0 |
 | CLI11 | `cli11/CLI11.hpp` (single header) | 2.4.2 | https://github.com/CLIUtils/CLI11/releases/tag/v2.4.2 |
-| ONNX Runtime | fetched into `onnxruntime/` (prebuilt) | 1.22.0 | https://github.com/microsoft/onnxruntime/releases/tag/v1.22.0 |
+| ONNX Runtime (CPU) | fetched into `onnxruntime/` (prebuilt) | 1.27.1 | https://github.com/microsoft/onnxruntime/releases/tag/v1.27.1 |
+| ONNX Runtime (CUDA-13) | fetched by the `nvidia` arm / `docker/Dockerfile.nvidia` | 1.27.0 (`gpu_cuda13` asset) | https://github.com/microsoft/onnxruntime/releases/tag/v1.27.0 |
 | Catch2 | `catch2/catch_amalgamated.{hpp,cpp}` | 3.8.0 | https://github.com/catchorg/Catch2/releases/tag/v3.8.0 |
 | Clipper | `clipper/clipper.{hpp,cpp}` | 6.4.2 | https://sourceforge.net/projects/polyclipping/ |
 | Wuffs | `wuffs/wuffs-v0.4.c` (single file) | 0.4.0-alpha.9+3837.20240914 (rev `a14745aa458fd2b2785034efa04eab3c7b5b91e0`, 2024-09-14) | https://github.com/google/wuffs |
@@ -20,9 +21,9 @@ exact version/commit you pulled.
 The prebuilt ONNX Runtime tarball is fetched by `CMakeLists.txt` (CPU-only build)
 when no system/vendored copy is found.
 
-- **x86_64** (`onnxruntime-linux-x64-1.22.0.tgz`): pinned by default —
-  SHA256 `8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3`.
-- **aarch64** (`onnxruntime-linux-aarch64-1.22.0.tgz`): no verified default hash
+- **x86_64** (`onnxruntime-linux-x64-1.27.1.tgz`): pinned by default —
+  SHA256 `25b1ef1fea1acd210d63f8f24dc870ad6e077795ce1f54876252c6d3803c15af`.
+- **aarch64** (`onnxruntime-linux-aarch64-1.27.1.tgz`): no verified default hash
   is shipped. The build fails with a hard error unless you pin the hash with
   `-DORT_SHA256=<sha256>`. To pin it: download the release tarball, run
   `sha256sum` on it, record the value here, and pass it via `-DORT_SHA256=`.

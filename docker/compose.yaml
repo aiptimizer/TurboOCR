@@ -1,0 +1,70 @@
+# High-throughput OCR on the **nvidia** backend, with MPS multi-instance scaling.
+# Requires NVIDIA MPS: sudo nvidia-cuda-mps-control -d
+#
+# Only the nvidia backend has services here; see docker/README.md for the
+# per-backend image matrix (cpu is built directly from docker/Dockerfile --target cpu).
+#
+# TRT engines are auto-built from ONNX on first startup by the C++ binary.
+# Cached in the shared volume — built once, used by all instances.
+#
+# Usage:
+#   docker compose up -d                # Start 7 instances
+#   docker compose up -d --scale ocr=5  # Start 5 instances
+#   docker compose down                 # Stop all
+
+volumes:
+  trt-cache:  # Shared TRT engine cache
+
+services:
+  ocr:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+      replicas: 7
+    # See docs/reference/configuration.md for all tunables (OCR_MODEL,
+    # MAX_BODY_MB, MAX_IMAGE_DIM, DET_MAX_SIDE_LIMIT, etc.).
+    environment:
+      - PIPELINE_POOL_SIZE=3
+    ports:
+      - "8001-8007:8000"
+    volumes:
+      - trt-cache:/home/ocr/.cache/turbo-ocr
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 180s
+
+  # gRPC mode (alternative). gRPC is served in-process by the same
+  # turboocr-server binary on 50051 — no separate server binary.
+  ocr-grpc:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - PIPELINE_POOL_SIZE=5
+    ports:
+      - "50051:50051"
+    volumes:
+      - trt-cache:/home/ocr/.cache/turbo-ocr
+    restart: unless-stopped
+    profiles:
+      - grpc

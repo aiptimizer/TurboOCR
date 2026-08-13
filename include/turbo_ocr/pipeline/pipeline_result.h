@@ -5,10 +5,10 @@
 #include <string>
 #include <vector>
 
-#include "turbo_ocr/common/geometry/box.h"
-#include "turbo_ocr/common/types.h"
-#include "turbo_ocr/layout/layout_types.h"
-#include "turbo_ocr/router/router_types.h"
+#include "turbo_ocr/base/geometry/box.h"
+#include "turbo_ocr/core/types.h"
+#include "turbo_ocr/core/layout_types.h"
+#include "turbo_ocr/core/router_types.h"
 
 namespace turbo_ocr::pipeline {
 

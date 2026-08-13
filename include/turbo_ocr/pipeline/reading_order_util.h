@@ -2,8 +2,8 @@
 
 #include <vector>
 
-#include "turbo_ocr/common/serialization/serialization.h"
-#include "turbo_ocr/layout/order/reading_order.h"
+#include "turbo_ocr/serialization/serialization.h"
+#include "turbo_ocr/analysis/layout/order/reading_order.h"
 
 namespace turbo_ocr::pipeline {
 

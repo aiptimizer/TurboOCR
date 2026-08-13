@@ -1,0 +1,138 @@
+[build-system]
+# Current majors as of 2026-08: scikit-build-core 1.0.x, nanobind 2.13.x.
+requires = ["scikit-build-core>=1.0", "nanobind>=2.13"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "turboocr-engine-cpu"
+dynamic = ["version"]
+description = "Fast multi-backend OCR (PP-OCRv6) for Python — ONNX Runtime on NVIDIA/AMD/Intel/Apple/CPU, PDF via PDFium"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "TurboOCR" }]
+keywords = ["ocr", "paddleocr", "onnx", "onnxruntime", "tensorrt", "pdf", "document-parsing"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+# ONNX Runtime, OpenCV and PDFium are LINKED INTO the native `_turboocr`
+# extension (and bundled into the wheel), so they are NOT Python deps here.
+# The execution provider is baked into whichever per-backend wheel you install
+# (turboocr-engine-cpu / -cuda / -openvino / -rocm); `turboocr doctor` shows
+# which one to get. These Python deps are only what the thin glue layer uses:
+# NumPy (arrays) and OpenCV-Python (image decode + draw()/crop()).
+dependencies = [
+    "numpy>=1.21",
+    "opencv-python-headless>=4.6",
+]
+
+[project.optional-dependencies]
+# pypdfium2 renders input PDFs; reportlab writes searchable output PDFs.
+pdf = ["pypdfium2>=4", "reportlab>=3.6"]
+rich = ["rich>=13"]           # prettier `doctor` panel
+pandas = ["pandas>=1.3"]      # PageResult.to_pandas()
+all = ["pypdfium2>=4", "reportlab>=3.6", "rich>=13", "pandas>=1.3"]
+
+[project.scripts]
+turboocr = "turboocr_engine.cli:main"
+
+[project.urls]
+Homepage = "https://turboocr.com"
+Repository = "https://github.com/aiptimizer/TurboOCR"
+
+# scikit-build-core drives the repo's top-level CMake (source-dir "..") with
+# BUILD_PYTHON=ON: the _turboocr nanobind extension (STABLE_ABI) + the Metal
+# shader library install into turboocr_engine/ inside the wheel, next to the pure
+# package below. TURBO_BACKENDS defaults per platform (cpu;apple on macOS,
+# cpu elsewhere); the per-backend wheels (turboocr-engine-{cuda,openvino,rocm})
+# override it from their own thin configs in wheels/ — same source tree, same
+# turboocr_engine package, same _version.py, different name + CMake args; see
+# wheels/README.md. They are MUTUALLY EXCLUSIVE with this one: all four own the
+# `turboocr_engine` import name.
+#
+# THIS FILE IS THE TEMPLATE FOR ALL FOUR. A backend wheel is built by STAGING
+# wheels/<backend>/pyproject.toml OVER this file (this one backed up first) and
+# building python/ — see scripts/python/build_backend_wheel.sh. That is why
+# every backend config repeats this section verbatim except for `[project].name`,
+# `cmake.args`, `build-dir` and the description/keywords: they all resolve their
+# paths as if they sat HERE. Any path change below must be mirrored into the
+# three files under wheels/.
+#
+# After building, vendor the linked dylibs: delocate-wheel (macOS) /
+# auditwheel repair (Linux) — see [tool.cibuildwheel].
+[tool.scikit-build]
+minimum-version = "1.0"
+# Persistent build tree: without it every `pip wheel` reconfigures and
+# recompiles the whole C++ tree from scratch (~minutes); with it rebuilds are
+# incremental. Safe to delete anytime.
+build-dir = "../build-wheels/skbuild-{wheel_tag}"
+cmake.source-dir = ".."
+cmake.args = ["-DBUILD_PYTHON=ON", "-DUSE_CPU_ONLY=ON"]
+build.targets = ["_turboocr"]
+install.components = ["python"]
+wheel.packages = ["turboocr_engine"]
+# abi3. nanobind_add_module(_turboocr STABLE_ABI) already compiles against the
+# 3.12 limited API and emits `_turboocr.abi3.so`, but WITHOUT this line
+# scikit-build-core still TAGS the wheel cp3XY-cp3XY — one wheel per
+# interpreter for a binary that only needs one, contradicting what the
+# [tool.cibuildwheel] comment below promises. cp312 is nanobind's floor for the
+# stable ABI. Building on an interpreter older than 3.12 does not break:
+# scikit-build-core ignores py-api it cannot satisfy and falls back to the
+# plain cp3XY-cp3XY tag, so a from-source build under requires-python ">=3.9"
+# still produces an honestly tagged wheel.
+wheel.py-api = "cp312"
+# Never ship a stale local build. `wheel.packages` copies python/turboocr_engine AS IT
+# IS ON DISK, and a developer tree normally has a previously built
+# `_turboocr.cpython-3XY-<plat>.so` (and, on macOS, `turbo_apple.metallib`)
+# sitting in it. The repo's .gitignore does NOT protect the wheel:
+# scikit-build-core only reads .gitignore files at and below the PROJECT dir
+# (python/), never the one at the repo root.
+#
+# This is `sdist.exclude` and NOT `wheel.exclude` — that distinction is the
+# whole safety argument, and the two are not interchangeable:
+#   * sdist.exclude is passed as `src_exclude` and applies ONLY to the walk of
+#     the SOURCE package directory (build/_pathutil.py packages_to_file_mapping
+#     -> _file_processor.each_unignored_file). The only thing it can drop is a
+#     file that was about to be copied out of python/turboocr_engine/.
+#   * wheel.exclude is ALSO applied as a filter over every staged wheel tree at
+#     zip time (build/_wheelfile.py WheelWriter.build), the CMake install tree
+#     included. A `turboocr_engine/_turboocr*.so` there would delete the FRESHLY
+#     BUILT extension that `install(TARGETS _turboocr ... DESTINATION
+#     turboocr_engine)` put at exactly that path, and ship a wheel with no
+#     module in it.
+# The freshly built extension is therefore structurally out of reach of these
+# patterns: it is never a candidate of the source walk. (Two further backstops:
+# CMake installs before the package copy runs, and the copy already skips any
+# source file whose target path already exists.)
+sdist.exclude = [
+    "turboocr_engine/_turboocr*.so",
+    "turboocr_engine/_turboocr*.pyd",
+    "turboocr_engine/_turboocr*.dylib",
+    "turboocr_engine/*.metallib",
+]
+# Deliberately does NOT list the package directory. An include is checked
+# BEFORE the user exclude (_file_processor.match_path), and a bare
+# `turboocr_engine` matches every file underneath it — it would silently defeat
+# every pattern above. The package needs no include line: unignored files are collected by
+# default.
+sdist.include = ["turboocr_engine", "README.md", "pyproject.toml"]
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.regex"
+input = "turboocr_engine/_version.py"
+
+[tool.cibuildwheel]
+# cibuildwheel >= 4 (2026-07): manylinux_2_28 is its consistent default image,
+# and its audit stage runs abi3audit on stable-ABI wheels. One config per
+# backend wheel (DESIGN.md section 5); this is the base CPU(+CoreML/Metal on
+# macOS) wheel. abi3 via nanobind STABLE_ABI: the cp312 build yields one wheel
+# per platform covering every later CPython (3.13/3.14/3.15).
+build = "cp312-*"
+skip = "*-musllinux*"
+
+[tool.cibuildwheel.macos]
+repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"

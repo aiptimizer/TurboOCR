@@ -1,0 +1,32 @@
+# LeakSanitizer suppressions — third-party one-time/opaque allocations ONLY.
+#
+# Rule for adding a line here: it must name a library we do not build from
+# source, and the classification must come from a MEASURED run, not a guess.
+# Nothing in the turbo_ocr:: namespace is ever suppressed — a leak with one of
+# our frames in the stack is a bug to fix.
+#
+# Evidence backing the current list (2026-08-11, aarch64 Linux, clean-container
+# ASan/RelWithDebInfo build):
+#   - full suite, 571/571 passing under ASan: LSan reported 3,744 bytes in 53
+#     allocations at exit — every stack routes through FPDF_LoadPage ->
+#     CPDF_StreamContentParser::Parse inside the prebuilt libpdfium, with ZERO
+#     turbo_ocr frames anywhere in the report.
+#   - the same classification holds on macOS by a different instrument:
+#     `leaks` reported 26,144 bytes byte-for-byte identical before and after
+#     doubling the request count, i.e. one-time init, not per-request.
+#
+# Evidence for the pthread_cond_broadcast entry (2026-08-11, Arch + RTX 5090,
+# CUDA configure under ASAN_OPTIONS=protect_shadow_gap=0, 620/620 passing):
+#   - exactly 3 direct leaks of 48 bytes each, every stack being
+#     calloc <- pthread_cond_broadcast <- <unknown module> — the anonymous
+#     executable pages are the CUDA driver's internal threads, and the calloc
+#     is glibc's own lazy condvar bookkeeping, which those threads never tear
+#     down before exit. Count is load-independent.
+#   - safe to match on that frame: the only allocation inside
+#     pthread_cond_broadcast is glibc's internal one — an object of OURS leaked
+#     through a condvar would carry its own allocation frame instead.
+#
+# Usage:
+#   LSAN_OPTIONS=suppressions=tools/checks/lsan.supp ./build-asan/turbo_ocr_tests
+leak:libpdfium
+leak:pthread_cond_broadcast
