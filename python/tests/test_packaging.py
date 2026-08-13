@@ -25,7 +25,9 @@ PY_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: others are compared against.
 PYPROJECTS = {
     "turboocr-engine-cpu": os.path.join(PY_DIR, "pyproject.toml"),
-    "turboocr-engine-cuda": os.path.join(PY_DIR, "wheels", "cuda", "pyproject.toml"),
+    # NVIDIA is two distributions, one per CUDA major (see wheels/README.md).
+    "turboocr-engine-cuda12": os.path.join(PY_DIR, "wheels", "cuda12", "pyproject.toml"),
+    "turboocr-engine-cuda13": os.path.join(PY_DIR, "wheels", "cuda13", "pyproject.toml"),
     "turboocr-engine-openvino": os.path.join(PY_DIR, "wheels", "openvino", "pyproject.toml"),
     "turboocr-engine-rocm": os.path.join(PY_DIR, "wheels", "rocm", "pyproject.toml"),
 }
@@ -63,7 +65,7 @@ def _extras(proj: dict) -> dict:
 
 
 def test_optional_dependencies_are_identical_across_wheels(projects):
-    """`pip install "turboocr-engine-cuda[pdf]"` must pull exactly what
+    """`pip install "turboocr-engine-cuda12[pdf]"` must pull exactly what
     `pip install "turboocr-engine-cpu[pdf]"` does.
 
     The extras tables are four hand-copied duplicates: adding a dependency to
@@ -117,17 +119,30 @@ def test_no_wheel_declares_a_turboocr_sibling_as_a_dependency(projects):
 
 
 def test_umbrella_extras_pin_the_engine_wheels_to_its_own_version():
-    """python-sdk's [cpu]/[cuda]/[openvino]/[rocm] extras are the front door to
-    these engine wheels. Each must pin `turboocr-engine-<variant>==<umbrella
-    version>` — an unpinned or drifted pin installs an engine whose API the
-    umbrella facade was not written against."""
+    """python-sdk's extras are the front door to these engine wheels. Each must
+    pin `turboocr-engine-<variant>==<umbrella version>` — an unpinned or drifted
+    pin installs an engine whose API the umbrella facade was not written
+    against.
+
+    NVIDIA is two distributions (one per CUDA major), so `cuda12` and `cuda13`
+    are the real extras and bare `cuda` is an ALIAS for whichever is the
+    low-friction default. The alias is checked separately: it must still pin at
+    the umbrella's own version, and must point at a real NVIDIA extra rather
+    than a name nobody publishes."""
     if not os.path.exists(UMBRELLA_PYPROJECT):
         pytest.skip("python-sdk not present (engine-only checkout)")
     proj = _load(UMBRELLA_PYPROJECT)["project"]
     version = proj["version"]
     extras = proj["optional-dependencies"]
-    for variant in ("cpu", "cuda", "openvino", "rocm"):
+    for variant in ("cpu", "cuda12", "cuda13", "openvino", "rocm"):
         assert extras.get(variant) == [f"turboocr-engine-{variant}=={version}"], (
             variant,
             extras.get(variant),
         )
+    # The alias must resolve to one of the two NVIDIA wheels, at the same
+    # version — not to the retired `turboocr-engine-cuda`, which is not built
+    # or published any more.
+    assert extras.get("cuda") in (
+        [f"turboocr-engine-cuda12=={version}"],
+        [f"turboocr-engine-cuda13=={version}"],
+    ), extras.get("cuda")

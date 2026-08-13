@@ -48,10 +48,10 @@ Repository = "https://github.com/aiptimizer/TurboOCR"
 # BUILD_PYTHON=ON: the _turboocr nanobind extension (STABLE_ABI) + the Metal
 # shader library install into turboocr_engine/ inside the wheel, next to the pure
 # package below. TURBO_BACKENDS defaults per platform (cpu;apple on macOS,
-# cpu elsewhere); the per-backend wheels (turboocr-engine-{cuda,openvino,rocm})
+# cpu elsewhere); the per-backend wheels (turboocr-engine-{cuda12,cuda13,openvino,rocm})
 # override it from their own thin configs in wheels/ — same source tree, same
 # turboocr_engine package, same _version.py, different name + CMake args; see
-# wheels/README.md. They are MUTUALLY EXCLUSIVE with this one: all four own the
+# wheels/README.md. They are MUTUALLY EXCLUSIVE with this one: all of them own the
 # `turboocr_engine` import name.
 #
 # THIS FILE IS THE TEMPLATE FOR ALL FOUR. A backend wheel is built by STAGING
@@ -119,7 +119,7 @@ sdist.exclude = [
 # `turboocr_engine` matches every file underneath it — it would silently defeat
 # every pattern above. The package needs no include line: unignored files are collected by
 # default.
-sdist.include = ["turboocr_engine", "README.md", "pyproject.toml"]
+sdist.include = ["README.md", "pyproject.toml"]
 
 [tool.scikit-build.metadata.version]
 provider = "scikit_build_core.metadata.regex"

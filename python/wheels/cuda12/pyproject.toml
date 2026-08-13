@@ -1,4 +1,4 @@
-# turboocr-engine-cuda — the NVIDIA wheel.
+# turboocr-engine-cuda12 — the NVIDIA wheel.
 #
 # Same source tree, same `turboocr_engine` import package, same `_turboocr` extension
 # as the base wheel (../../pyproject.toml). ONLY the distribution name and the
@@ -12,38 +12,50 @@
 # CUDA variant, but the build copies it OVER python/pyproject.toml (backing the
 # base up first) and builds python/:
 #
-#   scripts/python/build_backend_wheel.sh cuda
+#   scripts/python/build_backend_wheel.sh cuda12
 #
 # Every path below is therefore written RELATIVE TO python/, exactly as in the
 # base config — `cmake.source-dir = ".."`, `wheel.packages = ["turboocr_engine"]`,
 # version input `turboocr_engine/_version.py`. Do NOT "fix" them into ../../.. escapes
 # pointing at this directory: a cibuildwheel container only mounts the package
 # directory, so an escaping path resolves to nothing there. Building this
-# directory directly (`pip wheel python/wheels/cuda`) is NOT supported.
+# directory directly (`pip wheel python/wheels/cuda12`) is NOT supported.
 # See ../README.md.
 [build-system]
 requires = ["scikit-build-core>=1.0", "nanobind>=2.13"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "turboocr-engine-cuda"
+name = "turboocr-engine-cuda12"
 dynamic = ["version"]
-description = "Fast multi-backend OCR (PP-OCRv6) for Python — NVIDIA build: TensorRT + ONNX Runtime CUDA EP"
+description = "Fast multi-backend OCR (PP-OCRv6) for Python — NVIDIA CUDA 12 build: TensorRT + ONNX Runtime CUDA EP"
 readme = { content-type = "text/markdown", text = """
-# turboocr-engine-cuda
+# turboocr-engine-cuda12
 
-The NVIDIA build of the [TurboOCR](https://turboocr.com) engine. Identical
+The NVIDIA build of the [TurboOCR](https://turboocr.com) engine, built against **CUDA 12**. CUDA 12 build — the widest-compatibility NVIDIA wheel.
+
+Needs an NVIDIA driver R525+ and a Turing (sm_75) or newer GPU. Identical
 Python API to `turboocr-engine-cpu` — `from turboocr_engine import OCR`, or
 `from turboocr import OCR` through the pure-Python `turboocr` umbrella
-(`pip install "turboocr[cuda]"` installs both) — with the NVIDIA backend
+(`pip install "turboocr[cuda12]"` installs both) — with the NVIDIA backend
 compiled into the native extension:
 
 * `backend="cuda"` — the ONNX graph on ONNX Runtime's CUDA execution provider
   (instant start, no engine build).
 * `backend="turbo"` — the native TensorRT path, with an on-disk engine cache.
-  Never auto-selected: the first run pays the engine build.
+  **This is what `backend="auto"` (the `OCR()` default) resolves to on this
+  wheel**, because the nvidia backend is compiled in. The FIRST run builds the
+  engine — roughly 90 s on an RTX 5090, longer on older cards — and caches it
+  under `TRT_ENGINE_CACHE` (default `~/.cache/turbo-ocr`); every later run
+  loads it in a fraction of a second. Pass `backend="cuda"` explicitly if you
+  need an instant first start instead.
 
-Needs an NVIDIA driver on the host. **Install exactly one**
+The CUDA, cuDNN and TensorRT runtimes are **not** bundled in this wheel and are
+**not** declared as dependencies — they must already be present on the host,
+from a system CUDA install or the matching pip packages
+(`nvidia-cuda-runtime-cu12`, `nvidia-cudnn-cu12`, `tensorrt-cu12==10.15.1.29`).
+
+**Install exactly one**
 `turboocr-engine-*` wheel per environment: they all provide the
 `turboocr_engine` import package and link
 mutually incompatible ONNX Runtime builds. `turboocr doctor` reports which
@@ -92,7 +104,7 @@ minimum-version = "1.0"
 # build-wheels/skbuild-*: USE_CPU_ONLY and TURBO_BACKENDS are CMake CACHE
 # variables, so reusing one directory across variants would silently rebuild
 # the previous variant's configuration.
-build-dir = "../build-wheels/skbuild-cuda-{wheel_tag}"
+build-dir = "../build-wheels/skbuild-cuda12-{wheel_tag}"
 # Staged at python/pyproject.toml, so one level up is the repo root — the same
 # C++ tree the base wheel builds.
 cmake.source-dir = ".."
@@ -112,10 +124,12 @@ cmake.source-dir = ".."
 #     no libonnxruntime_providers_cuda.
 #   * the CUDA toolkit (find_package(CUDAToolkit REQUIRED)).
 #   * TensorRT, at -DTENSORRT_DIR=<sdk root> (default /usr/local/tensorrt).
-#   * -DCMAKE_CUDA_ARCHITECTURES for the SMs the wheel should ship. Left unset
-#     here: CMake then takes nvcc's default (sm_75 on CUDA 13), whose embedded
-#     PTX JITs forward onto newer GPUs — correct but not optimal, and a
-#     distributed wheel usually wants an explicit multi-arch list.
+#   * -DCMAKE_CUDA_ARCHITECTURES: the CI matrix passes 75;80;86;89;90;120
+#     explicitly. Do NOT leave it unset — CMake then pre-fills it with the
+#     toolkit's OLDEST arch during enable_language(CUDA) (sm_50 on nvcc 12.9),
+#     which does not compile: ccl_kernels.cu uses a cooperative-groups
+#     grid.sync(), needing compute capability 6.0+. The project floor is
+#     Turing (sm_75) regardless.
 # Pass those through the CMAKE_ARGS environment variable, which
 # scikit-build-core appends AFTER this list.
 cmake.args = [

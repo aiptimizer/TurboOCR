@@ -209,7 +209,7 @@ exclusive):
 ```bash
 # The helper builds AND repairs the wheel — a bare `pip wheel python/`
 # bundles no libraries and only runs on the machine that built it.
-scripts/python/build_backend_wheel.sh cpu     # cpu | cuda | openvino | rocm
+scripts/python/build_backend_wheel.sh cpu     # cpu | cuda12 | cuda13 | openvino | rocm
 pip install build-wheels/cpu/fixed/*.whl
 ```
 
@@ -222,7 +222,8 @@ per backend, and they are mutually exclusive, so install exactly one:
 ```bash
 pip install turboocr              # client only — talk to a running server
 pip install "turboocr[cpu]"       # + in-process engine, CPU (and Apple Silicon)
-pip install "turboocr[cuda]"      # + NVIDIA engine
+pip install "turboocr[cuda12]"    # + NVIDIA engine, CUDA 12 (driver R525+)
+pip install "turboocr[cuda13]"    # + NVIDIA engine, CUDA 13 (driver R580+)
 pip install "turboocr[openvino]"  # + Intel engine (CPU / iGPU / Arc / NPU)
 pip install "turboocr[rocm]"      # + AMD engine
 ```

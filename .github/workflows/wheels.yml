@@ -8,12 +8,19 @@
 #
 #   turboocr                  client + engine facade (py3-none-any)  python-sdk/
 #   turboocr-engine-cpu       CPU everywhere, + Metal/ANE on macOS   python/
-#   turboocr-engine-cuda      + ORT CUDA/TensorRT execution providers python/wheels/cuda/
+#   turboocr-engine-cuda12    NVIDIA, CUDA 12 (driver R525+)         python/wheels/cuda12/
+#   turboocr-engine-cuda13    NVIDIA, CUDA 13 (driver R580+)         python/wheels/cuda13/
 #   turboocr-engine-openvino  + the native Intel OpenVINO backend    python/wheels/openvino/
 #   turboocr-engine-rocm      + the native AMD ROCm backend          python/wheels/rocm/
 #
-# The umbrella's extras are the front door (`pip install "turboocr[cuda]"`
-# pins the matching engine wheel). All four engine wheels install the SAME
+# NVIDIA is TWO distributions because a wheel links exactly one CUDA runtime
+# and PyPI allows a single build per name+version. They are byte-identical in
+# source and cmake.args — only the toolchain differs (nvcc 12.9 vs 13.3, and
+# the matching gpu_cuda12/gpu_cuda13 ORT), both against TensorRT 10.15.1.29.
+#
+# The umbrella's extras are the front door (`pip install "turboocr[cuda12]"`
+# pins the matching engine wheel; bare [cuda] resolves to cuda12, the widely
+# installable one). All five engine wheels install the SAME
 # import package (`turboocr_engine`), so exactly one may be installed per
 # environment. The per-wheel pyproject.toml files are the source of truth for
 # the distribution name and the scikit-build-core settings; this workflow only
@@ -44,17 +51,25 @@
 #
 #   turboocr                  -> environment: pypi-umbrella   (ordinary publisher)
 #   turboocr-engine-cpu       -> environment: pypi
-#   turboocr-engine-cuda      -> environment: pypi-cuda
+#   turboocr-engine-cuda12    -> environment: pypi-cuda12
+#   turboocr-engine-cuda13    -> environment: pypi-cuda13
 #   turboocr-engine-openvino  -> environment: pypi-openvino
 #   turboocr-engine-rocm      -> NOT REGISTERED, NOT PUBLISHED (see below)
 #
 # rocm is built and uploaded as an artifact but deliberately absent from the
-# publish matrix: PyPI caps an account at 3 pending publishers, and rocm is the
-# one arm that has never run on its hardware (src/backends/amd/BRINGUP.md), so
-# it is the right one to hold back. To ship it later: register the pending
-# publisher on PyPI with environment `pypi-rocm` (a slot frees up as soon as one
-# of the others publishes and becomes an ordinary publisher), then add its row
-# to the publish matrix.
+# publish matrix: it is the one arm that has never run on its hardware
+# (src/backends/amd/BRINGUP.md), so it is the right one to hold back.
+#
+# ####  THE FIRST RELEASE IS A SEQUENCE, NOT ONE RUN  #########################
+# PyPI caps an account at 3 PENDING publishers, and splitting NVIDIA needs
+# FOUR distributions registered (cpu, cuda12, cuda13, openvino) — one over the
+# cap, before rocm is even considered. A pending publisher becomes an ORDINARY
+# one the moment its project first publishes, which frees the slot. So the
+# first release goes in waves: register up to 3, publish, register the next,
+# publish. Each wave is irreversible. Plan the order before starting; the
+# obvious one is cpu + cuda12 + cuda13 first (the wheels most people install),
+# then openvino, then rocm.
+# ############################################################################
 # #############################################################################
 #
 # NO GPU IS REQUIRED TO BUILD ANY OF THESE. The vendor execution providers are
@@ -91,15 +106,10 @@ env:
   # older ORT than production has bitten before (CoreML NaN on 1.24.4, clean on
   # 1.27) — bump all three together.
   ORT_VERSION: "1.28.0"
-  # The CUDA-13 asset + hash used by ci.yml's cuda-compile-gate. The PLAIN
-  # tarball is CPU-only; linking it into turboocr-engine-cuda would ship a
-  # lying wheel.
-  ORT_CUDA_ASSET: "onnxruntime-linux-x64-gpu_cuda13-1.28.0"
-  # Verified against the published asset (size 240874643, matching the release
-  # metadata). The previous pin was stale and failed `sha256sum -c` before the
-  # CUDA wheel compiled a single file — the same drift that had broken the CPU
-  # tarball's hash in .github/actions/setup-cpp-deps.
-  ORT_CUDA_SHA256: "84d28f27589090b280d4312743efd3d450cd4ac7d1e1d75e7d9076d9637bf9de"
+  # NOTE: the CUDA ORT asset + digest are NOT global. There is one per CUDA
+  # major and a single value cannot serve both, so they live on the matrix rows
+  # as ort-cuda-asset / ort-cuda-sha256. The PLAIN tarball is CPU-only; linking
+  # it into an NVIDIA wheel would ship a lying wheel.
   # manylinux_2_28 is AlmaLinux 8, whose EPEL OpenCV is 3.4.x. The tree needs
   # OpenCV 4 (docker/Dockerfile uses Ubuntu's libopencv-dev 4.6), so the
   # container builds a minimal 4.x from source — deterministic and pinned,
@@ -167,22 +177,60 @@ jobs:
             # purpose — see the note on `continue-on-error` above.
             experimental: true
 
-          # ---- turboocr-engine-cuda (NVIDIA) -------------------------------
-          # Linux x86_64 only. No CUDA toolkit is installed and none is needed:
-          # the wheel takes the ONNX-Runtime host path (USE_CPU_ONLY=ON) and the
-          # CUDA/TensorRT execution providers live in libonnxruntime_providers_*.so,
-          # which ORT dlopen's at RUN time. All the build needs is the gpu_cuda
-          # ORT's headers + libonnxruntime.so, staged below.
-          - wheel: turboocr-engine-cuda
+          # Linux x86_64 only — there is no aarch64 CUDA arm in this matrix.
+          # ---- turboocr-engine-cuda12 / -cuda13 (NVIDIA) --------------------
+          # TWO distributions, one per CUDA major. A wheel links exactly one
+          # CUDA runtime and PyPI allows one build per name+version, so the
+          # majors cannot share a distribution. They differ ONLY in toolchain:
+          # same C++ tree, same staged cmake.args, same TensorRT 10.15.1.29.
+          # Choose by DRIVER — cuda12 runs on R525+, cuda13 needs R580+.
+          - wheel: turboocr-engine-cuda12
             os: ubuntu-24.04
             package-dir: python
-            stage-pyproject: python/wheels/cuda/pyproject.toml
+            stage-pyproject: python/wheels/cuda12/pyproject.toml
             cibw-archs: x86_64
-            before-all-extra: ""
-            # No -DTURBO_BACKENDS override: the CUDA wheel is the ONNX-Runtime
-            # host path with a CUDA-capable ORT staged into third_party/, which
-            # CMakeLists.txt picks up by search order.
-            cmake-args-linux: ""
+            # Widest reach: any driver R525+. Digest verified against the published asset (423724908 bytes).
+            ort-cuda-asset: onnxruntime-linux-x64-gpu_cuda12-1.28.0
+            ort-cuda-sha256: "ea6bd2b65d7dfabbeb92c4af5dd8f12e5aed8601e544ad378d2f872275438b1a"
+            # nvcc + TensorRT INTO the manylinux container. The NVIDIA arm is
+            # the one backend that is not the ONNX-Runtime host path: it
+            # compiles the .cu kernels and links TensorRT, so it needs a real
+            # toolkit at build time (find_package(CUDAToolkit REQUIRED)).
+            # Measured at ~382 MB for the CUDA side — well inside the runner.
+            before-all-extra: |
+              dnf install -y -q dnf-plugins-core
+              dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+              dnf install -y -q cuda-nvcc-12-9 cuda-cudart-devel-12-9 libnvjpeg-devel-12-9 tensorrt-devel-10.15.1.29-1.cuda12.9
+              # The RPMs put TensorRT at /usr/include + /usr/lib64, NOT the
+              # /usr/local/tensorrt that CMakeLists.txt defaults TENSORRT_DIR
+              # to — and it reads ${TENSORRT_DIR}/lib, not lib64. Lay out a
+              # prefix with the shape CMake expects rather than patching it.
+              mkdir -p /usr/local/tensorrt/lib
+              ln -sfn /usr/include /usr/local/tensorrt/include
+              # Glob FIRST and fail if it matched nothing: an unmatched glob is
+              # passed through literally, so `ln -sf` would happily create a
+              # DANGLING symlink named libnvinfer*.so* and exit 0, leaving the
+              # real failure to surface much later as a confusing link error.
+              ls /usr/lib64/libnvinfer.so >/dev/null
+              ln -sf /usr/lib64/libnvinfer*.so* /usr/local/tensorrt/lib/
+              ln -sf /usr/lib64/libnvonnxparser*.so* /usr/local/tensorrt/lib/ 2>/dev/null || true
+              # Assert the LIB too, not just the header: CMakeLists.txt reads
+              # ${TENSORRT_DIR}/lib and ${TENSORRT_DIR}/include, and only the
+              # header was being checked. -e (not -f) because these are symlinks.
+              test -e /usr/local/tensorrt/include/NvInfer.h
+              test -e /usr/local/tensorrt/lib/libnvinfer.so
+            # USE_CPU_ONLY=OFF + TURBO_BACKENDS=cpu;nvidia come from the staged
+            # pyproject's cmake.args.
+            # CMAKE_CUDA_ARCHITECTURES is set EXPLICITLY, not left to nvcc.
+            # Unset, CMake pre-fills it during enable_language(CUDA) with the
+            # toolkit's OLDEST arch — sm_50 on nvcc 12.9 — and the Turing
+            # fallback further down never fires because the variable is no
+            # longer empty. sm_50 does not compile: ccl_kernels.cu uses
+            # cooperative-groups grid.sync(), which needs compute capability
+            # 6.0+. The project floor is Turing anyway (README, and the
+            # CMAKE_CUDA_ARCHITECTURES 75 fallback), so pin the real target
+            # set and make both CUDA majors produce the same GPU coverage.
+            cmake-args-linux: "-DTENSORRT_DIR=/usr/local/tensorrt -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120"
             # CUDA toolkit + driver sonames are EXCLUDED from vendoring: they
             # are host-provided or come from the user's onnxruntime-gpu
             # dependency, exactly as onnxruntime-gpu itself ships. Bundling
@@ -194,6 +242,69 @@ jobs:
               --exclude 'libcudnn*.so.*' --exclude 'libcurand.so.*' --exclude 'libcufft.so.*'
               --exclude 'libnvinfer*.so.*' --exclude 'libnvonnxparser*.so.*'
               --exclude 'libnccl.so.*' --exclude 'libcupti.so.*'
+              --exclude 'libnvjpeg.so.*'
+
+
+          - wheel: turboocr-engine-cuda13
+            os: ubuntu-24.04
+            package-dir: python
+            stage-pyproject: python/wheels/cuda13/pyproject.toml
+            cibw-archs: x86_64
+            # Matches the stack the 5090 numbers were measured on (CUDA 13.3). Needs driver R580+. Digest verified (240874643 bytes).
+            ort-cuda-asset: onnxruntime-linux-x64-gpu_cuda13-1.28.0
+            ort-cuda-sha256: "84d28f27589090b280d4312743efd3d450cd4ac7d1e1d75e7d9076d9637bf9de"
+            # nvcc + TensorRT INTO the manylinux container. The NVIDIA arm is
+            # the one backend that is not the ONNX-Runtime host path: it
+            # compiles the .cu kernels and links TensorRT, so it needs a real
+            # toolkit at build time (find_package(CUDAToolkit REQUIRED)).
+            # Measured at ~382 MB for the CUDA side — well inside the runner.
+            before-all-extra: |
+              dnf install -y -q dnf-plugins-core
+              dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+              dnf install -y -q cuda-nvcc-13-3 cuda-cudart-devel-13-3 libnvjpeg-devel-13-3 tensorrt-devel-10.15.1.29-1.cuda13.1
+              # The RPMs put TensorRT at /usr/include + /usr/lib64, NOT the
+              # /usr/local/tensorrt that CMakeLists.txt defaults TENSORRT_DIR
+              # to — and it reads ${TENSORRT_DIR}/lib, not lib64. Lay out a
+              # prefix with the shape CMake expects rather than patching it.
+              mkdir -p /usr/local/tensorrt/lib
+              ln -sfn /usr/include /usr/local/tensorrt/include
+              # Glob FIRST and fail if it matched nothing: an unmatched glob is
+              # passed through literally, so `ln -sf` would happily create a
+              # DANGLING symlink named libnvinfer*.so* and exit 0, leaving the
+              # real failure to surface much later as a confusing link error.
+              ls /usr/lib64/libnvinfer.so >/dev/null
+              ln -sf /usr/lib64/libnvinfer*.so* /usr/local/tensorrt/lib/
+              ln -sf /usr/lib64/libnvonnxparser*.so* /usr/local/tensorrt/lib/ 2>/dev/null || true
+              # Assert the LIB too, not just the header: CMakeLists.txt reads
+              # ${TENSORRT_DIR}/lib and ${TENSORRT_DIR}/include, and only the
+              # header was being checked. -e (not -f) because these are symlinks.
+              test -e /usr/local/tensorrt/include/NvInfer.h
+              test -e /usr/local/tensorrt/lib/libnvinfer.so
+            # USE_CPU_ONLY=OFF + TURBO_BACKENDS=cpu;nvidia come from the staged
+            # pyproject's cmake.args.
+            # CMAKE_CUDA_ARCHITECTURES is set EXPLICITLY, not left to nvcc.
+            # Unset, CMake pre-fills it during enable_language(CUDA) with the
+            # toolkit's OLDEST arch — sm_50 on nvcc 12.9 — and the Turing
+            # fallback further down never fires because the variable is no
+            # longer empty. sm_50 does not compile: ccl_kernels.cu uses
+            # cooperative-groups grid.sync(), which needs compute capability
+            # 6.0+. The project floor is Turing anyway (README, and the
+            # CMAKE_CUDA_ARCHITECTURES 75 fallback), so pin the real target
+            # set and make both CUDA majors produce the same GPU coverage.
+            cmake-args-linux: "-DTENSORRT_DIR=/usr/local/tensorrt -DCMAKE_CUDA_ARCHITECTURES=75;80;86;89;90;120"
+            # CUDA toolkit + driver sonames are EXCLUDED from vendoring: they
+            # are host-provided or come from the user's onnxruntime-gpu
+            # dependency, exactly as onnxruntime-gpu itself ships. Bundling
+            # libcuda.so.1 would pin a driver version into the wheel.
+            repair-linux: >-
+              auditwheel repair -w {dest_dir} {wheel}
+              --exclude libcuda.so.1
+              --exclude 'libcudart.so.*' --exclude 'libcublas.so.*' --exclude 'libcublasLt.so.*'
+              --exclude 'libcudnn*.so.*' --exclude 'libcurand.so.*' --exclude 'libcufft.so.*'
+              --exclude 'libnvinfer*.so.*' --exclude 'libnvonnxparser*.so.*'
+              --exclude 'libnccl.so.*' --exclude 'libcupti.so.*'
+              --exclude 'libnvjpeg.so.*'
+
 
           # ---- turboocr-engine-openvino (Intel) ----------------------------
           # The native OpenVINO backend (TURBO_BACKENDS="cpu;intel",
@@ -292,14 +403,14 @@ jobs:
       # -DONNXRUNTIME_LIB override is needed. It is staged on the HOST because
       # the same tree is bind-mounted into the build container.
       - name: Stage the CUDA-enabled ONNX Runtime
-        if: matrix.wheel == 'turboocr-engine-cuda'
+        if: startsWith(matrix.wheel, 'turboocr-engine-cuda')
         run: |
           set -euo pipefail
           rm -rf third_party/onnxruntime
-          wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${ORT_CUDA_ASSET}.tgz" -O ort.tgz
-          echo "${ORT_CUDA_SHA256}  ort.tgz" | sha256sum -c -
+          wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/${{ matrix.ort-cuda-asset }}.tgz" -O ort.tgz
+          echo "${{ matrix.ort-cuda-sha256 }}  ort.tgz" | sha256sum -c -
           tar xzf ort.tgz
-          mv "${ORT_CUDA_ASSET}" third_party/onnxruntime
+          mv "${{ matrix.ort-cuda-asset }}" third_party/onnxruntime
           # Fail loudly rather than silently building a CPU-only "cuda" wheel.
           ls third_party/onnxruntime/lib/libonnxruntime_providers_cuda.so*
 
@@ -457,7 +568,7 @@ jobs:
       # libonnxruntime, so the mangled main-lib name does not matter, the
       # directory does. Same two-step as scripts/python/build_backend_wheel.sh.
       - name: Inject the dlopen'd CUDA/TensorRT provider libs
-        if: matrix.wheel == 'turboocr-engine-cuda'
+        if: startsWith(matrix.wheel, 'turboocr-engine-cuda')
         run: |
           set -euxo pipefail
           python -m pip install wheel
@@ -526,7 +637,7 @@ jobs:
   #
   # Not one job uploading everything: each distribution has its own trusted
   # publisher on PyPI, scoped to its own GitHub environment, so the OIDC token
-  # minted for `pypi-cuda` can ONLY create turboocr-engine-cuda. A single
+  # minted for `pypi-cuda12` can ONLY create turboocr-engine-cuda12. A single
   # combined job would need one environment authorised for all five names,
   # which is exactly the blast radius trusted publishing exists to avoid.
   #
@@ -562,9 +673,16 @@ jobs:
           - dist: turboocr-engine-cpu
             artifacts: wheels-turboocr-engine-cpu-*
             environment: pypi
-          - dist: turboocr-engine-cuda
-            artifacts: wheels-turboocr-engine-cuda-*
-            environment: pypi-cuda
+          # NOTE the -cuda12-/-cuda13- globs. A bare `wheels-turboocr-engine-cuda-*`
+          # would match BOTH majors and upload the other one's wheels under this
+          # distribution's token — exactly the failure the comment above warns
+          # about, and now reachable because two distributions share a prefix.
+          - dist: turboocr-engine-cuda12
+            artifacts: wheels-turboocr-engine-cuda12-*
+            environment: pypi-cuda12
+          - dist: turboocr-engine-cuda13
+            artifacts: wheels-turboocr-engine-cuda13-*
+            environment: pypi-cuda13
           - dist: turboocr-engine-openvino
             artifacts: wheels-turboocr-engine-openvino-*
             environment: pypi-openvino

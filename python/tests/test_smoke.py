@@ -77,7 +77,7 @@ def test_configure_backend_non_apple_ort_ep(monkeypatch):
 
 
 def test_auto_resolves_to_turbo_on_the_nvidia_build(monkeypatch, capsys):
-    """The turboocr-engine-cuda default. That wheel compiles in the nvidia seam
+    """The turboocr-engine-cuda12/13 default. That wheel compiles in the nvidia seam
     backend, and the user decision (2026-08-12) is that the DEFAULT there is the
     native TensorRT engine — `auto` must reach it without anyone passing
     backend='turbo'. Faked at native_backends() because that IS the signal
@@ -185,7 +185,8 @@ def test_doctor_report_builds():
 # network, no hardware).
 _PACKAGES = {
     "turboocr-engine-cpu",
-    "turboocr-engine-cuda",
+    "turboocr-engine-cuda12",
+    "turboocr-engine-cuda13",
     "turboocr-engine-openvino",
     "turboocr-engine-rocm",
 }
@@ -203,7 +204,9 @@ def _named_engine_package(spec: str) -> str:
 
 
 _EXPECTED_PACKAGE = {
-    "nvidia": "turboocr-engine-cuda",
+    # doctor picks the CUDA major from the driver; with no driver info
+    # detected in a test environment it names the safe cuda12 wheel.
+    "nvidia": "turboocr-engine-cuda12",
     "amd": "turboocr-engine-rocm",
     "intel": "turboocr-engine-openvino",
     "apple": "turboocr-engine-cpu",
@@ -273,10 +276,10 @@ def test_doctor_plain_output_names_the_package(capsys):
 
     report = doctor(_hw("nvidia"), plain=True)
     out = capsys.readouterr().out
-    assert 'pip install "turboocr[cuda]"' in out
-    assert "pip install turboocr-engine-cuda" in out
+    assert 'pip install "turboocr[cuda12]"' in out
+    assert "pip install turboocr-engine-cuda12" in out
     assert "turboocr doctor" in out  # tells you how to re-check after installing
-    assert report["recommended"]["package"] == "turboocr-engine-cuda"
+    assert report["recommended"]["package"] == "turboocr-engine-cuda12"
 
 
 # -- integration (need native + models) -----------------------------------
@@ -554,7 +557,7 @@ def test_cuda_backend_rejected_on_cpu_build():
     # NativeExtensionMissing long before any EP check, which proves nothing.
     if "CUDAExecutionProvider" in native.native_providers():
         pytest.skip("this build has CUDA")
-    with pytest.raises(turboocr.BackendUnavailable, match="CUDAExecutionProvider|turboocr-engine-cuda"):
+    with pytest.raises(turboocr.BackendUnavailable, match="CUDAExecutionProvider|turboocr-engine-cuda1"):
         turboocr.OCR("tiny", backend="cuda", models_dir=MODELS)
 
 
@@ -601,3 +604,56 @@ def test_concurrent_instance_construction():
     with cf.ThreadPoolExecutor(max_workers=4) as ex:
         backends = list(ex.map(build, ["cpu", "auto", "cpu", "auto"]))
     assert len(backends) == 4
+
+def test_doctor_picks_the_cuda_wheel_from_the_driver():
+    """NVIDIA is two distributions and the DRIVER decides which one loads, so
+    this is the one piece of new decision logic the split turns on. It had no
+    coverage: recommend() was only ever exercised with nvidia_driver_major
+    unset, which takes the fallback branch and hides the comparison entirely.
+
+    The unknown-driver case must resolve to cuda12, not cuda13 — naming a wheel
+    the machine cannot import is worse than naming the conservative one."""
+    from turboocr_engine.doctor import (
+        CUDA12_MIN_DRIVER, CUDA13_MIN_DRIVER, recommend)
+    from turboocr_engine.providers import HardwareInfo
+
+    def pick(drv):
+        hw = HardwareInfo(os="Linux", machine="x86_64", has_nvidia=True,
+                          gpu_names=["NVIDIA GPU"], nvidia_driver_major=drv)
+        return recommend(hw)
+
+    # Unknown driver -> the widely installable wheel.
+    assert pick(None).package == "turboocr-engine-cuda12"
+    # Exactly at and above the CUDA 13 floor -> cuda13.
+    assert pick(CUDA13_MIN_DRIVER).package == "turboocr-engine-cuda13"
+    assert pick(CUDA13_MIN_DRIVER + 15).package == "turboocr-engine-cuda13"
+    # One below the floor must NOT recommend cuda13.
+    assert pick(CUDA13_MIN_DRIVER - 1).package == "turboocr-engine-cuda12"
+    # Below both floors: still no cuda13, and the reason must say the driver is
+    # the problem rather than quietly naming a wheel that will not load.
+    too_old = pick(CUDA12_MIN_DRIVER - 50)
+    assert too_old.package != "turboocr-engine-cuda13"
+    assert "driver" in too_old.reason.lower()
+    # Never recommends a distribution that is not one of the two real ones.
+    for drv in (None, 470, 525, 570, 580, 600):
+        assert pick(drv).package in {
+            "turboocr-engine-cuda12", "turboocr-engine-cuda13"}
+
+
+def test_driver_probe_survives_hostile_nvidia_smi_output(monkeypatch):
+    """detect_hardware() is documented "Never raises". The driver parse reads
+    free-form nvidia-smi text, which on a broken host is an error string rather
+    than a version, so the parse must not throw or invent a driver."""
+    from turboocr_engine import providers
+
+    for payload in ("", "\n", "Insufficient Permissions", "N/A",
+                    "Failed to initialize NVML: Driver/library version mismatch",
+                    "not-a-number", "580.65.06\n580.65.06\n"):
+        monkeypatch.setattr(providers, "_cmd_ok", lambda _c: True)
+        monkeypatch.setattr(providers, "_run",
+                            lambda _a, _p=payload: "NVIDIA GPU" if "name" in " ".join(_a) else _p)
+        providers.detect_hardware.cache_clear()
+        hw = providers.detect_hardware()  # must not raise
+        drv = hw.nvidia_driver_major
+        assert drv is None or isinstance(drv, int)
+    providers.detect_hardware.cache_clear()

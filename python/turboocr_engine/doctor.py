@@ -12,7 +12,8 @@ them. Each is normally pulled in through the matching extra of the pure-Python
 `turboocr` umbrella package:
 
     turboocr-engine-cpu        CPU (and Apple Silicon)    pip install "turboocr[cpu]"
-    turboocr-engine-cuda       NVIDIA GPU                 pip install "turboocr[cuda]"
+    turboocr-engine-cuda12     NVIDIA GPU, driver R525+   pip install "turboocr[cuda12]"
+    turboocr-engine-cuda13     NVIDIA GPU, driver R580+   pip install "turboocr[cuda13]"
     turboocr-engine-openvino   Intel GPU / NPU            pip install "turboocr[openvino]"
     turboocr-engine-rocm       AMD GPU                    pip install "turboocr[rocm]"
 """
@@ -36,7 +37,17 @@ from .providers import (
 #: The pip distribution names. One per accelerator; installing two of them into
 #: the same environment is unsupported (they provide the same import package).
 PACKAGE_CPU = "turboocr-engine-cpu"
-PACKAGE_CUDA = "turboocr-engine-cuda"
+# NVIDIA ships as two distributions, one per CUDA major: a wheel links exactly
+# one CUDA runtime, and PyPI allows a single build per name+version. Which one a
+# machine can run is decided by its DRIVER, not its GPU — every CUDA-capable
+# NVIDIA card works with either, given a new enough driver.
+PACKAGE_CUDA12 = "turboocr-engine-cuda12"
+PACKAGE_CUDA13 = "turboocr-engine-cuda13"
+#: Minimum NVIDIA driver major for each CUDA runtime. Below CUDA13_MIN_DRIVER,
+#: CUDA 12 is the only one that loads; below CUDA12_MIN_DRIVER *neither* wheel
+#: loads and the honest answer is "upgrade the driver", not a package name.
+CUDA13_MIN_DRIVER = 580
+CUDA12_MIN_DRIVER = 525
 PACKAGE_OPENVINO = "turboocr-engine-openvino"
 PACKAGE_ROCM = "turboocr-engine-rocm"
 
@@ -45,11 +56,11 @@ PACKAGE_ROCM = "turboocr-engine-rocm"
 # INSTALL_MATRIX[].pip stays the per-backend reference table.
 _RECOMMEND: dict = {
     # The starred row is "tensorrt", not "cuda", because that IS what the wheel
-    # runs by default: on turboocr-engine-cuda the nvidia seam backend is
+    # runs by default: on the NVIDIA engine wheels the nvidia seam backend is
     # compiled in, so backend="auto" resolves to turbo/TensorRT
     # (native.resolve_engine). Starring the no-build CUDA row described a
     # default the build no longer has.
-    "nvidia": ("tensorrt", PACKAGE_CUDA, "NVIDIA GPU detected — turboocr-engine-cuda carries the native TensorRT engine (the default: backend='auto' picks it, and the first run builds+caches the engine) plus the CUDA execution provider as the instant-start backend='cuda' fallback."),
+    "nvidia": ("tensorrt", PACKAGE_CUDA12, "NVIDIA GPU detected — the NVIDIA engine wheel carries the native TensorRT engine (the default: backend='auto' picks it, and the first run builds+caches the engine) plus the CUDA execution provider as the instant-start backend='cuda' fallback."),
     "amd": ("rocm", PACKAGE_ROCM, "AMD GPU detected — turboocr-engine-rocm carries the ROCm/MIGraphX execution provider (Linux only)."),
     "intel": ("openvino", PACKAGE_OPENVINO, "Intel GPU/NPU detected — turboocr-engine-openvino carries the OpenVINO execution provider, the best acceleration on Intel silicon."),
     "apple": ("cpu", PACKAGE_CPU, "Apple Silicon — the CPU engine wheel is the right one; its macOS arm64 build carries the Apple backend, and there is no separate Apple wheel."),
@@ -85,7 +96,7 @@ _NOT_PACKAGED = "not packaged — build from source"
 # makes the one-time engine build the first thing an NVIDIA user meets — say so
 # here rather than letting a multi-minute first run look like a hang.
 _TURBO_LINE = (
-    "NVIDIA (turboocr-engine-cuda): backend='auto' (the default) resolves to turbo — "
+    "NVIDIA (turboocr-engine-cuda12/13): backend='auto' (the default) resolves to turbo — "
     "the native TensorRT engine. The FIRST run builds and caches it (one-time; "
     "TRT_ENGINE_CACHE, default ~/.cache/turbo-ocr); backend='cuda' is the "
     "instant-start ONNX Runtime path."
@@ -134,6 +145,30 @@ def recommend(hw: Optional[HardwareInfo] = None) -> Recommendation:
     """Pick the one wheel this machine should have. Never raises."""
     hw = hw or detect_hardware()
     key, package, reason = _RECOMMEND.get(hw.vendor, _RECOMMEND["cpu"])
+    # NVIDIA: pick the CUDA major this DRIVER can actually load. The table
+    # above holds the CUDA 12 name because that is the safe answer when the
+    # driver is unknown (it loads on far more machines); upgrade to CUDA 13
+    # only on positive evidence the driver is new enough. Naming a wheel the
+    # machine cannot import would make doctor worse than saying nothing.
+    if package == PACKAGE_CUDA12:
+        drv = getattr(hw, "nvidia_driver_major", None)
+        if drv is not None and drv >= CUDA13_MIN_DRIVER:
+            package = PACKAGE_CUDA13
+            reason += (f" Driver {drv} supports CUDA 13, so the cuda13 wheel is"
+                       " the match; cuda12 also works if you prefer it.")
+        elif drv is not None and drv >= CUDA12_MIN_DRIVER:
+            reason += (f" Driver {drv} predates CUDA 13 (needs"
+                       f" {CUDA13_MIN_DRIVER}+), so cuda12 is the one that will load.")
+        elif drv is not None:
+            # Below BOTH floors. Naming a wheel here would be wrong either way,
+            # so say what actually has to happen instead of picking one.
+            reason += (f" Driver {drv} is below the CUDA 12 minimum"
+                       f" ({CUDA12_MIN_DRIVER}), so NEITHER NVIDIA wheel will load"
+                       f" — update the driver first (or use the CPU wheel).")
+        else:
+            reason += (" Driver version unknown, so this names the cuda12 wheel,"
+                       " which loads on the widest range of drivers; cuda13"
+                       f" needs driver {CUDA13_MIN_DRIVER}+.")
     b = _backend_by_key(key)
     assert b is not None
     return Recommendation(b, package, reason, install_commands(package))

@@ -31,11 +31,11 @@
         },
         python: {
           command:
-            "scripts/python/build_backend_wheel.sh cuda\n" +
-            "pip install build-wheels/cuda/fixed/*.whl\n" +
+            "scripts/python/build_backend_wheel.sh cuda12   # or cuda13\n" +
+            "pip install build-wheels/cuda12/fixed/*.whl\n" +
             'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'cuda\').read(\'doc.png\'))"',
           note:
-            "Builds the turboocr-engine-cuda wheel from this checkout (the helper also repairs it — a bare pip wheel only runs on the machine that built it). backend=\u0027cuda\u0027 is the instant-start CUDA execution provider; backend=\u0027turbo\u0027 is native TensorRT with a one-time cached engine build. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[cuda]\".",
+            "Builds the turboocr-engine-cuda12 wheel from this checkout; the helper also repairs it, because a bare pip wheel only runs on the machine that built it. NVIDIA ships TWO wheels, one per CUDA major — cuda12 needs driver R525+, cuda13 needs R580+ — and both carry TensorRT 10.15.1.29. backend=\u0027cuda\u0027 is the instant-start CUDA execution provider; backend=\u0027turbo\u0027 is native TensorRT with a one-time cached engine build. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[cuda12]\" (or [cuda13]).",
         },
       },
     },

@@ -884,7 +884,18 @@ else()
     set(TENSORRT_DIR "/usr/local/tensorrt" CACHE PATH "Path to TensorRT")
 
     # Protobuf + gRPC discovery + proto codegen (shared with the CPU arm).
-    turbo_setup_grpc_codegen()
+    # GATED exactly like the CPU arm at the `if(BUILD_SERVER)` above: the
+    # generated proto is consumed by the gRPC service and the parity test, and
+    # by nothing else. Ungated, this made BUILD_SERVER=OFF meaningless on the
+    # GPU arm — turbo_setup_grpc_codegen() hard-requires protobuf + grpc++
+    # (find_package(Protobuf REQUIRED), pkg_check_modules(GRPC REQUIRED)), so a
+    # container without them died at CONFIGURE time, before a single .cu file
+    # compiled. That is exactly what the NVIDIA python wheels do: they are the
+    # first configure to reach this branch with BUILD_SERVER=OFF, because every
+    # other wheel is forced onto the host path higher up.
+    if(BUILD_SERVER)
+        turbo_setup_grpc_codegen()
+    endif()
 
     # CUDA
     enable_language(CUDA)

@@ -26,7 +26,8 @@ it pins the matching native `turboocr-engine-*` wheel:
 
 ```bash
 pip install 'turboocr[cpu]'       # any CPU — and Apple Silicon (Metal/ANE build)
-pip install 'turboocr[cuda]'      # NVIDIA (TensorRT + CUDA EP)
+pip install 'turboocr[cuda12]'    # NVIDIA (TensorRT + CUDA EP), driver R525+
+pip install 'turboocr[cuda13]'    # same, CUDA 13 — driver R580+
 pip install 'turboocr[openvino]'  # Intel CPU / iGPU / Arc / NPU
 pip install 'turboocr[rocm]'      # AMD (ROCm)
 ```

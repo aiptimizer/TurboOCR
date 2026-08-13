@@ -34,7 +34,8 @@ in; the engine name on the right is what it pins:
 |---|---|---|
 | CPU — any x86-64 / ARM64 (**the default**) | `pip install "turboocr[cpu]"` | `turboocr-engine-cpu` |
 | Apple Silicon — Metal + Neural Engine | `pip install "turboocr[cpu]"` | `turboocr-engine-cpu` (its macOS arm64 build) |
-| NVIDIA GPU | `pip install "turboocr[cuda]"` | `turboocr-engine-cuda` |
+| NVIDIA GPU, driver R525+ | `pip install "turboocr[cuda12]"` | `turboocr-engine-cuda12` |
+| NVIDIA GPU, driver R580+ | `pip install "turboocr[cuda13]"` | `turboocr-engine-cuda13` |
 | Intel CPU / iGPU / Arc / NPU | `pip install "turboocr[openvino]"` | `turboocr-engine-openvino` |
 | AMD GPU (ROCm) | `pip install "turboocr[rocm]"` | `turboocr-engine-rocm` |
 
@@ -125,14 +126,19 @@ turboocr.OCR(backend="cpu")                # force CPU
 turboocr.OCR(backend="openvino", device="NPU")
 ```
 
-**NVIDIA (`turboocr-engine-cuda`) — what the first run costs.** The wheel needs an
-NVIDIA **driver** at runtime, but not the CUDA toolkit (the CUDA runtime is
-vendored; only the driver comes from the host). It carries two NVIDIA paths:
+**NVIDIA (`turboocr-engine-cuda12` / `-cuda13`) — what the first run costs.** The wheel needs an
+NVIDIA **driver** at runtime. The CUDA, cuDNN and TensorRT runtimes are **not**
+bundled — the repair step excludes those sonames — so they must come from the
+host toolkit or the matching pip packages (`nvidia-cuda-runtime-cu12`,
+`nvidia-cudnn-cu12`, `tensorrt-cu12==10.15.1.29`, and the `-cu13` equivalents).
+They are not declared as dependencies of the engine wheel. It carries two
+NVIDIA paths:
 
-- `backend="auto"` (the default) and `backend="cuda"` run the ONNX graph on the
-  CUDA execution provider. **Nothing is compiled — start-up is instant**, and
-  steady-state speed is good. This is the recommended NVIDIA default.
-- `backend="turbo"` (aliases `"tensorrt"`, `"trt"`) uses TensorRT for peak
+- `backend="cuda"` runs the ONNX graph on the CUDA execution provider.
+  **Nothing is compiled — start-up is instant**, and steady-state speed is
+  good. Pick it when you can't pay a one-time engine build.
+- `backend="turbo"` (aliases `"tensorrt"`, `"trt"`) — **what `backend="auto"`,
+  the default, resolves to on these wheels** — uses TensorRT for peak
   throughput. The **first** run builds an engine specialised to your GPU,
   driver and model — roughly ~90 s on an RTX 5090, up to an hour on older cards
   (`TRT_OPT_LEVEL=3` cuts it 3–5x). That cost is paid **once**: the engine is
@@ -141,8 +147,10 @@ vendored; only the driver comes from the host). It carries two NVIDIA paths:
   as a volume in containers. Changing GPU, driver, TensorRT or model correctly
   invalidates the cache and triggers one more build.
 
-The **server**'s native NVIDIA arm defaults to TensorRT; this Python wheel
-deliberately defaults the other way, so you are running the second you have it.
+Both the **server**'s native NVIDIA arm and these Python wheels default to
+TensorRT: the nvidia backend is compiled in, so `backend="auto"` resolves to
+`"turbo"` and the first run pays the engine build. Pass `backend="cuda"` for an
+instant first start on the CUDA execution provider.
 
 Layout regions:
 

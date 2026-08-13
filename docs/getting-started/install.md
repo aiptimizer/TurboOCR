@@ -61,6 +61,9 @@ intel` is the only way to run OpenVINO.
 <summary><b>NVIDIA GPU</b> — shipped</summary>
 
 Linux, driver 595+, Turing or newer. ~4 GB VRAM text-only, ~8 GB full pipeline.
+(That floor is for **this server image**, built against CUDA 13.3. The Python
+wheels are separate artifacts with a lower DRIVER floor — `cuda12` needs only
+R525+, same Turing GPU floor — see [Python packages](#python-packages).)
 
 **Docker** (built from this repo):
 
@@ -89,13 +92,17 @@ Models are auto-fetched into `./models/` on first build.
 **Python library:**
 
 ```bash
-scripts/python/build_backend_wheel.sh cuda
-pip install build-wheels/cuda/fixed/*.whl
+scripts/python/build_backend_wheel.sh cuda12    # or cuda13
+pip install build-wheels/cuda12/fixed/*.whl
 python -c "import turboocr_engine; print(turboocr_engine.OCR(backend='cuda').read('doc.png'))"
 ```
 
-Builds the `turboocr-engine-cuda` wheel from this checkout — the helper also
+Builds the `turboocr-engine-cuda12` wheel from this checkout — the helper also
 repairs it, because a bare `pip wheel` only runs on the machine that built it.
+NVIDIA ships as **two** wheels, one per CUDA major: `cuda12` needs driver
+R525+, `cuda13` needs R580+. Both carry TensorRT 10.15.1.29 and the same
+engine; pick by the driver you have (`nvidia-smi`), or let `turboocr doctor`
+name it.
 `backend='cuda'` is the instant-start CUDA execution provider; `backend='turbo'`
 is native TensorRT with a one-time cached engine build.
 
@@ -429,7 +436,8 @@ same native extension.
 | *(none — client only)* | `pip install turboocr` | — |
 | CPU — any x86-64 / ARM64 (**the default**) | `pip install "turboocr[cpu]"` | `turboocr-engine-cpu` |
 | Apple Silicon — Metal + Neural Engine | `pip install "turboocr[cpu]"` | `turboocr-engine-cpu` (its macOS arm64 build) |
-| NVIDIA GPU | `pip install "turboocr[cuda]"` | `turboocr-engine-cuda` |
+| NVIDIA GPU — driver R525+ | `pip install "turboocr[cuda12]"` | `turboocr-engine-cuda12` |
+| NVIDIA GPU — driver R580+ | `pip install "turboocr[cuda13]"` | `turboocr-engine-cuda13` |
 | Intel CPU / iGPU / Arc / NPU | `pip install "turboocr[openvino]"` | `turboocr-engine-openvino` |
 | AMD GPU (ROCm) | `pip install "turboocr[rocm]"` | `turboocr-engine-rocm` |
 
@@ -511,20 +519,49 @@ the part that goes wrong.
 
 ## Backend details
 
-??? info "NVIDIA — `turboocr-engine-cuda`, and what the first run costs"
+??? info "NVIDIA — `turboocr-engine-cuda12` / `-cuda13`, and what the first run costs"
 
-    The wheel needs an **NVIDIA driver** at runtime. It does *not* need the
-    CUDA toolkit installed — the CUDA runtime it uses is vendored into the
-    wheel, and only the driver comes from the host (the same split
-    `onnxruntime-gpu` uses).
+    Pick the wheel by **GPU generation first, then driver**:
+
+    | | `cuda12` | `cuda13` |
+    |---|---|---|
+    | oldest GPU | Turing (sm_75) | Turing (sm_75) |
+    | driver | **R525+** | **R580+** |
+
+    Both wheels need **Turing or newer** — the same floor as the server. It is
+    not a CUDA-major difference: TurboOCR's own kernels require it (the
+    connected-components pass uses a cooperative-groups grid sync, which needs
+    compute capability 6.0+, and the project pins sm_75 as its floor), and
+    CUDA 13 drops pre-Turing support outright. Both are compiled for
+    sm_75/80/86/89/90/120, so every card from an RTX 20 to a Blackwell is
+    native, and the TensorRT engine is built at run time for whichever is
+    present.
+
+    **So choose by driver, not by card.** An RTX 3090 on driver R535 needs
+    `cuda12`; the same card on R580 can take either.
+
+    The CUDA, cuDNN and TensorRT runtimes are **not** bundled: the repair step
+    excludes every one of those sonames, exactly as `onnxruntime-gpu` ships.
+    They must be present on the host — from the system CUDA install, or from
+    the matching pip packages (`nvidia-cuda-runtime-cu12`, `nvidia-cudnn-cu12`,
+    `tensorrt-cu12==10.15.1.29`, and the `-cu13` equivalents). They are not
+    declared as dependencies of the engine wheel, so a driver-only machine
+    needs them installed alongside.
 
     It carries two NVIDIA paths, and which one you get is a `backend=` choice
     with very different startup behaviour:
 
     | `backend=` | Start-up | Steady state |
     |---|---|---|
-    | `"auto"` (**the default**) / `"cuda"` | **Instant** — nothing is compiled | Fast: the ONNX graph on the CUDA execution provider |
+    | `"auto"` (**the default**) → resolves to `"turbo"` | **Slow on the FIRST run only** — builds a TensorRT engine | Fastest: peak throughput |
+    | `"cuda"` | **Instant** — nothing is compiled | Fast: the ONNX graph on the CUDA execution provider |
     | `"turbo"` (aliases `"tensorrt"`, `"trt"`) | **Slow on the first run only** — builds a TensorRT engine | Fastest: peak throughput |
+
+    The nvidia backend is compiled into these wheels, so `backend="auto"` picks
+    the native TensorRT path — it does **not** start instantly. The first
+    `OCR()` call builds an engine (~90 s on an RTX 5090, longer on older cards)
+    and caches it; the process prints a one-time notice while it does. Ask for
+    `backend="cuda"` when you need an instant first start.
 
     ```python
     turboocr.OCR(backend="cuda")    # instant start, ONNX Runtime CUDA EP

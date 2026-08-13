@@ -7,7 +7,8 @@
 # DIFFERENT distribution name, so users install exactly one:
 #
 #   turboocr-engine-cpu       portable: CPU everywhere, + Metal/ANE on macOS
-#   turboocr-engine-cuda      native TensorRT + the ONNX Runtime CUDA EP
+#   turboocr-engine-cuda12    native TensorRT + ORT CUDA EP, CUDA 12 (driver R525+)
+#   turboocr-engine-cuda13    native TensorRT + ORT CUDA EP, CUDA 13 (driver R580+)
 #                      (requires a CUDA-enabled ORT in third_party/onnxruntime —
 #                      the gpu_cuda tarball; the plain tarball is CPU-only)
 #   turboocr-engine-openvino  + the native Intel OpenVINO backend compiled in
@@ -30,7 +31,7 @@
 # (they must come from the host, exactly like onnxruntime-gpu).
 set -euo pipefail
 
-VARIANT="${1:?usage: build_backend_wheel.sh <cpu|cuda|openvino|rocm> [outdir]}"
+VARIANT="${1:?usage: build_backend_wheel.sh <cpu|cuda12|cuda13|openvino|rocm> [outdir]}"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT="${2:-$REPO/build-wheels/$VARIANT}"
 PY="${PYTHON:-python3}"
@@ -42,7 +43,11 @@ BACKUP="$REPO/build-wheels/pyproject.base.toml"
 
 case "$VARIANT" in
   cpu)      DIST="turboocr-engine-cpu";      STAGE_SRC="" ;;
-  cuda)     DIST="turboocr-engine-cuda";     STAGE_SRC="$REPO/python/wheels/cuda/pyproject.toml" ;;
+  # NVIDIA is two distributions, one per CUDA major: a wheel links one CUDA
+  # runtime, and the ORT tarball and toolkit differ per major. Same C++ tree
+  # and same cmake.args — only the toolchain around the build differs.
+  cuda12)   DIST="turboocr-engine-cuda12";   STAGE_SRC="$REPO/python/wheels/cuda12/pyproject.toml" ;;
+  cuda13)   DIST="turboocr-engine-cuda13";   STAGE_SRC="$REPO/python/wheels/cuda13/pyproject.toml" ;;
   openvino) DIST="turboocr-engine-openvino"; STAGE_SRC="$REPO/python/wheels/openvino/pyproject.toml" ;;
   rocm)     DIST="turboocr-engine-rocm";     STAGE_SRC="$REPO/python/wheels/rocm/pyproject.toml" ;;
   *) echo "unknown variant: $VARIANT" >&2; exit 2 ;;
@@ -60,8 +65,9 @@ fi
 # CPU-only and would ship a lying wheel. TURBO_ORT_DIR overrides the location.
 # ORT_DIR is also used by the repair step below to re-inject the provider libs.
 EXTRA_CMAKE=""
-if [ "$VARIANT" = cuda ]; then
-  ORT_DIR="${TURBO_ORT_DIR:-$REPO/third_party/onnxruntime-gpu-cuda13}"
+if [ "${VARIANT#cuda}" != "$VARIANT" ]; then   # cuda12 | cuda13
+  # Default follows the variant: third_party/onnxruntime-gpu-cuda12 or -cuda13.
+  ORT_DIR="${TURBO_ORT_DIR:-$REPO/third_party/onnxruntime-gpu-${VARIANT}}"
   if ! ls "$ORT_DIR"/lib/libonnxruntime_providers_cuda.so* >/dev/null 2>&1; then
     echo "FATAL: $ORT_DIR has no libonnxruntime_providers_cuda.so —" >&2
     echo "       point TURBO_ORT_DIR at a gpu_cuda ORT tarball." >&2
@@ -153,7 +159,10 @@ echo "== built $WHEEL"
 # (driver) or too large/license-bound to vendor, exactly as onnxruntime-gpu ships.
 CUDA_EXCLUDES=(libcuda.so.1 'libcudart.so.*' 'libcublas.so.*' 'libcublasLt.so.*'
                'libcudnn*.so.*' 'libcurand.so.*' 'libcufft.so.*' 'libnvinfer*.so.*'
-               'libnvonnxparser*.so.*' 'libnccl.so.*' 'libcupti.so.*')
+               'libnvonnxparser*.so.*' 'libnccl.so.*' 'libcupti.so.*'
+               # nvJPEG: linked by the NVIDIA image decoder and CUDA-major
+               # specific, so it belongs with the rest of the toolkit.
+               'libnvjpeg.so.*')
 ROCM_EXCLUDES=('libamdhip64.so.*' 'libmigraphx*.so.*' 'librocblas.so.*'
                'libMIOpen.so.*' 'libhsa-runtime64.so.*' 'librocm_smi64.so.*')
 
@@ -165,7 +174,7 @@ case "$(uname -s)" in
     ;;
   Linux)
     "$PY" -m pip show wheel auditwheel >/dev/null 2>&1 || "$PY" -m pip install --quiet wheel auditwheel
-    if [ "$VARIANT" = cuda ]; then
+    if [ "${VARIANT#cuda}" != "$VARIANT" ]; then   # cuda12 | cuda13
       # Two-step repair. auditwheel vendors the DT_NEEDED graph (pdfium,
       # OpenCV, libonnxruntime, ...) with correct rpaths, excluding the CUDA
       # toolkit/driver sonames. But the CUDA/TensorRT provider libs are

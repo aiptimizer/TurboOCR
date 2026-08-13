@@ -5,7 +5,8 @@ Four engine PyPI distributions, **one source tree**, **one C++ engine**:
 | Distribution | Hardware | Config |
 |---|---|---|
 | `turboocr-engine-cpu` | any CPU, + Metal/ANE on macOS arm64 | [`../pyproject.toml`](../pyproject.toml) |
-| `turboocr-engine-cuda` | NVIDIA | [`cuda/pyproject.toml`](cuda/pyproject.toml) |
+| `turboocr-engine-cuda12` | NVIDIA, CUDA 12 (driver R525+) | [`cuda12/pyproject.toml`](cuda12/pyproject.toml) |
+| `turboocr-engine-cuda13` | NVIDIA, CUDA 13 (driver R580+) | [`cuda13/pyproject.toml`](cuda13/pyproject.toml) |
 | `turboocr-engine-openvino` | Intel CPU / iGPU / Arc / NPU | [`openvino/pyproject.toml`](openvino/pyproject.toml) |
 | `turboocr-engine-rocm` | AMD (ROCm) | [`rocm/pyproject.toml`](rocm/pyproject.toml) |
 
@@ -34,7 +35,7 @@ the canonical config for that variant, but the build copies it **over**
 `python/pyproject.toml` (base backed up first) and builds `python/`:
 
 ```bash
-scripts/python/build_backend_wheel.sh cuda        # -> build-wheels/cuda/fixed/
+scripts/python/build_backend_wheel.sh cuda12      # -> build-wheels/cuda12/fixed/
 ```
 
 The script restores the base config on exit — success, failure or `^C`.
@@ -93,7 +94,7 @@ this has not had to matter yet.)*
 | Wheel | `TURBO_BACKENDS` | Build path | Engine reached at run time |
 |---|---|---|---|
 | `turboocr-engine-cpu` | *(default: `cpu` on Linux/Windows, `cpu;apple` on macOS)* | `USE_CPU_ONLY=ON` — ONNX Runtime host path | ORT CPU/XNNPACK, CoreML + Metal on macOS |
-| `turboocr-engine-cuda` | `cpu;nvidia` | `USE_CPU_ONLY=OFF` — native CUDA + TensorRT | ORT CUDA EP (`backend="cuda"`), TensorRT (`backend="turbo"`) |
+| `turboocr-engine-cuda12` / `-cuda13` | `cpu;nvidia` | `USE_CPU_ONLY=OFF` — native CUDA + TensorRT | ORT CUDA EP (`backend="cuda"`), TensorRT (`backend="turbo"`) |
 | `turboocr-engine-openvino` | `cpu;intel` | `USE_CPU_ONLY=ON` | native OpenVINO Runtime, ORT OpenVINO EP; device via `OV_DEVICE=CPU\|GPU\|NPU` |
 | `turboocr-engine-rocm` | `cpu;amd` | `USE_CPU_ONLY=ON` | native MIGraphX, ORT MIGraphX/ROCm EP |
 
@@ -122,7 +123,7 @@ The same goes for the vendor SDKs. Per variant:
 
 | Wheel | Required on the build image |
 |---|---|
-| `turboocr-engine-cuda` | CUDA-enabled ORT (`onnxruntime-linux-x64-gpu_cuda*`; the configure hard-fails without `libonnxruntime_providers_cuda`), CUDA toolkit, TensorRT at `-DTENSORRT_DIR=`, and `-DCMAKE_CUDA_ARCHITECTURES=` for the SMs to ship |
+| `turboocr-engine-cuda12` / `-cuda13` | the MATCHING CUDA-enabled ORT (`gpu_cuda12` or `gpu_cuda13`) (`onnxruntime-linux-x64-gpu_cuda*`; the configure hard-fails without `libonnxruntime_providers_cuda`), CUDA toolkit, TensorRT at `-DTENSORRT_DIR=`, and `-DCMAKE_CUDA_ARCHITECTURES=` for the SMs to ship |
 | `turboocr-engine-openvino` | OpenVINO Runtime dev package (`find_package(OpenVINO)`), ORT with the OpenVINO EP |
 | `turboocr-engine-rocm` | ROCm (`hip` + `migraphx` + hipcc), `-DCMAKE_HIP_ARCHITECTURES=`, ORT with the MIGraphX/ROCm EP |
 
@@ -132,7 +133,7 @@ forwards it:
 
 ```bash
 CMAKE_ARGS="-DTENSORRT_DIR=/usr/local/tensorrt -DCMAKE_CUDA_ARCHITECTURES=80-real;90-real;120-real" \
-  scripts/python/build_backend_wheel.sh cuda
+  scripts/python/build_backend_wheel.sh cuda12    # or cuda13
 ```
 
 ## Repair (vendoring) is deliberately not fully expressed here

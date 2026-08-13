@@ -33,6 +33,7 @@ bin/libpdfium.so
 # CPU builds (the Dockerfile downloads its own copy at image build time).
 third_party/onnxruntime/
 third_party/onnxruntime-cpu/
+third_party/onnxruntime-gpu-cuda12/
 third_party/onnxruntime-gpu-cuda13/
 
 # The nanobind extension is BUILT (cmake --build … --target _turboocr) and then

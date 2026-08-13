@@ -51,7 +51,15 @@ grpc = [
 # use, and so `pip install turboocr` never drags a CUDA runtime onto a machine
 # that only wants to call a server. `turboocr doctor` names the right one.
 cpu = ["turboocr-engine-cpu==4.0.0a1"]
-cuda = ["turboocr-engine-cuda==4.0.0a1"]
+# NVIDIA ships as TWO distributions, one per CUDA major: a wheel is built
+# against one CUDA runtime and cannot serve both, and PyPI allows only one
+# build per name+version. Pick by DRIVER: cuda12 runs on R525+, cuda13
+# needs R580+. `turboocr doctor` reports which one this machine can take.
+cuda12 = ["turboocr-engine-cuda12==4.0.0a1"]
+cuda13 = ["turboocr-engine-cuda13==4.0.0a1"]
+# `[cuda]` stays as the low-friction default and resolves to the widely
+# installable one. Ask for [cuda13] explicitly to get the newer stack.
+cuda = ["turboocr-engine-cuda12==4.0.0a1"]
 openvino = ["turboocr-engine-openvino==4.0.0a1"]
 rocm = ["turboocr-engine-rocm==4.0.0a1"]
 # Engine feature extras mirrored at the umbrella, so backend + feature combine

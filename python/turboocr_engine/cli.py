@@ -193,7 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         help="detect your hardware and print the pip install command for it",
         description="Detect the accelerator on this machine and name the one wheel that "
-        "serves it (turboocr-engine-cpu | -cuda | -openvino | -rocm), "
+        "serves it (turboocr-engine-cpu | -cuda12 | -cuda13 | -openvino | -rocm), "
         "with the exact install command.",
     )
     d.add_argument("--plain", action="store_true", help="plain text (no rich formatting)")

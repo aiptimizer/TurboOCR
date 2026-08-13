@@ -227,7 +227,7 @@ _DEVICE_ID_ENV: Dict[str, str] = {
 _AUTO_NAMES: Tuple[str, ...] = ("auto", "default", "")
 
 # Seam backends `auto` may resolve to, best first. ONLY nvidia: on the
-# turboocr-engine-cuda wheel the native TensorRT engine is the default (user decision
+# turboocr-engine-cuda12/13 wheels the native TensorRT engine is the default (user decision
 # 2026-08-12) — it builds its engine once, caches it, and is then the fastest
 # path by a wide margin. Every other vendor's default is unchanged: Apple, Intel
 # and AMD keep landing on the ORT path from `auto`, so adding "apple" here would
@@ -257,7 +257,7 @@ def resolve_engine(backend: str) -> str:
     without that backend keeps running the ORT path exactly as before.
 
     ``auto`` (the OCR() default) resolves through :func:`auto_engine`, so on the
-    turboocr-engine-cuda wheel it lands on the native TensorRT backend."""
+    turboocr-engine-cuda12/13 wheels it lands on the native TensorRT backend."""
     key = (backend or "").strip().lower()
     if key in _AUTO_NAMES:
         return auto_engine() or "cpu"
@@ -291,7 +291,10 @@ def ensure_backend_supported(backend: str) -> None:
         # so the remedy for a missing DML EP was `pip install` a name that
         # resolves nowhere. An EP with no wheel gets the honest remedy instead.
         wheel = {
-            "CUDAExecutionProvider": "turboocr-engine-cuda",
+            # NVIDIA is two distributions (CUDA 12 vs 13); the right one
+            # depends on the host driver, so name both rather than
+            # printing an install line that may not fit this machine.
+            "CUDAExecutionProvider": "turboocr-engine-cuda12 (driver R525+) or turboocr-engine-cuda13 (R580+)",
             "OpenVINOExecutionProvider": "turboocr-engine-openvino",
             "MIGraphXExecutionProvider": "turboocr-engine-rocm",
             "ROCMExecutionProvider": "turboocr-engine-rocm",
@@ -403,7 +406,7 @@ def configure_backend(
         if backend in ("turbo", "tensorrt", "trt"):
             # Not swallowed into plain CPU silently: on a Mac wheel there is
             # no nvidia seam backend, so say what the caller actually got.
-            return "turbo", "CPU (turbo/TensorRT needs the turboocr-engine-cuda wheel)"
+            return "turbo", "CPU (turbo/TensorRT needs a turboocr-engine-cuda12/13 wheel)"
         return "cpu", "CPU (MLAS)"
 
     # Non-Apple: drive the ORT_EP switch.
@@ -413,7 +416,7 @@ def configure_backend(
     if backend in ("auto", "fast", "onnx", "default", ""):
         # Reached only when this build has NO vendor seam backend for `auto` to
         # pick (resolve_engine returned "cpu" above) — i.e. the CPU/ONNX wheel.
-        # On turboocr-engine-cuda the nvidia branch already returned turbo. Leaving
+        # On turboocr-engine-cuda12/13 the nvidia branch already returned turbo. Leaving
         # ORT_EP unset lets OrtEngine take its own best compiled-in provider.
         env.pop("ORT_EP", None)
         return "auto", "CPU (MLAS)"
@@ -422,7 +425,7 @@ def configure_backend(
         # backend in this build (otherwise the engine branch returned) — so
         # the fallback message is now true by construction.
         env.pop("ORT_EP", None)
-        return "turbo", "CPU (turbo/TensorRT needs the turboocr-engine-cuda wheel)"
+        return "turbo", "CPU (turbo/TensorRT needs a turboocr-engine-cuda12/13 wheel)"
     if backend in _EP_ALIASES:
         ep = _EP_ALIASES[backend]
         env["ORT_EP"] = ep

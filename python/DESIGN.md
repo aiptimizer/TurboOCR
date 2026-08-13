@@ -149,14 +149,14 @@ Same extension, N ORT variants. Names mirror onnxruntime's own distribution so
 | PyPI wheel | Hardware / OS | ORT variant linked (`${ONNXRUNTIME_LIB}`) | EPs exposed | fast-setup default | Bundled into wheel |
 |---|---|---|---|---|---|
 | **`turboocr-engine-cpu`** (base) | any CPU; **+ Apple GPU** on macOS arm64 | onnxruntime (CPU; mac wheel has CoreML) | CPU, XNNPACK, **CoreML** (mac) | ✅ **CPU/MLAS** | ORT, OpenCV, pdfium(Linux) |
-| **`turboocr-engine-cuda`** | NVIDIA, Linux + Win | onnxruntime-gpu (CUDA+TRT) | **CUDA**, TensorRT | ✅ **CUDA EP (no build)** | ORT-GPU, OpenCV; CUDA/cuDNN via `onnxruntime-gpu[cuda,cudnn]` dep |
+| **`turboocr-engine-cuda12`** / **`-cuda13`** | NVIDIA, Linux + Win | onnxruntime-gpu (CUDA+TRT) | **CUDA**, TensorRT | ⚠️ **auto → TensorRT (first run builds)** | ORT-GPU, OpenCV vendored; CUDA/cuDNN/TensorRT **host-provided** — excluded by the repair step and NOT declared as deps |
 | **`turboocr-engine-openvino`** | Intel CPU/iGPU/Arc/NPU | onnxruntime-openvino | OpenVINO | ✅ OpenVINO AUTO | ORT-OV + OpenVINO runtime |
 | **`turboocr-directml`** (not built) | any DX12 GPU, Windows | onnxruntime-directml | DirectML | ✅ DirectML | ORT-DML |
 | **`turboocr-engine-rocm`** | AMD, Linux + ROCm | onnxruntime-migraphx (AMD index) | MIGraphX, ROCm | ✅ MIGraphX | ORT-ROCm (from repo.radeon.com) |
 
 - **`turbo` (TensorRT)** is a *mode*, not a wheel: `OCR(model, backend="turbo")`
-  on the `turboocr-engine-cuda` wheel uses the Tier-A `OcrPipeline` with an on-disk
-  engine cache. It is never auto-selected (slow first build) — matching the
+  on the `turboocr-engine-cuda12`/`-cuda13` wheels uses the Tier-A `OcrPipeline` with an on-disk
+  engine cache. It IS auto-selected on these wheels (slow first build) — matching the
   fast-setup default.
 - **Install exactly one** `turboocr*` wheel per environment (they all provide the
   `turboocr` import and link mutually-incompatible ORT builds — same rule
@@ -227,7 +227,7 @@ Either way it's PDFium. Rendering is not the OCR bottleneck, so A ships first.
    no engine build. Verify on a Linux+NVIDIA box.
 3. **scikit-build-core packaging**; `pip install ./python` builds the extension.
 4. **cibuildwheel**: ship `turboocr-engine-cpu` (CPU+CoreML) first, then
-   `turboocr-engine-cuda`, then openvino/rocm.
+   `turboocr-engine-cuda12`/`-cuda13`, then openvino/rocm.
 5. **Retarget `doctor`** to wheels; wire `backend=`→`ORT_EP`; `turbo`→Tier A.
 6. **Optional:** native `PdfRenderer` Linux fast-path; layout/table/formula
    surfaced (the C++ already supports them via `run_with_layout`).

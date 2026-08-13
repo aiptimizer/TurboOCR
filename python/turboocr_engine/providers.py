@@ -61,7 +61,7 @@ INSTALL_MATRIX: Tuple[BackendInfo, ...] = (
         label="NVIDIA CUDA (instant start)",
         hardware="NVIDIA GPU (Turing+), Linux/Windows",
         ep_names=("CUDAExecutionProvider",),
-        pip=('pip install "turboocr[cuda]"',),
+        pip=('pip install "turboocr[cuda12]"', 'pip install "turboocr[cuda13]"'),
         note="Runs ONNX directly on the GPU — no engine build, so it starts instantly. "
         "The fallback when you don't want to wait for the TensorRT engine: backend='cuda'.",
     ),
@@ -70,11 +70,11 @@ INSTALL_MATRIX: Tuple[BackendInfo, ...] = (
         label="NVIDIA TensorRT (turbo)",
         hardware="NVIDIA GPU (Turing+), Linux/Windows",
         ep_names=("TensorrtExecutionProvider", "CUDAExecutionProvider"),
-        pip=('pip install "turboocr[cuda]"',),
-        # The DEFAULT on turboocr-engine-cuda, not an opt-in: that wheel compiles in
+        pip=('pip install "turboocr[cuda12]"', 'pip install "turboocr[cuda13]"'),
+        # The DEFAULT on the turboocr-engine-cuda12/13 wheels, not an opt-in: that wheel compiles in
         # the nvidia seam backend, and native.resolve_engine sends backend="auto"
         # there. The engine build is a one-time cost the cache absorbs.
-        note="Peak throughput, and the DEFAULT on turboocr-engine-cuda (backend='auto' picks it). "
+        note="Peak throughput, and the DEFAULT on turboocr-engine-cuda12/13 (backend='auto' picks it). "
         "The first run builds+caches a TensorRT engine — a one-time cost, persisted under "
         "TRT_ENGINE_CACHE (default ~/.cache/turbo-ocr); later runs load it. Use "
         "backend='cuda' to skip the build.",
@@ -166,6 +166,12 @@ class HardwareInfo:
     has_amd: bool = False
     has_intel_gpu: bool = False
     gpu_names: List[str] = field(default_factory=list)
+    #: NVIDIA driver major, e.g. 580. None when nvidia-smi is absent or its
+    #: output could not be parsed. This is what picks between the CUDA 12 and
+    #: CUDA 13 engine wheels: a wheel links one CUDA major, and CUDA 13 needs
+    #: a newer driver than CUDA 12 does. Nothing else depends on it, so an
+    #: unparseable value degrades to "recommend the widely installable one".
+    nvidia_driver_major: Optional[int] = None
 
     @property
     def vendor(self) -> str:
@@ -218,6 +224,18 @@ def _detect_hardware_cached() -> HardwareInfo:
         if gpus:
             hw.has_nvidia = True
             hw.gpu_names.extend(gpus)
+            # Same probe, one more field: the driver decides which CUDA major
+            # this machine can run, and therefore which engine wheel to name.
+            drv = _run(["nvidia-smi", "--query-gpu=driver_version",
+                        "--format=csv,noheader"])
+            for ln in drv.splitlines():
+                ln = ln.strip()
+                if ln and ln[0].isdigit():
+                    try:
+                        hw.nvidia_driver_major = int(ln.split(".")[0])
+                    except ValueError:
+                        pass
+                    break
 
     # AMD — rocminfo / rocm-smi.
     if _cmd_ok("rocminfo") or _cmd_ok("rocm-smi"):
