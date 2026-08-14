@@ -56,25 +56,32 @@ def set_log_level_default(verbose: bool) -> None:
 _REQUIRED_NATIVE_ATTRS = ("Pipeline", "build_info")
 
 
-# ---- NVIDIA pip-package library preload -------------------------------------
-# The NVIDIA engine wheels deliberately do NOT vendor the CUDA/TensorRT
-# runtimes (excluded in the repair step, exactly as onnxruntime-gpu ships), so
-# `_turboocr` there has DT_NEEDED on libnvinfer.so.10, libnvinfer_plugin.so.10,
-# libnvonnxparser.so.10, libcudart.so.1X and libnvjpeg.so.1X. From a SYSTEM
-# CUDA/TensorRT install the dynamic loader resolves those on its own. From the
-# matching PIP packages (tensorrt-cuXX-libs, nvidia-*-cuXX) they sit in
-# site-packages directories the loader never searches, so the plain import
-# fails even though everything is installed. The fix is the trick torch and
-# onnxruntime-gpu use: dlopen each library by ABSOLUTE path first — that puts
-# its SONAME in the process link map, which satisfies the DT_NEEDED lookup when
-# `_turboocr` is imported right after. pip's libnvinfer.so.10 carries its own
-# $ORIGIN RPATH for everything IT dlopens later (per-SM builder resources,
-# nvidia/*/lib), so preloading the top-level libraries is sufficient.
+# ---- vendor pip-package library preload -------------------------------------
+# Two engine wheels have runtime libraries that live OUTSIDE the wheel:
+#
+#   * NVIDIA (cuda12/cuda13): the CUDA/TensorRT runtimes are deliberately not
+#     vendored (excluded in the repair step, exactly as onnxruntime-gpu ships) —
+#     `_turboocr` has DT_NEEDED on libnvinfer.so.10, libnvinfer_plugin.so.10,
+#     libnvonnxparser.so.10, libcudart.so.1X and libnvjpeg.so.1X, supplied by a
+#     system install or the tensorrt-cuXX-libs / nvidia-*-cuXX pip packages.
+#   * openvino: the OpenVINO runtime is a REAL pip dependency of the wheel
+#     (`openvino>=2026.2,<2026.3` — redistributable, unlike CUDA) — `_turboocr`
+#     has DT_NEEDED on libopenvino.so.2621, shipped in site-packages/openvino/libs.
+#
+# Either way, pip puts the libraries in site-packages directories the dynamic
+# loader never searches, so the plain import fails even though everything is
+# installed. The fix is the trick torch and onnxruntime-gpu use: dlopen each
+# library by ABSOLUTE path first — that puts its SONAME in the process link
+# map, which satisfies the DT_NEEDED lookup when `_turboocr` is imported right
+# after. The pip libraries carry their own $ORIGIN RPATHs for everything THEY
+# load later (TensorRT's per-SM builder resources; OpenVINO's device plugins,
+# discovered relative to libopenvino), so preloading the top-level libraries
+# is sufficient.
 #
 # Ordered dependencies-first; prefixes not present on a machine are skipped, so
 # this is a no-op unless the pip packages are actually installed.
-_NVIDIA_LIB_PRIORITY = (
-    "libcudart.so",      # nvidia/cuda_runtime/lib — everything needs it
+_VENDOR_LIB_PRIORITY = (
+    "libcudart.so",      # nvidia/cuda_runtime/lib — everything CUDA needs it
     "libcublasLt.so",    # nvidia/cublas/lib — before libcublas, which links it
     "libcublas.so",
     "libcudnn.so",       # nvidia/cudnn/lib — ORT CUDA EP (backend="cuda")
@@ -84,17 +91,20 @@ _NVIDIA_LIB_PRIORITY = (
     "libnvinfer.so",     # tensorrt_libs — before plugin/onnxparser, which link it
     "libnvonnxparser.so",
     "libnvinfer_plugin.so",
+    "libtbb.so",         # openvino/libs — libopenvino links it
+    "libtbbmalloc.so",
+    "libopenvino.so",    # the core; plugins resolve via its own $ORIGIN
 )
 
 #: Absolute paths successfully preloaded (for doctor/debugging).
-_nvidia_preloaded: List[str] = []
-_nvidia_preload_attempted = False
+_vendor_preloaded: List[str] = []
+_vendor_preload_attempted = False
 
 
-def _nvidia_pip_lib_dirs(site_dir: Optional[str] = None) -> List[str]:
-    """Directories the NVIDIA pip packages install their libraries into,
-    for the site-packages holding THIS package (pip installs the runtime
-    packages next to the wheel that needs them). Empty when none exist."""
+def _vendor_pip_lib_dirs(site_dir: Optional[str] = None) -> List[str]:
+    """Directories the vendor pip packages install their libraries into, for
+    the site-packages holding THIS package (pip installs the runtime packages
+    next to the wheel that needs them). Empty when none exist."""
     if site_dir is None:
         site_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     dirs = []
@@ -107,29 +117,32 @@ def _nvidia_pip_lib_dirs(site_dir: Optional[str] = None) -> List[str]:
             lib = os.path.join(nvidia, sub, "lib")
             if os.path.isdir(lib):
                 dirs.append(lib)
+    ov = os.path.join(site_dir, "openvino", "libs")
+    if os.path.isdir(ov):
+        dirs.append(ov)
     return dirs
 
 
-def _preload_nvidia_pip_libs(site_dir: Optional[str] = None) -> int:
-    """Best-effort dlopen of pip-provided NVIDIA libraries, dependencies first.
+def _preload_vendor_pip_libs(site_dir: Optional[str] = None) -> int:
+    """Best-effort dlopen of pip-provided vendor libraries, dependencies first.
 
     Returns how many loaded. Never raises: a library that fails to load (wrong
     arch, half-installed package, placeholder wheel) is skipped — the retried
     `_turboocr` import produces the real, actionable error."""
-    global _nvidia_preload_attempted
-    _nvidia_preload_attempted = True
+    global _vendor_preload_attempted
+    _vendor_preload_attempted = True
     if platform.system() != "Linux":
         return 0
     import ctypes
 
     candidates: List[Tuple[int, str, str]] = []
-    for d in _nvidia_pip_lib_dirs(site_dir):
+    for d in _vendor_pip_lib_dirs(site_dir):
         try:
             names = os.listdir(d)
         except OSError:
             continue
         for name in names:
-            for rank, prefix in enumerate(_NVIDIA_LIB_PRIORITY):
+            for rank, prefix in enumerate(_VENDOR_LIB_PRIORITY):
                 # Versioned real names only ("libcudart.so.12"): the bare ".so"
                 # dev symlink may be absent and would double-load anyway.
                 if name.startswith(prefix + "."):
@@ -141,13 +154,20 @@ def _preload_nvidia_pip_libs(site_dir: Optional[str] = None) -> int:
             ctypes.CDLL(path, mode=ctypes.RTLD_GLOBAL)
         except OSError:
             continue
-        _nvidia_preloaded.append(path)
+        _vendor_preloaded.append(path)
         loaded += 1
     return loaded
 
 
-def _nvidia_runtime_hint(err: str) -> str:
-    """One actionable line for an ImportError naming a CUDA/TensorRT soname."""
+def _vendor_runtime_hint(err: str) -> str:
+    """One actionable line for an ImportError naming a vendor-runtime soname."""
+    if "libopenvino" in err:
+        return (
+            " This is the OpenVINO engine wheel and the OpenVINO runtime was "
+            "not found. It normally arrives as this wheel's own pip dependency "
+            "— `pip install 'openvino>=2026.2,<2026.3'` restores it (found "
+            "automatically; no LD_LIBRARY_PATH needed)."
+        )
     if not any(k in err for k in ("libnvinfer", "libnvonnxparser", "libcudart", "libnvjpeg")):
         return ""
     major = "13" if ".so.13" in err else ("12" if ".so.12" in err else "1X")
@@ -171,7 +191,7 @@ def load_native():
         # NVIDIA wheel + pip-provided runtimes: preload and retry ONCE. Only on
         # ImportError — anything else is not a missing-library problem.
         exc = first_exc
-        retried = _preload_nvidia_pip_libs() > 0
+        retried = _preload_vendor_pip_libs() > 0
         if retried:
             try:
                 from . import _turboocr  # type: ignore
@@ -186,7 +206,7 @@ def load_native():
                 "(`turboocr doctor` shows which), or build it from source with "
                 "`cmake -B build -DUSE_CPU_ONLY=ON -DBUILD_PYTHON=ON` and copy the "
                 "resulting _turboocr*.so into turboocr/."
-                + _nvidia_runtime_hint(str(exc))
+                + _vendor_runtime_hint(str(exc))
             ) from exc
     except Exception as exc:  # pragma: no cover
         raise NativeExtensionMissing(
@@ -284,8 +304,16 @@ _BACKEND_TABLE: Tuple[BackendAlias, ...] = (
     # -- ORT execution providers (run inside the "cpu" seam backend) ---------
     BackendAlias("cuda", ("gpu",), "CUDAExecutionProvider", "cuda",
                  summary="CUDA (NVIDIA)"),
+    # Like "apple" below, this row is seam-first with an EP fallback: on the
+    # turboocr-engine-openvino wheel the NATIVE intel backend is compiled in
+    # (and measured faster than the ORT OpenVINO EP), so backend="openvino"
+    # runs it; on a build without the seam backend it falls through to the
+    # ORT EP exactly as before. Without engine="intel" the openvino WHEEL
+    # rejected backend="openvino" outright — its vendored ORT is the plain
+    # CPU build with no OpenVINO EP, so the EP check failed on the one wheel
+    # whose whole point is OpenVINO.
     BackendAlias("openvino", ("ov",), "OpenVINOExecutionProvider", "openvino",
-                 summary="OpenVINO (Intel CPU/iGPU/Arc/NPU)"),
+                 engine="intel", summary="OpenVINO (Intel CPU/iGPU/Arc/NPU)"),
     BackendAlias("directml", ("dml",), "DmlExecutionProvider", "dml",
                  summary="DirectML (any DX12 GPU)"),
     BackendAlias("migraphx", (), "MIGraphXExecutionProvider", "migraphx",
@@ -510,6 +538,13 @@ def configure_backend(
             # TURBO_EP_DEVICE is the name the engine reads
             # (src/service/server/unified/backend_stages.cpp); TURBO_DEVICE was read by nothing.
             env["TURBO_EP_DEVICE"] = device
+            # TURBO_EP_DEVICE stops at the ONNX/fast path — the NATIVE intel
+            # engine picks its device from OV_DEVICE, read by the backend
+            # factory (backend_stages.cpp documents the split). Without this,
+            # OCR(backend="openvino", device="NPU") on the openvino wheel
+            # silently ran on the default device.
+            if engine == "intel":
+                env["OV_DEVICE"] = device
         summary = spec.summary or spec.key
         if engine == "nvidia":
             _note_trt_first_run(implicit=backend in _AUTO_NAMES)

@@ -396,14 +396,17 @@ jobs:
               # than as a confusing find_package(OpenVINO) miss later.
               test -f /opt/python/cp312-cp312/lib/python3.12/site-packages/openvino/cmake/OpenVINOConfig.cmake
             cmake-args-linux: "-DTURBO_BACKENDS=cpu;intel -DOpenVINO_DIR=/opt/python/cp312-cp312/lib/python3.12/site-packages/openvino/cmake"
-            # PREREQUISITE, not a bug: libopenvino* is EXCLUDED from vendoring,
-            # so this wheel needs the OpenVINO runtime installed on the host —
-            # the same deal onnxruntime-openvino ships under, and what
-            # docs/getting-started/install.md tells Intel users to install.
-            # TODO(openvino): bundle it instead, which means copying the
-            # dlopen'd device plugins AND plugins.xml into the wheel's .libs
-            # dir — the same post-repair injection the CUDA arm does below.
-            # Until then `pip install` alone is not sufficient on a bare host.
+            # libopenvino* is EXCLUDED from vendoring ON PURPOSE, and the wheel
+            # is still self-sufficient: the runtime arrives as the wheel's own
+            # pip dependency (`openvino>=2026.2,<2026.3` in its pyproject —
+            # redistributable on PyPI, unlike CUDA), and
+            # turboocr_engine/native.py preloads it from site-packages, plugins
+            # resolved by libopenvino's own $ORIGIN. Verified on a clean
+            # machine with no system OpenVINO (2026-08-14). Bundling instead
+            # would mean vendoring the device plugins + plugins.xml by hand and
+            # ~10x the wheel — the dependency is the better shape. The version
+            # pin here and the dependency pin MUST move together: _turboocr
+            # gets DT_NEEDED on this minor's soname (libopenvino.so.2621).
             repair-linux: >-
               auditwheel repair -w {dest_dir} {wheel}
               --exclude 'libopenvino*.so.*' --exclude 'libopenvino*.so'

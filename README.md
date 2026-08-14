@@ -371,10 +371,39 @@ stages it doesn't use.
 The `python/` package wraps the same C++ pipeline (nanobind, GIL released
 during inference) — not a reimplementation. Models auto-download per tier
 (~6 MB for tiny) with SHA256 verification. It ships as the `turboocr` umbrella
-(client + engine facade) plus one engine wheel per backend, picked by an extra:
-`pip install "turboocr[cpu]"` / `[cuda12]` / `[cuda13]` / `[openvino]` /
-`[rocm]`. The engine wheels are not published yet — see
-[Quick Start](#quick-start) for the build-from-source path.
+(client + engine facade) plus one engine wheel per backend, picked by an extra.
+
+**What is on PyPI today, and what is not.** `pip install turboocr` currently
+installs the published **0.3.0 client** — it talks to a running TurboOCR
+server, but contains no in-process engine. The v4 engine wheels
+(`turboocr-engine-cpu` / `-cuda12` / `-cuda13` / `-openvino` / `-rocm`) are
+**not published yet** — and if you see a `0.0.0` release under an engine
+name, that is an empty placeholder from the PyPI project setup, not
+installable software. Once the wheels are published, one extra picks the
+engine for your hardware, and `--pre` is required because `4.0.0a1` is a
+pre-release:
+
+```bash
+pip install --pre "turboocr[cpu]"     # or [cuda12] | [cuda13] | [openvino] | [rocm]
+```
+
+`turboocr doctor` names the right one for your machine.
+
+**Installing manually today**, from this checkout:
+
+```bash
+# Build AND repair the engine wheel for your hardware — a bare
+# `pip wheel python/` bundles no libraries and only runs on the machine
+# that built it.
+scripts/python/build_backend_wheel.sh cpu     # cpu | cuda12 | cuda13 | openvino | rocm
+pip install build-wheels/cpu/fixed/*.whl
+
+python -c "import turboocr_engine; print(turboocr_engine.OCR().read('doc.png').text)"
+```
+
+The engine wheel is self-sufficient: `import turboocr_engine` gives you the
+full pipeline and the `turboocr` CLI without the umbrella package installed.
+With the umbrella (once published), the same API is `import turboocr`:
 
 ```python
 import turboocr

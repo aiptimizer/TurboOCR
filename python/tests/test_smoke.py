@@ -681,17 +681,25 @@ def test_nvidia_pip_lib_discovery_orders_dependencies_first(tmp_path):
     (site / "nvidia" / "cuda_runtime" / "lib" / "libcudart.so.12").write_bytes(b"")
     (site / "nvidia" / "nvjpeg" / "lib").mkdir(parents=True)
     (site / "nvidia" / "nvjpeg" / "lib" / "libnvjpeg.so.12").write_bytes(b"")
+    # The openvino wheel's runtime layout (pip `openvino` package): TBB must
+    # load before libopenvino, which links it; plugins/frontends are ignored
+    # (libopenvino dlopens them itself via $ORIGIN).
+    (site / "openvino" / "libs").mkdir(parents=True)
+    (site / "openvino" / "libs" / "libopenvino.so.2621").write_bytes(b"")
+    (site / "openvino" / "libs" / "libtbb.so.12").write_bytes(b"")
+    (site / "openvino" / "libs" / "libopenvino_intel_gpu_plugin.so").write_bytes(b"")
 
-    dirs = n._nvidia_pip_lib_dirs(str(site))
+    dirs = n._vendor_pip_lib_dirs(str(site))
     assert str(site / "tensorrt_libs") in dirs
     assert str(site / "nvidia" / "cuda_runtime" / "lib") in dirs
+    assert str(site / "openvino" / "libs") in dirs
 
     # Reconstruct the exact load order the preload would use.
     order = []
     for d in dirs:
         import os as _os
         for name in _os.listdir(d):
-            for rank, prefix in enumerate(n._NVIDIA_LIB_PRIORITY):
+            for rank, prefix in enumerate(n._VENDOR_LIB_PRIORITY):
                 if name.startswith(prefix + "."):
                     order.append((rank, name))
                     break
@@ -702,6 +710,8 @@ def test_nvidia_pip_lib_discovery_orders_dependencies_first(tmp_path):
         "libnvinfer.so.10",
         "libnvonnxparser.so.10",
         "libnvinfer_plugin.so.10",
+        "libtbb.so.12",
+        "libopenvino.so.2621",
     ]
 
 
@@ -713,25 +723,69 @@ def test_nvidia_preload_never_raises(tmp_path):
 
     empty = tmp_path / "empty-site"
     empty.mkdir()
-    assert n._preload_nvidia_pip_libs(str(empty)) == 0
+    assert n._preload_vendor_pip_libs(str(empty)) == 0
 
     site = tmp_path / "fake-site"
     (site / "tensorrt_libs").mkdir(parents=True)
     (site / "tensorrt_libs" / "libnvinfer.so.10").write_bytes(b"not an ELF")
     # Every candidate fails CDLL -> loaded == 0, no exception.
-    assert n._preload_nvidia_pip_libs(str(site)) == 0
+    assert n._preload_vendor_pip_libs(str(site)) == 0
 
 
-def test_nvidia_runtime_hint_names_the_matching_major():
+def test_vendor_runtime_hint_names_the_matching_major():
     """The remedy line must follow the SONAME in the error: a .so.12 miss names
     the cu12 pip packages, .so.13 names cu13, and a non-NVIDIA import error
     gets no NVIDIA advice at all."""
-    from turboocr_engine.native import _nvidia_runtime_hint
+    from turboocr_engine.native import _vendor_runtime_hint
 
-    assert "tensorrt-cu12-libs" in _nvidia_runtime_hint(
+    assert "tensorrt-cu12-libs" in _vendor_runtime_hint(
         "libcudart.so.12: cannot open shared object file")
-    assert "tensorrt-cu13-libs" in _nvidia_runtime_hint(
+    assert "tensorrt-cu13-libs" in _vendor_runtime_hint(
         "libnvjpeg.so.13: cannot open shared object file")
-    assert "tensorrt-cu" in _nvidia_runtime_hint(
+    assert "tensorrt-cu" in _vendor_runtime_hint(
         "libnvinfer.so.10: cannot open shared object file")
-    assert _nvidia_runtime_hint("No module named '_turboocr'") == ""
+    assert _vendor_runtime_hint("No module named '_turboocr'") == ""
+
+
+def test_openvino_backend_routes_to_the_native_intel_engine(monkeypatch):
+    """On the turboocr-engine-openvino wheel, backend="openvino" must run the
+    NATIVE intel backend (compiled in, measured faster) — the wheel's vendored
+    ORT is the plain CPU build with NO OpenVINO EP, so the previous EP-only
+    routing rejected backend="openvino" on the one wheel built for it. The
+    clean-machine wheel smoke caught this; this pins the routing.
+
+    The device= knob must land in OV_DEVICE: the native engine reads it there
+    (TURBO_EP_DEVICE stops at the ONNX path — backend_stages.cpp)."""
+    monkeypatch.setattr(native, "is_apple_silicon", lambda: False)
+    monkeypatch.setattr(native, "native_backends", lambda: ["cpu", "intel"])
+    monkeypatch.delenv("OV_DEVICE", raising=False)
+
+    assert native.resolve_engine("openvino") == "intel"
+    assert native.resolve_engine("intel") == "intel"
+    # ensure_backend_supported must NOT demand the ORT EP the wheel lacks.
+    native.ensure_backend_supported("openvino")
+
+    resolved, summary = native.configure_backend("openvino", device="NPU")
+    assert resolved == "openvino"
+    assert "OpenVINO" in summary
+    assert os.environ.get("OV_DEVICE") == "NPU"
+
+    # Without the seam backend (CPU wheel), the old behaviour is unchanged:
+    # the ORT-EP path, and the EP check rejects it with the wheel remedy.
+    monkeypatch.setattr(native, "native_backends", lambda: ["cpu"])
+    assert native.resolve_engine("openvino") == "cpu"
+    monkeypatch.setattr(native, "native_providers", lambda: ["CPUExecutionProvider"])
+    import pytest as _pytest
+    from turboocr_engine.errors import BackendUnavailable
+    with _pytest.raises(BackendUnavailable, match="turboocr-engine-openvino"):
+        native.ensure_backend_supported("openvino")
+
+
+def test_vendor_runtime_hint_names_openvino():
+    """A libopenvino miss must point at the wheel's own pip dependency, not at
+    CUDA packages."""
+    from turboocr_engine.native import _vendor_runtime_hint
+
+    hint = _vendor_runtime_hint("libopenvino.so.2621: cannot open shared object file")
+    assert "openvino>=2026.2" in hint
+    assert "tensorrt" not in hint

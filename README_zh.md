@@ -348,9 +348,35 @@ RTX 5090 上测得：所有引擎使用完全相同的页面，计时窗口 ≥1
 
 `python/` 包封装同一条 C++ 流水线（nanobind，推理时释放 GIL），不是 Python 重写。
 模型按档位自动下载（`tiny` 约 6 MB），带 SHA256 校验。它以 `turboocr` 伞包
-（客户端 + 引擎门面）加每后端一个引擎 wheel 的形式发布，由 extra 挑选：
-`pip install "turboocr[cpu]"` / `[cuda12]` / `[cuda13]` / `[openvino]` /
-`[rocm]`。引擎 wheel 尚未发布 — 从源码构建的路径见[快速开始](#快速开始)。
+（客户端 + 引擎门面）加每后端一个引擎 wheel 的形式发布，由 extra 挑选。
+
+**PyPI 上现在有什么、没有什么。** `pip install turboocr` 目前装到的是已发布的
+**0.3.0 客户端** — 能连接运行中的 TurboOCR 服务器，但不含进程内引擎。v4 引擎
+wheel（`turboocr-engine-cpu` / `-cuda12` / `-cuda13` / `-openvino` / `-rocm`）
+**尚未发布** — 如果你在某个引擎名下看到 `0.0.0` 版本，那只是 PyPI 项目初始化
+用的空占位，不是可用的软件。wheel 发布后，一个 extra 即可选中匹配你硬件的
+引擎；`4.0.0a1` 是预发布版本，需要加 `--pre`：
+
+```bash
+pip install --pre "turboocr[cpu]"     # 或 [cuda12] | [cuda13] | [openvino] | [rocm]
+```
+
+`turboocr doctor` 会为你的机器指出正确的那一个。
+
+**现在手动安装**（从本仓库检出）：
+
+```bash
+# 该脚本既构建也修复 wheel — 裸 `pip wheel python/` 不打包任何库，
+# 只能在构建它的机器上运行。
+scripts/python/build_backend_wheel.sh cpu     # cpu | cuda12 | cuda13 | openvino | rocm
+pip install build-wheels/cpu/fixed/*.whl
+
+python -c "import turboocr_engine; print(turboocr_engine.OCR().read('doc.png').text)"
+```
+
+引擎 wheel 自给自足：`import turboocr_engine` 即可获得完整流水线和
+`turboocr` 命令行，无需安装伞包。伞包发布后，同一套 API 写作
+`import turboocr`：
 
 ```python
 import turboocr

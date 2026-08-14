@@ -188,8 +188,10 @@ pip install build-wheels/openvino/fixed/*.whl
 python -c "import turboocr_engine; print(turboocr_engine.OCR(backend='openvino').read('doc.png'))"
 ```
 
-Builds the `turboocr-engine-openvino` wheel from this checkout (needs the
-OpenVINO runtime installed). `OV_DEVICE=CPU|GPU|NPU` picks the device at run time.
+Builds the `turboocr-engine-openvino` wheel from this checkout (building
+needs the OpenVINO dev package; at RUN time the wheel's own `openvino` pip
+dependency supplies the runtime automatically). `backend="openvino"` runs the
+native OpenVINO engine; `OV_DEVICE=CPU|GPU|NPU` or `device=` picks the device.
 
 </details>
 

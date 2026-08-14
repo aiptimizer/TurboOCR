@@ -150,7 +150,7 @@ Same extension, N ORT variants. Names mirror onnxruntime's own distribution so
 |---|---|---|---|---|---|
 | **`turboocr-engine-cpu`** (base) | any CPU; **+ Apple GPU** on macOS arm64 | onnxruntime (CPU; mac wheel has CoreML) | CPU, XNNPACK, **CoreML** (mac) | ✅ **CPU/MLAS** | ORT, OpenCV, pdfium(Linux) |
 | **`turboocr-engine-cuda12`** / **`-cuda13`** | NVIDIA, Linux + Win | onnxruntime-gpu (CUDA+TRT) | **CUDA**, TensorRT | ⚠️ **auto → TensorRT (first run builds)** | ORT-GPU, OpenCV vendored; CUDA/cuDNN/TensorRT **host-provided** — excluded by the repair step and NOT declared as deps |
-| **`turboocr-engine-openvino`** | Intel CPU/iGPU/Arc/NPU | onnxruntime-openvino | OpenVINO | ✅ OpenVINO AUTO | ORT-OV + OpenVINO runtime |
+| **`turboocr-engine-openvino`** | Intel CPU/iGPU/Arc/NPU | onnxruntime (plain CPU) | CPU (+ native OpenVINO engine, `backend="openvino"`) | ✅ native OpenVINO | ORT, OpenCV vendored; OpenVINO via the wheel's own `openvino` pip dep (preloaded) |
 | **`turboocr-directml`** (not built) | any DX12 GPU, Windows | onnxruntime-directml | DirectML | ✅ DirectML | ORT-DML |
 | **`turboocr-engine-rocm`** | AMD, Linux + ROCm | onnxruntime-migraphx (AMD index) | MIGraphX, ROCm | ✅ MIGraphX | ORT-ROCm (from repo.radeon.com) |
 

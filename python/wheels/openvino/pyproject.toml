@@ -28,7 +28,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "turboocr-engine-openvino"
 dynamic = ["version"]
-description = "Fast multi-backend OCR (PP-OCRv6) for Python — Intel build: OpenVINO Runtime + ONNX Runtime OpenVINO EP"
+description = "Fast multi-backend OCR (PP-OCRv6) for Python — Intel build: the native OpenVINO Runtime engine"
 readme = { content-type = "text/markdown", text = """
 # turboocr-engine-openvino
 
@@ -36,12 +36,18 @@ The Intel build of the [TurboOCR](https://turboocr.com) engine. Identical
 Python API to `turboocr-engine-cpu` — `from turboocr_engine import OCR`, or
 `from turboocr import OCR` through the pure-Python `turboocr` umbrella
 (`pip install "turboocr[openvino]"` installs both) — with the Intel
-backend compiled into the native extension: the native OpenVINO Runtime engine
-plus the shared ONNX Runtime fast path on the OpenVINO execution provider.
+backend compiled into the native extension. `backend="openvino"` (or
+`"intel"`) runs the native OpenVINO Runtime engine; `backend="cpu"` is the
+plain ONNX Runtime fallback in the same wheel.
 
-One binary covers Intel CPU, iGPU, Arc and NPU; the device is chosen at RUN
-time with the `OV_DEVICE` environment variable (`CPU` | `GPU` | `NPU`), so an
-iGPU laptop and a discrete Arc box run the same wheel.
+The OpenVINO runtime itself arrives as this wheel's own pip dependency
+(`openvino>=2026.2,<2026.3`) and is found automatically — no system OpenVINO
+install and no `LD_LIBRARY_PATH` needed.
+
+One binary covers Intel CPU, iGPU, Arc and NPU; pick the device at RUN time
+with `OCR(backend="openvino", device="GPU")` or the `OV_DEVICE` environment
+variable (`CPU` | `GPU` | `NPU`), so an iGPU laptop and a discrete Arc box run
+the same wheel.
 
 **Install exactly one** `turboocr-engine-*` wheel per environment: they all
 provide the `turboocr_engine` import package and link mutually incompatible
@@ -59,13 +65,24 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 
-# Same rule as the base wheel: ONNX Runtime, the OpenVINO Runtime, OpenCV and
-# PDFium are LINKED INTO `_turboocr` and vendored by the repair step, so they
-# are not Python deps. Do NOT add the `openvino` PyPI package here — this wheel
-# does not go through Python to reach it.
+# Same rule as the base wheel for ONNX Runtime, OpenCV and PDFium: LINKED INTO
+# `_turboocr` and vendored by the repair step, so not Python deps. The OpenVINO
+# Runtime is the exception — deliberately EXCLUDED from vendoring (the repair
+# step's --exclude 'libopenvino*'), and unlike CUDA it is redistributable on
+# PyPI, so it is a real dependency below, preloaded from site-packages by
+# turboocr_engine/native.py. Without it the wheel imports on no machine that
+# lacks a system OpenVINO — caught by the clean-machine smoke on 2026-08-14.
 dependencies = [
     "numpy>=1.21",
     "opencv-python-headless>=4.6",
+    # The OpenVINO RUNTIME the native intel backend links against. Unlike the
+    # NVIDIA wheels' CUDA/TensorRT (host-provided, excluded from vendoring),
+    # OpenVINO is redistributable on PyPI, so it is a REAL dependency and the
+    # engine preloads its libraries from site-packages automatically
+    # (turboocr_engine/native.py). The upper bound is NOT caution, it is ABI:
+    # _turboocr has DT_NEEDED on libopenvino.so.2621, the 2026.2.x soname —
+    # a different minor ships a different soname and will not satisfy it.
+    "openvino>=2026.2,<2026.3",
 ]
 
 [project.optional-dependencies]

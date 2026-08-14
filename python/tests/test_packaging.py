@@ -94,13 +94,28 @@ def test_all_extra_is_the_union_of_the_others(projects):
         assert extras.get("all") == union, (name, extras.get("all"), union)
 
 
+# The ONE sanctioned per-wheel dependency difference: a vendor runtime that is
+# redistributable ON PYPI becomes a real dependency of its wheel (the engine
+# preloads it from site-packages — native.py). CUDA/TensorRT are NOT
+# redistributable this way, which is why the NVIDIA wheels have no equivalent
+# entry. Anything not listed here is still a copy-paste slip.
+_SANCTIONED_EXTRA_DEPS = {
+    "turboocr-engine-openvino": {"openvino>=2026.2,<2026.3"},
+}
+
+
 def test_runtime_dependencies_and_entry_point_match(projects):
     """Same reasoning as the extras: the accelerator is the ONLY difference
     between these wheels, so a diverging install_requires or console script is a
-    copy-paste slip, not a design choice."""
+    copy-paste slip, not a design choice — except the sanctioned vendor-runtime
+    dependencies above, which must be exactly what the allowlist says."""
     base = projects[BASE]
     for name, proj in projects.items():
-        assert sorted(proj["dependencies"]) == sorted(base["dependencies"]), name
+        allowed_extra = _SANCTIONED_EXTRA_DEPS.get(name, set())
+        extra = set(proj["dependencies"]) - set(base["dependencies"])
+        assert extra == allowed_extra, (name, extra)
+        # The base dependency set itself must never diverge.
+        assert set(base["dependencies"]) <= set(proj["dependencies"]), name
         assert proj["scripts"] == base["scripts"], name
         assert proj["requires-python"] == base["requires-python"], name
 
