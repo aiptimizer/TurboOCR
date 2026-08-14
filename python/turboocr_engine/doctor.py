@@ -69,9 +69,12 @@ _RECOMMEND: dict = {
 
 # Printed under the install command. Keep this honest: the per-backend wheels
 # are not on PyPI yet, so don't imply a bare `pip install` will resolve them.
+# (An earlier version pointed at "the TestPyPI index" — nothing was ever
+# published there; the only working path today is building from the checkout.)
 _INSTALL_NOTE = (
-    "Pre-release: the accelerator wheels aren't on PyPI yet — point pip at the "
-    "TestPyPI index, or build one with scripts/python/build_backend_wheel.sh. "
+    "Pre-release: the engine wheels aren't on PyPI yet — build one from the "
+    "repo checkout with scripts/python/build_backend_wheel.sh (once published, "
+    "add --pre: pip skips pre-releases by default). "
     "Re-run `turboocr doctor` afterwards to confirm the provider is live."
 )
 

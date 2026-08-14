@@ -38,13 +38,14 @@ OCR(model=None, backend="auto", *, lang=None, tier=None, models_dir=None,
 
 **Model selection** — explicit `model=` wins; else `lang` (+ `tier`); else
 `tier`; else the default `tiny`. `lang` picks a script recognizer (`korean`,
-`arabic`, `thai`, `greek`, `eslav`) or, for Latin/CJK, selects the PP-OCRv6
-tier. Models auto-download per tier with SHA256 verification (`~6` MB for
-tiny) into the user cache (`~/.cache/turboocr` on Linux,
-`~/Library/Caches/turboocr` on macOS); `models_dir=` points at your own
-directory, `allow_download=False` forbids fetching. `tiny` omits Japanese
-kana — use `small`/`medium` for Japanese
-([model selection](../models/selection.md)).
+`arabic`, `thai`, `greek`, `eslav` — ISO aliases like `ko`, `ar`, `th`, `el`,
+`ru` work too) or, for Latin/CJK, selects the PP-OCRv6 tier. `turboocr
+models` (or `turboocr_engine.list_models()`) prints every name. Models
+auto-download per tier with SHA256 verification (`~6` MB for tiny) into the
+user cache (`~/.cache/turboocr` on Linux, `~/Library/Caches/turboocr` on
+macOS); `models_dir=` points at your own directory, `allow_download=False`
+forbids fetching. `tiny` omits Japanese kana — use `small`/`medium` for
+Japanese ([model selection](../models/selection.md)).
 
 | Parameter | Meaning |
 |---|---|
@@ -109,6 +110,16 @@ doc = ocr.read_pdf(pdf, *, dpi=150, pages=None, max_pages=None, ...)
 
 Renders with PDFium (the `pdf` extra: `pip install "turboocr[cpu,pdf]"`) and
 OCRs each page. Pass `keep_image=False` for long documents.
+
+**One-shots and introspection.** For a single call, the module-level
+`turboocr_engine.read(image, model=..., backend=...)` and
+`read_pdf(...)` reuse one cached default engine — `layout=True` /
+`autorotate=True` there build (and cache) an engine with those capabilities
+rather than being silently ignored. `ocr.info()` reports what a constructed
+engine actually resolved to — backend, engine, `mode` (`native` vs `onnx`),
+model paths, capabilities. `ocr.close()` releases the native pipelines. The
+Python twins of the CLI's doctor are `turboocr_engine.doctor()` (prints the
+panel) and `available_backends()`.
 
 ## Results
 
