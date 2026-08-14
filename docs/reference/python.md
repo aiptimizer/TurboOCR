@@ -112,18 +112,66 @@ OCRs each page. Pass `keep_image=False` for long documents.
 
 ## Results
 
-- **`PageResult`** — `lines` (iterable; the page object itself iterates,
-  indexes and `len()`s as its lines), `text` (lines joined in reading
-  order), `width`/`height`, `page` (1-based for PDF pages), `orientation`
-  (applied rotation when autorotate ran), `layout` (`LayoutBox`: label,
-  confidence, quad), `tables` (`TableRegion`: `html`, score, quad),
-  `formulas` (`FormulaRegion`: `latex`, score, quad), `warnings`,
-  `filter(min_confidence=..., contains=...)`, `to_dict()`,
-  `save_overlay(path)`, `save_searchable_pdf(path)`.
-- **`TextLine`** — `text`, `confidence`, `box` (four corner points in
-  original-image pixel coordinates).
-- **`DocumentResult`** — `pages` (iterable), `text`,
-  `to_markdown(structured=...)`, `to_dict()`, `source`.
+`read()` returns a **`PageResult`**; `read_batch()` and `read_pdf()` return a
+**`DocumentResult`** holding one `PageResult` per page.
+
+```python
+page = ocr.read("invoice.png", layout=True)
+
+for line in page.filter(min_confidence=0.9):     # a page iterates as its lines
+    print(f"{line.confidence:.2f}  {line.text}")
+for region in page.layout:
+    print(region.label, region.box)
+
+doc = ocr.read_pdf("report.pdf")
+doc.to_markdown()                                # whole document as Markdown
+doc.to_pandas()                                  # one DataFrame, `page` column
+```
+
+### `TextLine` — one recognized line
+
+| Attribute | Meaning |
+|---|---|
+| `text` | The transcript |
+| `confidence` | Recognition confidence, 0–1 |
+| `box` | The four corner points it was read from, in original-image pixel coordinates |
+
+### `PageResult` — one image or PDF page
+
+The page behaves as a sequence of its lines: `for line in page`, `page[0]`,
+`len(page)`.
+
+| Attribute / method | Meaning |
+|---|---|
+| `lines` | The `TextLine`s, in reading order |
+| `text` | All lines joined with newlines |
+| `width`, `height` | Source image size in pixels |
+| `page` | 1-based page number for PDF pages; `None` for standalone images |
+| `orientation` | Rotation applied before OCR (0/90/180/270) when autorotate ran |
+| `layout` | `LayoutBox` regions (`label`, `confidence`, `box`) — with `layout=True` |
+| `tables` | `TableRegion`s (`html`, `score`, `box`) — with `tables=True` |
+| `formulas` | `FormulaRegion`s (`latex`, `score`, `box`) — with `formulas=True` |
+| `warnings` | Degradation notes (e.g. recognition produced boxes but no text) |
+| `filter(min_confidence=…, contains=…, predicate=…)` | A new `PageResult` keeping only matching lines (page context carried over) |
+| `to_dict()` | JSON-shaped dict, same keys as the server's response |
+| `to_pandas()` | DataFrame of the lines (`[pandas]` extra) |
+| `to_hocr()` | hOCR markup for this page |
+| `save_overlay(path)` | The image with boxes drawn on it (needs `keep_image=True`, the default) |
+| `save_searchable_pdf(path)` | Image page + invisible text layer as a PDF (needs `keep_image=True` and reportlab, from the `[pdf]` extra) |
+
+### `DocumentResult` — a PDF or an image batch
+
+The document iterates as its pages.
+
+| Attribute / method | Meaning |
+|---|---|
+| `pages` | One `PageResult` per page |
+| `text` | Whole-document text |
+| `source` | The path it was read from |
+| `to_markdown(structured=…)` | Markdown export |
+| `to_dict()` | JSON-shaped dict |
+| `to_pandas()` | One DataFrame across all pages, with a `page` column |
+| `to_hocr()` | A single multi-page hOCR document |
 
 ## CLI
 
