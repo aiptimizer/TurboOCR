@@ -318,20 +318,22 @@ The Linux x64 row is `-DTURBO_BACKENDS="nvidia;cpu"`. The plain GPU configure
 omits the three tests that exercise the multi-backend seam, because it does not
 build the seam.
 
-!!! note "aarch64 needs one extra step"
-    `third_party/pdfium/` vendors **linux-x64** and mac-arm64 only, so on ARM
-    Linux you must run `scripts/setup/install_pdfium.sh` before configuring — it
-    fetches the `linux-arm64` build. Everything else is automatic: the ONNX
-    Runtime download follows `TURBO_ARCH`, and the arch flags become
-    `-march=armv8.2-a`. The aarch64 row (566 cases as of 2026-08-12) was measured on Ubuntu 24.04,
-    `-DTURBO_BACKENDS="cpu" -DBUILD_SERVER=OFF`.
+> **aarch64 needs one extra step.**
+>
+> `third_party/pdfium/` vendors **linux-x64** and mac-arm64 only, so on ARM
+> Linux you must run `scripts/setup/install_pdfium.sh` before configuring — it
+> fetches the `linux-arm64` build. Everything else is automatic: the ONNX
+> Runtime download follows `TURBO_ARCH`, and the arch flags become
+> `-march=armv8.2-a`. The aarch64 row (566 cases as of 2026-08-12) was measured on Ubuntu 24.04,
+> `-DTURBO_BACKENDS="cpu" -DBUILD_SERVER=OFF`.
 
-!!! warning "Read this before pointing any build at a GPU"
-    A GPU request that quietly runs on the CPU is the failure mode to guard
-    against — same numbers, an order of magnitude slower, no error. The engine
-    now refuses instead (`session.disable_cpu_ep_fallback`), but the version
-    pairing is on you:
-    [GPU providers fail loudly](../reference/configuration.md#gpu-providers-fail-loudly).
+> **Read this before pointing any build at a GPU.**
+>
+> A GPU request that quietly runs on the CPU is the failure mode to guard
+> against — same numbers, an order of magnitude slower, no error. The engine
+> now refuses instead (`session.disable_cpu_ep_fallback`), but the version
+> pairing is on you:
+> [GPU providers fail loudly](../reference/configuration.md#gpu-providers-fail-loudly).
 
 **Not yet proven on hardware**, and honestly labelled as such rather than
 implied by the table above: **TensorRT** on Windows (the NVIDIA seam backend
@@ -458,219 +460,229 @@ built with the Apple backend and bundles the Metal shader library.
 
 Feature extras — `[pdf]` (read PDFs, write searchable PDFs), `[rich]` (prettier
 `doctor` panel), `[pandas]` (`PageResult.to_pandas()`), `[all]` — combine with
-any backend: `pip install "turboocr[cuda,pdf]"`, or on a bare engine wheel,
+any backend: `pip install "turboocr[cuda12,pdf]"`, or on a bare engine wheel,
 `pip install "turboocr-engine-cpu[all]"`.
 
-!!! warning "The engine wheels are not published yet"
-    `pip install turboocr` today resolves to this project's published 0.3.0
-    client SDK, which the umbrella continues — but the `turboocr-engine-*`
-    distributions have no PyPI release until the first release run of
-    `.github/workflows/wheels.yml`, so the backend extras do not resolve yet.
+> **The engine wheels are not published yet.**
+>
+> `pip install turboocr` today resolves to this project's published 0.3.0
+> client SDK, which the umbrella continues — but the `turboocr-engine-*`
+> distributions have no PyPI release until the first release run of
+> `.github/workflows/wheels.yml`, so the backend extras do not resolve yet.
+>
+> **Build from source** — always current, matches the host exactly. Use the
+> helper script: it builds *and* repairs the wheel, which is the part that
+> makes it installable anywhere.
+>
+> ```bash
+> # <variant> is one of: cpu | cuda12 | cuda13 | openvino | rocm
+> # (cpu builds turboocr-engine-cpu — also the Apple wheel on macOS arm64)
+> scripts/python/build_backend_wheel.sh cpu
+> pip install build-wheels/cpu/fixed/*.whl
+> ```
+>
+> A bare `pip wheel python/` is **not** enough on its own — see
+> [why the helper script](#why-the-helper-script-not-pip-wheel) below.
 
-    **Build from source** — always current, matches the host exactly. Use the
-    helper script: it builds *and* repairs the wheel, which is the part that
-    makes it installable anywhere.
+> **`4.0.0a1` is a pre-release — pip skips it by default.**
+>
+> Once the wheels are published, a plain `pip install "turboocr[cpu]"` still
+> resolves to the newest *stable* release, not the alpha. Ask for it:
+>
+> ```bash
+> pip install --pre "turboocr[cpu]"
+> pip install "turboocr[cpu]==4.0.0a1"    # equivalent, explicit
+> ```
+>
+> Verify what you got: `pip show turboocr-engine-cpu` (or your variant) and
+> `turboocr doctor` report the installed version and the provider actually
+> selected.
 
-    ```bash
-    # <variant> is one of: cpu | cuda | openvino | rocm
-    # (cpu builds turboocr-engine-cpu — also the Apple wheel on macOS arm64)
-    scripts/python/build_backend_wheel.sh cpu
-    pip install build-wheels/cpu/fixed/*.whl
-    ```
+### Why the helper script, not `pip wheel`
 
-    A bare `pip wheel python/` is **not** enough on its own — see
-    [the repair step](#the-repair-step-is-not-optional) below.
+A bare `pip wheel python/` bundles no shared libraries — the result imports
+only on the machine that built it. `scripts/python/build_backend_wheel.sh`
+builds **and repairs** the wheel: it vendors the dependencies (OpenCV, ONNX
+Runtime, PDFium, …), excludes the host-provided CUDA/ROCm sonames on the GPU
+variants, and re-injects ORT's `dlopen`'d provider libraries that the repair
+tools can't see. That is the entire reason it exists — use it.
 
-!!! note "`4.0.0a1` is a pre-release — pip skips it by default"
-    Once the wheels are published, a plain `pip install "turboocr[cpu]"` still
-    resolves to the newest *stable* release, not the alpha. Ask for it:
-
-    ```bash
-    pip install --pre "turboocr[cpu]"
-    pip install "turboocr[cpu]==4.0.0a1"    # equivalent, explicit
-    ```
-
-    Verify what you got: `pip show turboocr-engine-cpu` (or your variant) and
-    `turboocr doctor` report the installed version and the provider actually
-    selected.
-
-### The repair step is not optional
-
-`pip wheel python/` produces a wheel that runs **only on the machine that built
-it**. It bundles zero shared libraries, and its RPATH points back into your dev
-checkout — move it to another machine, or just delete `build/`, and the import
-fails. Making it self-contained is a separate *repair* step that vendors the
-~114 dylibs/shared objects it depends on (OpenCV, ONNX Runtime, PDFium, …).
-
-`scripts/python/build_backend_wheel.sh` does build **and** repair, which is why
-it is the recommended path. If you drive `pip wheel` by hand, run the repair
-yourself and install the repaired wheel:
+<details class="phc-static" markdown="1">
+<summary><b>Repairing by hand instead</b></summary>
 
 ```bash
-# macOS
 pip wheel python/ --no-deps -w dist/
-pip install delocate
-delocate-wheel -w dist/fixed -v dist/turboocr_engine_*.whl
-pip install dist/fixed/turboocr_engine_*.whl
 
-# Linux
-pip wheel python/ --no-deps -w dist/
-pip install auditwheel
-auditwheel repair -w dist/fixed dist/turboocr_engine_*.whl
+# macOS:
+pip install delocate && delocate-wheel -w dist/fixed -v dist/*.whl
+# Linux:
+pip install auditwheel && auditwheel repair -w dist/fixed dist/*.whl
+
 pip install dist/fixed/turboocr_engine_*.whl
 ```
 
-For the `cuda` and `rocm` variants the repair must **exclude** the driver and
+For the `cuda12`/`cuda13`/`rocm` variants, additionally exclude the driver and
 toolkit sonames (`libcuda.so.1`, `libcudart`, `libcudnn`, `libnvinfer`,
-`libamdhip64`, `libmigraphx`, …) so they come from the host, exactly as
-`onnxruntime-gpu` ships — and the CUDA wheel needs a second pass, because ORT
-`dlopen`s its provider libraries and `auditwheel` cannot see them in the
-`DT_NEEDED` graph. The helper script already encodes both; hand-rolling them is
-the part that goes wrong.
+`libamdhip64`, `libmigraphx`, …) so they come from the host — exactly as
+`onnxruntime-gpu` ships — and copy ORT's `libonnxruntime_providers_*.so` into
+the repaired wheel's libs directory afterwards (`dlopen`'d, so `auditwheel`
+drops them). The helper script encodes all of this.
+
+</details>
 
 ## Backend details
 
-??? info "NVIDIA — `turboocr-engine-cuda12` / `-cuda13`, and what the first run costs"
+<details class="phc-static" markdown="1">
+<summary><b>NVIDIA — the cuda12 / cuda13 wheels, and what the first run costs</b></summary>
 
-    Pick the wheel by **GPU generation first, then driver**:
+Pick the wheel by **GPU generation first, then driver**:
 
-    | | `cuda12` | `cuda13` |
-    |---|---|---|
-    | oldest GPU | Turing (sm_75) | Turing (sm_75) |
-    | driver | **R525+** | **R580+** |
+| | `cuda12` | `cuda13` |
+|---|---|---|
+| oldest GPU | Turing (sm_75) | Turing (sm_75) |
+| driver | **R525+** | **R580+** |
 
-    Both wheels need **Turing or newer** — the same floor as the server. It is
-    not a CUDA-major difference: TurboOCR's own kernels require it (the
-    connected-components pass uses a cooperative-groups grid sync, which needs
-    compute capability 6.0+, and the project pins sm_75 as its floor), and
-    CUDA 13 drops pre-Turing support outright. Both are compiled for
-    sm_75/80/86/89/90/120, so every card from an RTX 20 to a Blackwell is
-    native, and the TensorRT engine is built at run time for whichever is
-    present.
+Both wheels need **Turing or newer** — the same floor as the server. It is
+not a CUDA-major difference: TurboOCR's own kernels require it (the
+connected-components pass uses a cooperative-groups grid sync, which needs
+compute capability 6.0+, and the project pins sm_75 as its floor), and
+CUDA 13 drops pre-Turing support outright. Both are compiled for
+sm_75/80/86/89/90/120, so every card from an RTX 20 to a Blackwell is
+native, and the TensorRT engine is built at run time for whichever is
+present.
 
-    **So choose by driver, not by card.** An RTX 3090 on driver R535 needs
-    `cuda12`; the same card on R580 can take either.
+**So choose by driver, not by card.** An RTX 3090 on driver R535 needs
+`cuda12`; the same card on R580 can take either.
 
-    The CUDA, cuDNN and TensorRT runtimes are **not** bundled: the repair step
-    excludes every one of those sonames, exactly as `onnxruntime-gpu` ships.
-    They come from the system CUDA install, or from the matching pip packages,
-    which the wheel **finds automatically** — no `LD_LIBRARY_PATH` needed. On a
-    driver-only machine:
+The CUDA, cuDNN and TensorRT runtimes are **not** bundled: the repair step
+excludes every one of those sonames, exactly as `onnxruntime-gpu` ships.
+They come from the system CUDA install, or from the matching pip packages,
+which the wheel **finds automatically** — no `LD_LIBRARY_PATH` needed. On a
+driver-only machine:
 
-    ```bash
-    pip install tensorrt-cu12-libs==10.15.1.29 nvidia-cuda-runtime-cu12 nvidia-nvjpeg-cu12   # or the -cu13 equivalents
-    ```
+```bash
+pip install tensorrt-cu12-libs==10.15.1.29 nvidia-cuda-runtime-cu12 nvidia-nvjpeg-cu12   # or the -cu13 equivalents
+```
 
-    They are not declared as dependencies of the engine wheel, so nothing
-    CUDA-sized lands on machines that install it for its API surface alone.
+They are not declared as dependencies of the engine wheel, so nothing
+CUDA-sized lands on machines that install it for its API surface alone.
 
-    It carries two NVIDIA paths, and which one you get is a `backend=` choice
-    with very different startup behaviour:
+It carries two NVIDIA paths, and which one you get is a `backend=` choice
+with very different startup behaviour:
 
-    | `backend=` | Start-up | Steady state |
-    |---|---|---|
-    | `"auto"` (**the default**) → resolves to `"turbo"` | **Slow on the FIRST run only** — builds a TensorRT engine | Fastest: peak throughput |
-    | `"cuda"` | **Instant** — nothing is compiled | Fast: the ONNX graph on the CUDA execution provider |
-    | `"turbo"` (aliases `"tensorrt"`, `"trt"`) | **Slow on the first run only** — builds a TensorRT engine | Fastest: peak throughput |
+| `backend=` | Start-up | Steady state |
+|---|---|---|
+| `"auto"` (**the default**) → resolves to `"turbo"` | **Slow on the FIRST run only** — builds a TensorRT engine | Fastest: peak throughput |
+| `"cuda"` | **Instant** — nothing is compiled | Fast: the ONNX graph on the CUDA execution provider |
+| `"turbo"` (aliases `"tensorrt"`, `"trt"`) | **Slow on the first run only** — builds a TensorRT engine | Fastest: peak throughput |
 
-    The nvidia backend is compiled into these wheels, so `backend="auto"` picks
-    the native TensorRT path — it does **not** start instantly. The first
-    `OCR()` call builds an engine (~90 s on an RTX 5090, longer on older cards)
-    and caches it; the process prints a one-time notice while it does. Ask for
-    `backend="cuda"` when you need an instant first start.
+The nvidia backend is compiled into these wheels, so `backend="auto"` picks
+the native TensorRT path — it does **not** start instantly. The first
+`OCR()` call builds an engine (~90 s on an RTX 5090, longer on older cards)
+and caches it; the process prints a one-time notice while it does. Ask for
+`backend="cuda"` when you need an instant first start.
 
-    ```python
-    turboocr.OCR(backend="cuda")    # instant start, ONNX Runtime CUDA EP
-    turboocr.OCR(backend="turbo")   # TensorRT — first run builds, then cached
-    ```
+```python
+turboocr.OCR(backend="cuda")    # instant start, ONNX Runtime CUDA EP
+turboocr.OCR(backend="turbo")   # TensorRT — first run builds, then cached
+```
 
-    `backend="turbo"` compiles a TensorRT engine specialised for your exact GPU,
-    driver and model. That build is a **one-time cost**, not a per-run one: the
-    engine is written to an on-disk cache and every later run loads it in a
-    fraction of a second. Budget roughly ~90 s on an RTX 5090 and up to an hour
-    on older cards; `TRT_OPT_LEVEL=3` cuts it 3–5x.
+The engine build is specialised to your exact GPU, driver and model, and it
+is a **one-time cost**: it lands in `TRT_ENGINE_CACHE` (default
+`~/.cache/turbo-ocr`) and every later run loads it in a fraction of a
+second. Point the cache somewhere persistent — or mount it as a volume in a
+container — so it is paid once per machine, not once per process. A GPU,
+driver, TensorRT or model change correctly invalidates it and triggers one
+more rebuild (`TRT_OPT_LEVEL=3` cuts build time 3–5x). Server and wheel
+behave the SAME way here: both default to TensorRT.
 
-    The cache directory is `TRT_ENGINE_CACHE`, defaulting to
-    `~/.cache/turbo-ocr`. Point it somewhere persistent — or mount it as a
-    volume in a container — and the build is paid once per machine rather than
-    once per process. The cache is invalidated by a GPU, driver, TensorRT or
-    model change, which correctly triggers one more rebuild.
+</details>
 
-    Note the asymmetry with the **server**, whose native NVIDIA arm uses
-    TensorRT by default — that is why the Docker quick-start warns about a slow
-    first start. The Python wheel deliberately defaults the other way: no build,
-    running the second you have the wheel. Opt in with `backend="turbo"` when
-    you want peak throughput and can absorb one slow start.
+<details class="phc-static" markdown="1">
+<summary><b>Apple Silicon — Metal + Neural Engine</b></summary>
 
-??? info "Apple Silicon — Metal + Neural Engine"
+One-time setup before the build command above: full Xcode with the Metal
+toolchain, the Homebrew package line from the selector, and an osx-arm64
+ONNX Runtime ≥ 1.27 — the checklist lives in
+[Native build → macOS](native.md#macos-cpu-apple-backend).
 
-    One-time setup before the build command above: full Xcode with the Metal
-    toolchain, the Homebrew package line from the selector, and an osx-arm64
-    ONNX Runtime ≥ 1.27 — the checklist lives in
-    [Native build → macOS](native.md#macos-cpu-apple-backend).
+Detection and warp run on the GPU (Metal + MPSGraph); recognition is a
+GPU + Neural Engine hybrid, with narrow crops on the ANE through CoreML
+in parallel with the GPU. `turbo_apple.metallib` is compiled next to the
+binary and found automatically. Layout, tables, formulas and autorotate
+all work once their models are supplied (`--layout-onnx
+models/layout.onnx`, `DOC_ORI_ONNX=…`, `TABLE_BACKEND=…`,
+`FORMULA_BACKEND=…`).
 
-    Detection and warp run on the GPU (Metal + MPSGraph); recognition is a
-    GPU + Neural Engine hybrid, with narrow crops on the ANE through CoreML
-    in parallel with the GPU. `turbo_apple.metallib` is compiled next to the
-    binary and found automatically. Layout, tables, formulas and autorotate
-    all work once their models are supplied (`--layout-onnx
-    models/layout.onnx`, `DOC_ORI_ONNX=…`, `TABLE_BACKEND=…`,
-    `FORMULA_BACKEND=…`).
+| Knob | Meaning |
+|---|---|
+| `TURBO_APPLE_ANE_MAXW` | GPU/ANE split point (default 800; `0` = GPU only) |
 
-    | Knob | Meaning |
-    |---|---|
-    | `TURBO_APPLE_ANE_MAXW` | GPU/ANE split point (default 800; `0` = GPU only) |
+→ `src/backends/apple/README.md`
 
-    → `src/backends/apple/README.md`
+</details>
 
-??? info "Intel — OpenVINO"
+<details class="phc-static" markdown="1">
+<summary><b>Intel — OpenVINO</b></summary>
 
-    One backend covers Intel CPUs, integrated GPUs, Arc and NPUs. By default
-    it runs on the **integrated GPU / Arc** — `OV_DEVICE=GPU`, which resolves
-    to `GPU.0`. Set `OV_DEVICE=CPU` or `OV_DEVICE=NPU` to pin a different
-    device.
+One backend covers Intel CPUs, integrated GPUs, Arc and NPUs. By default
+it runs on the **integrated GPU / Arc** — `OV_DEVICE=GPU`, which resolves
+to `GPU.0`. Set `OV_DEVICE=CPU` or `OV_DEVICE=NPU` to pin a different
+device.
 
-    If the machine also has a **discrete card**, note that OpenVINO enumerates
-    it under the same GPU plugin (`GPU.1`), and plain `GPU` always means
-    `GPU.0` — the integrated one. Pass the index (`OV_DEVICE=GPU.1`) when you
-    want the other one; otherwise you may benchmark silicon you did not
-    intend. Run `python -c "import openvino as ov; c=ov.Core(); print([(d,
-    c.get_property(d,'FULL_DEVICE_NAME')) for d in c.available_devices])"` to
-    see which index is which.
+If the machine also has a **discrete card**, note that OpenVINO enumerates
+it under the same GPU plugin (`GPU.1`), and plain `GPU` always means
+`GPU.0` — the integrated one. Pass the index (`OV_DEVICE=GPU.1`) when you
+want the other one; otherwise you may benchmark silicon you did not
+intend. Run `python -c "import openvino as ov; c=ov.Core(); print([(d,
+c.get_property(d,'FULL_DEVICE_NAME')) for d in c.available_devices])"` to
+see which index is which.
 
-    The models can execute two ways — `TURBO_ENGINE_MODE` picks (default
-    `auto` = use `native` when it comes up):
+The models can execute two ways — `TURBO_ENGINE_MODE` picks (default
+`auto` = use `native` when it comes up):
 
-    - **`native`** (alias `ultra`): OpenVINO compiles and runs the models
-      itself. Fastest on Intel silicon; the first start pays a one-time model
-      compile — set `OV_CACHE_DIR` to pay it once.
-    - **`onnx`** (alias `fast`): ONNX Runtime running with the OpenVINO
-      execution provider underneath. Starts faster but runs measurably
-      slower on the same chip — the fallback, not the recommendation.
+- **`native`** (alias `ultra`): OpenVINO compiles and runs the models
+  itself. Fastest on Intel silicon; the first start pays a one-time model
+  compile — set `OV_CACHE_DIR` to pay it once.
+- **`onnx`** (alias `fast`): ONNX Runtime running with the OpenVINO
+  execution provider underneath. Starts faster but runs measurably
+  slower on the same chip — the fallback, not the recommendation.
 
-    Leave `OV_PERF_HINT` on its `latency` default: `throughput` makes this
-    server *slower* (measured 2.4 vs 5.5 img/s — the server issues one
-    inference at a time, and the throughput hint parks that single request
-    on one shared stream).
+Leave `OV_PERF_HINT` on its `latency` default: `throughput` makes this
+server *slower* (measured 2.4 vs 5.5 img/s — the server issues one
+inference at a time, and the throughput hint parks that single request
+on one shared stream).
 
-    → `src/backends/intel/README.md`
+→ `src/backends/intel/README.md`
 
-??? info "AMD — ROCm"
+</details>
 
-    HIP kernels plus a MIGraphX inference engine, with a per-architecture
-    `.mxr` compile cache so model compilation is paid once. Not yet
-    hardware-tested; the first-machine checklist is
-    `src/backends/amd/BRINGUP.md`.
+<details class="phc-static" markdown="1">
+<summary><b>AMD — ROCm</b></summary>
 
-??? info "Python library"
+HIP kernels plus a MIGraphX inference engine, with a per-architecture
+`.mxr` compile cache so model compilation is paid once. Not yet
+hardware-tested; the first-machine checklist is
+`src/backends/amd/BRINGUP.md`.
 
-    The same C++ pipeline behind a native wheel (nanobind, GIL released
-    during inference) — models auto-download per tier (~6 MB for `tiny`)
-    with SHA256 verification. `backend=` picks `"cuda"`, `"apple"`,
-    `"openvino"`, `"rocm"`, `"cpu"`; `OCR(replicas=N)` fans work across a
-    built-in replica pool. Which providers are available depends on which
-    wheel you installed — see [Python wheels](#python-wheels).
+</details>
 
-    → `python/README.md` · `python/DESIGN.md`
+<details class="phc-static" markdown="1">
+<summary><b>Python library</b></summary>
+
+The same C++ pipeline behind a native wheel (nanobind, GIL released
+during inference) — models auto-download per tier (~6 MB for `tiny`)
+with SHA256 verification. `backend=` picks `"cuda"`, `"turbo"`,
+`"apple"`, `"openvino"`, `"rocm"`, `"cpu"`; `OCR(replicas=N)` fans work
+across a built-in replica pool. What each value runs depends on the
+installed engine wheel — see [Python packages](#python-packages) above.
+
+Full API documentation: **[Python library](../reference/python.md)** —
+the `OCR(...)` constructor, backends, `read`/`read_batch`/`read_pdf`,
+result types, the CLI and the error model.
+
+→ `python/README.md` · `python/DESIGN.md`
+
+</details>
 
 → [Docker & deployment in depth](docker.md) · [Build guide](native.md) · [HTTP API](../reference/http.md) · [Configuration](../reference/configuration.md)

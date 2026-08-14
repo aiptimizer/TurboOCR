@@ -418,7 +418,7 @@ One `OCR(replicas=3)` object reaches the server's multi-replica throughput
 (measured: 94% of it on Apple silicon) with no user-side threading. `backend=`
 picks `"cuda"`, `"apple"`, `"openvino"`, `"cpu"`, … — same seam as the server.
 
-→ [python/README.md](python/README.md) · [design](python/DESIGN.md)
+→ [Python library reference](docs/reference/python.md) · [python/README.md](python/README.md) · [design](python/DESIGN.md)
 
 ---
 

@@ -127,6 +127,7 @@ nav:
   - Reference:
       - HTTP API: reference/http.md
       - gRPC API: reference/grpc.md
+      - Python library: reference/python.md
       - Configuration: reference/configuration.md
       - Markdown output: reference/markdown-output.md
       - Metrics & monitoring: reference/monitoring.md

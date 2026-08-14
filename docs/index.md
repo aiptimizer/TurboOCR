@@ -61,7 +61,8 @@ Fully local: no vision-language model, no external API.
 
     HTTP endpoints (`/ocr/raw`, `/ocr/pdf`, `/ocr/markdown`,
     `/ocr/stream`, …), the gRPC twins generated from `proto/ocr.proto`,
-    and every environment variable.
+    the [Python library](reference/python.md), and every environment
+    variable.
 
 -   __[Models](models/selection.md)__
 
