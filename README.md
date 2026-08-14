@@ -81,6 +81,22 @@ Full documentation: **[docs/](docs/index.md)**
 > source or builds a Docker image from this checkout. Full details in
 > **[the install guide](docs/getting-started/install.md)**.
 
+Picking a backend is two steps, the same on every path below:
+
+1. **Build time — what gets compiled in.** `-DTURBO_BACKENDS="cpu;intel"` is a
+   semicolon-separated list telling CMake which backends to compile into the
+   one server binary (`cpu`, `apple`, `intel`, `amd`). Run without the flag,
+   `cmake -B build` builds the native NVIDIA CUDA/TensorRT server on Linux.
+   **Docker does this step for you** — each `--target` below is an image with
+   the right backends already compiled in and started.
+2. **Start time — which one runs.** `--backend nvidia|apple|intel|amd|cpu`
+   picks one of the compiled-in backends when the server starts. Left unset,
+   the server auto-picks, and auto does not always mean the vendor you built —
+   the Intel block below says so explicitly.
+
+Everything else (`OV_DEVICE`, `TRT_OPT_LEVEL`, …) tunes the backend that is
+already selected; each block explains the ones it needs.
+
 <details open>
 <summary><strong>NVIDIA GPU</strong> &nbsp;·&nbsp; shipped</summary>
 
@@ -93,7 +109,8 @@ docker run --gpus all -p 8000:8000 -p 50051:50051 \
   turboocr:nvidia
 ```
 
-**From source:**
+**From source** (no `TURBO_BACKENDS` needed — the default Linux configure *is*
+the native CUDA/TensorRT server):
 
 ```bash
 cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt
@@ -115,9 +132,9 @@ No Docker — macOS containers have no GPU passthrough.
 
 ```bash
 brew install cmake opencv drogon jsoncpp protobuf grpc c-ares jpeg-turbo
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu;apple"
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu;apple"   # step 1: compile cpu + apple in
 cmake --build build -j"$(sysctl -n hw.ncpu)"
-./build/turboocr-server --backend apple
+./build/turboocr-server --backend apple                                       # step 2: run the apple one
 ```
 
 Full Xcode + Metal toolchain required. Details: `src/backends/apple/README.md`.
@@ -126,23 +143,37 @@ Full Xcode + Metal toolchain required. Details: `src/backends/apple/README.md`.
 <details>
 <summary><strong>Intel CPU / iGPU / Arc</strong> &nbsp;·&nbsp; in testing</summary>
 
+Both paths run the same OpenVINO backend and differ only in who performs the
+two steps: the Docker image has both baked in (it sets `TURBO_BACKEND=intel`
+internally — that is why its run line passes no `--backend`), while from
+source you pass them yourself.
+
 **Docker** (built from this repo):
 
 ```bash
 docker build -f docker/Dockerfile --target intel -t turboocr:intel .
-docker run --device /dev/dri -p 8000:8000 -p 50051:50051 turboocr:intel
+
+# OpenVINO on the CPU device — works everywhere, nothing to pass through:
+docker run -p 8000:8000 -p 50051:50051 turboocr:intel
+
+# OpenVINO on the iGPU/Arc — pass the device through AND select it:
+docker run --device /dev/dri -e OV_DEVICE=GPU -p 8000:8000 -p 50051:50051 turboocr:intel
 ```
 
 **From source:**
 
 ```bash
-cmake -S . -B build-intel -DTURBO_BACKENDS="cpu;intel"
-cmake --build build-intel -j$(nproc)
-./build-intel/turboocr-server --backend intel
+cmake -S . -B build -DTURBO_BACKENDS="cpu;intel"   # step 1: compile cpu + intel in
+cmake --build build -j$(nproc)
+./build/turboocr-server --backend intel            # step 2: run the intel one — REQUIRED,
+                                                   # auto-pick starts plain CPU without it
 ```
 
-`--backend intel` is required — without it the server runs the CPU path.
-`OV_DEVICE=CPU|GPU|NPU` picks the Intel device. Details: `src/backends/intel/README.md`.
+The one knob after that is `OV_DEVICE=CPU|GPU|NPU` — which Intel silicon
+OpenVINO runs on. Its default differs by context for one physical reason: a
+bare binary can see the host's iGPU, so it defaults to `GPU`; a container
+only sees the iGPU if you pass `--device /dev/dri`, so the image defaults to
+`CPU`. Details: `src/backends/intel/README.md`.
 </details>
 
 <details>
@@ -182,7 +213,7 @@ docker build -f docker/Dockerfile --target cpu -t turboocr:cpu .
 docker run -p 8000:8000 -p 50051:50051 turboocr:cpu
 ```
 
-**From source:**
+**From source** (`--backend` not needed — cpu is the only backend in this build):
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu"
@@ -203,8 +234,8 @@ exclusive):
 >
 > `pip install turboocr` today gets you the published **0.3.0 client**, which
 > talks to a server but has no in-process engine. The `turboocr[cpu]` /
-> `[cuda]` / `[openvino]` / `[rocm]` extras below resolve only once the wheels
-> are published. Until then, this is the working path:
+> `[cuda12]` / `[cuda13]` / `[openvino]` / `[rocm]` extras below resolve only
+> once the wheels are published. Until then, this is the working path:
 
 ```bash
 # The helper builds AND repairs the wheel — a bare `pip wheel python/`
@@ -228,8 +259,9 @@ pip install "turboocr[openvino]"  # + Intel engine (CPU / iGPU / Arc / NPU)
 pip install "turboocr[rocm]"      # + AMD engine
 ```
 
-`turboocr doctor` prints the right line for your machine. Feature extras
-combine: `"turboocr[cuda,pdf]"`. Because `4.0.0a1` is a pre-release, pip will
+`turboocr doctor` prints the right line for your machine — on NVIDIA it also
+picks between `cuda12` and `cuda13` from your driver. Feature extras combine:
+`"turboocr[cuda12,pdf]"`. Because `4.0.0a1` is a pre-release, pip will
 not select it by default even after publication — ask for it explicitly:
 
 ```bash
@@ -340,9 +372,9 @@ The `python/` package wraps the same C++ pipeline (nanobind, GIL released
 during inference) — not a reimplementation. Models auto-download per tier
 (~6 MB for tiny) with SHA256 verification. It ships as the `turboocr` umbrella
 (client + engine facade) plus one engine wheel per backend, picked by an extra:
-`pip install "turboocr[cpu]"` / `[cuda]` / `[openvino]` / `[rocm]`. The engine
-wheels are not published yet — see [Quick Start](#quick-start) for the
-build-from-source path.
+`pip install "turboocr[cpu]"` / `[cuda12]` / `[cuda13]` / `[openvino]` /
+`[rocm]`. The engine wheels are not published yet — see
+[Quick Start](#quick-start) for the build-from-source path.
 
 ```python
 import turboocr

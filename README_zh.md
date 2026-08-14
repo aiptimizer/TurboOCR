@@ -17,7 +17,7 @@
 
 <h3 align="center">v4.0-alpha — 一套流水线，多种后端</h3>
 <p align="center">
-  <sub>统一引擎 + 设备抽象层：NVIDIA（已发布）· Apple Metal + 神经引擎、Intel OpenVINO（测试中）· AMD ROCm（开发中）· 原生 Python 库 · PP-OCRv6 <code>tiny</code>/<code>small</code>/<code>medium</code> 三档 · <a href="docs/guides/upgrading-v4.md">v4 变更说明</a></sub>
+  <sub>统一引擎 + 设备抽象层：NVIDIA · Apple Metal + 神经引擎 · Intel OpenVINO · AMD ROCm · 原生 Python 库 · PP-OCRv6 <code>tiny</code>/<code>small</code>/<code>medium</code> 三档 · <a href="docs/guides/upgrading-v4.md">v4 变更说明</a></sub>
 </p>
 
 <p align="center">
@@ -72,71 +72,115 @@ TurboOCR 是一个完整的 GPU 文档解析器。它把 PP-OCRv6 文本检测�
 
 ## 快速开始
 
-选择你的硬件。完整的分步安装指南（覆盖所有后端与 Python 库）见
-**[安装 — 选择硬件](docs/getting-started/install.md)**。
+> **v4.0.0-alpha.1** — 目前没有任何预构建产物。下面每条路径都从源码构建，
+> 或从本仓库构建 Docker 镜像。完整细节见
+> **[安装指南](docs/getting-started/install.md)**。
+
+选择后端只有两步，下面每条路径都一样：
+
+1. **构建期 — 编译进哪些后端。** `-DTURBO_BACKENDS="cpu;intel"` 是一个
+   分号分隔的列表，告诉 CMake 把哪些后端编译进同一个服务器二进制
+   （`cpu`、`apple`、`intel`、`amd`）。不带该参数时，`cmake -B build`
+   在 Linux 上构建的就是原生 NVIDIA CUDA/TensorRT 服务器。
+   **Docker 会替你完成这一步** — 下面每个 `--target` 都是把对应后端
+   编译进去并配置好启动的镜像。
+2. **启动期 — 运行哪一个。** `--backend nvidia|apple|intel|amd|cpu`
+   在服务器启动时从已编译进的后端中选择一个。不传则自动选择，而自动
+   选择并不总是你刚构建的那个厂商 — Intel 一节会明确说明。
+
+其余变量（`OV_DEVICE`、`TRT_OPT_LEVEL` 等）只是调节已选定的后端；
+每节只解释自己用到的那些。
 
 <details open>
 <summary><strong>NVIDIA GPU</strong> &nbsp;·&nbsp; 已发布</summary>
 
-Linux、驱动 595+、Turing 或更新架构。纯文本约 4 GB 显存，完整流水线约 8 GB。
+**Docker**（从本仓库构建）：
 
 ```bash
+docker build -f docker/Dockerfile --target nvidia -t turboocr:nvidia .
 docker run --gpus all -p 8000:8000 -p 50051:50051 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr \
-  ghcr.io/aiptimizer/turboocr:latest
+  turboocr:nvidia
 ```
 
-首次启动会构建 TensorRT 引擎（5090 约 90 秒，旧卡最长一小时；`TRT_OPT_LEVEL=3`
-可缩短 3–5 倍）。命名卷会缓存引擎，之后启动即秒开。所有权重都内置在镜像里，
-环境变量决定加载哪些：
+**从源码**（无需 `TURBO_BACKENDS` — Linux 上的默认配置构建的*就是*
+原生 CUDA/TensorRT 服务器）：
 
 ```bash
--e TABLE_BACKEND=slanext              # 表格 → HTML
--e FORMULA_BACKEND=ppformulanet_s     # 公式 → LaTeX
--e OCR_MODEL=medium                   # tiny（默认）| small | medium | arabic | eslav | korean | thai | greek
+cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt
+cmake --build build -j$(nproc)
+LD_LIBRARY_PATH=/usr/local/tensorrt/lib ./build/turboocr-server --backend nvidia
 ```
 
-→ [Docker 与部署](docs/getting-started/docker.md) · [原生构建](docs/getting-started/native.md)
+首次启动会构建 TensorRT 引擎（5090 约 90 秒，旧卡更久；`TRT_OPT_LEVEL=3`
+可缩短 3–5 倍）并缓存。需要 GCC 13.3+/C++20、CUDA + TensorRT 10.2+、
+OpenCV 4.x、Drogon 1.9+、gRPC。
 </details>
 
 <details>
-<summary><strong>Apple Silicon</strong> &nbsp;·&nbsp; 测试中 &nbsp;·&nbsp; Metal + 神经引擎，仅原生运行</summary>
+<summary><strong>Apple Silicon</strong> &nbsp;·&nbsp; 测试中</summary>
 
-检测与透视变换在 GPU（Metal + MPSGraph）上执行；识别是 GPU + 神经引擎混合方案 —
-窄行文本通过 CoreML 在 ANE 上与 GPU 并行推理。容器无法运行：macOS 虚拟化不暴露 GPU。
+无 Docker — macOS 容器不提供 GPU 直通。
+
+**从源码：**
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON
+brew install cmake opencv drogon jsoncpp protobuf grpc c-ares jpeg-turbo
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu;apple"   # 第 1 步：编译进 cpu + apple
 cmake --build build -j"$(sysctl -n hw.ncpu)"
-
-# 固定 9 档识别宽度（否则自动发现会构建 42 档，吞吐大约减半）：
-export TURBO_APPLE_REC_BUCKETS=320,480,800,1200,1600,2000,2500,3200,4000
-
-./build/turboocr-server --backend apple
+./build/turboocr-server --backend apple                                       # 第 2 步：运行 apple 后端
 ```
 
-提供相应模型后，版面、表格、公式与自动转正同样可用。详见
-`src/backends/apple/README.md`。
+需要完整的 Xcode + Metal 工具链。详见 `src/backends/apple/README.md`。
 </details>
 
 <details>
-<summary><strong>Intel CPU / 核显 / Arc</strong> &nbsp;·&nbsp; 测试中 &nbsp;·&nbsp; OpenVINO</summary>
+<summary><strong>Intel CPU / 核显 / Arc</strong> &nbsp;·&nbsp; 测试中</summary>
+
+两条路径运行的是同一个 OpenVINO 后端，区别只在两步由谁完成：Docker 镜像
+已把两步都固化进去（内部设置了 `TURBO_BACKEND=intel` — 所以它的运行命令
+不需要传 `--backend`）；从源码则由你自己传。
+
+**Docker**（从本仓库构建）：
 
 ```bash
-cmake -S . -B build-intel -DTURBO_BACKENDS="cpu;intel"
-cmake --build build-intel -j$(nproc)
-./build-intel/turboocr-server --backend intel      # OV_DEVICE=CPU|GPU|NPU
+docker build -f docker/Dockerfile --target intel -t turboocr:intel .
+
+# OpenVINO 跑在 CPU 设备上 — 处处可用，无需任何设备直通：
+docker run -p 8000:8000 -p 50051:50051 turboocr:intel
+
+# OpenVINO 跑在核显/Arc 上 — 既要把设备透传进去，也要选中它：
+docker run --device /dev/dri -e OV_DEVICE=GPU -p 8000:8000 -p 50051:50051 turboocr:intel
 ```
 
-在同一块芯片上，原生 OpenVINO 路径快于 ONNX Runtime 路径。详见
-`src/backends/intel/README.md`。
+**从源码：**
+
+```bash
+cmake -S . -B build -DTURBO_BACKENDS="cpu;intel"   # 第 1 步：编译进 cpu + intel
+cmake --build build -j$(nproc)
+./build/turboocr-server --backend intel            # 第 2 步：运行 intel 后端 — 必须传，
+                                                   # 否则自动选择会启动纯 CPU 路径
+```
+
+之后唯一的旋钮是 `OV_DEVICE=CPU|GPU|NPU` — 决定 OpenVINO 用哪块 Intel
+芯片。它的默认值因场景而异，原因很简单：裸二进制能看到宿主机的核显，
+所以默认 `GPU`；容器只有在传入 `--device /dev/dri` 时才能看到核显，
+所以镜像默认 `CPU`。详见 `src/backends/intel/README.md`。
 </details>
 
 <details>
 <summary><strong>AMD GPU（ROCm）</strong> &nbsp;·&nbsp; 尚未在真实硬件上验证</summary>
 
-通过 ROCm 运行：HIP 内核 + MIGraphX 推理引擎，带按架构区分的 `.mxr`
-编译缓存，模型编译只需一次。
+**Docker**（从本仓库构建）：
+
+```bash
+docker build -f docker/Dockerfile --target amd -t turboocr:amd .
+docker run --device /dev/kfd --device /dev/dri --group-add video \
+  -v ocr-cache:/home/ocr/.cache/turbo-ocr \
+  -p 8000:8000 -p 50051:50051 turboocr:amd
+```
+
+**从源码：**
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
@@ -152,13 +196,73 @@ cmake --build build -j$(nproc)
 </details>
 
 <details>
-<summary><strong>仅 CPU</strong> &nbsp;·&nbsp; 便携后备方案，处处可用</summary>
+<summary><strong>仅 CPU</strong> &nbsp;·&nbsp; 已发布</summary>
+
+**Docker**（从本仓库构建）：
 
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DUSE_CPU_ONLY=ON
+docker build -f docker/Dockerfile --target cpu -t turboocr:cpu .
+docker run -p 8000:8000 -p 50051:50051 turboocr:cpu
+```
+
+**从源码**（无需 `--backend` — 这个构建里 cpu 是唯一的后端）：
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTURBO_BACKENDS="cpu"
 cmake --build build -j$(nproc)
 ./build/turboocr-server
 ```
+</details>
+
+<details>
+<summary><strong>Python 库</strong> &nbsp;·&nbsp; 一个包，每个后端一个 extra</summary>
+
+`turboocr` 是纯 Python 包 — TurboOCR 服务器的类型化客户端，外加进程内
+引擎门面。它的 extras 为你的硬件挑选引擎 wheel（每个环境只装一个后端；
+各引擎 wheel 互斥）：
+
+> **Alpha：v4 引擎 wheel 尚未发布到 PyPI，请从本仓库构建。**
+>
+> 现在 `pip install turboocr` 装到的是已发布的 **0.3.0 客户端** — 能连
+> 服务器，但没有进程内引擎。下面的 `turboocr[cpu]` / `[cuda12]` /
+> `[cuda13]` / `[openvino]` / `[rocm]` extras 要等 wheel 发布后才能解析。
+> 在那之前，可用的路径是：
+
+```bash
+# 该脚本既构建也修复 wheel — 裸 `pip wheel python/` 不打包任何库，
+# 只能在构建它的机器上运行。
+scripts/python/build_backend_wheel.sh cpu     # cpu | cuda12 | cuda13 | openvino | rocm
+pip install build-wheels/cpu/fixed/*.whl
+```
+
+引擎 wheel 自给自足：`import turboocr_engine` 即可获得完整流水线和
+`turboocr` 命令行，无需安装伞包。
+
+wheel 发布后，伞包就是正门 — 每个后端一个 extra，彼此互斥，只装一个：
+
+```bash
+pip install turboocr              # 仅客户端 — 连接运行中的服务器
+pip install "turboocr[cpu]"       # + 进程内引擎，CPU（含 Apple Silicon）
+pip install "turboocr[cuda12]"    # + NVIDIA 引擎，CUDA 12（驱动 R525+）
+pip install "turboocr[cuda13]"    # + NVIDIA 引擎，CUDA 13（驱动 R580+）
+pip install "turboocr[openvino]"  # + Intel 引擎（CPU / 核显 / Arc / NPU）
+pip install "turboocr[rocm]"      # + AMD 引擎
+```
+
+`turboocr doctor` 会为你的机器打印正确的安装命令 — 在 NVIDIA 上还会根据
+驱动版本在 `cuda12` 与 `cuda13` 之间选择。功能 extras 可组合：
+`"turboocr[cuda12,pdf]"`。由于 `4.0.0a1` 是预发布版本，即使发布后 pip
+默认也不会选它 — 需要显式指定：
+
+```bash
+pip install --pre "turboocr[cpu]"        # 或固定版本：turboocr[cpu]==4.0.0a1
+```
+
+在 NVIDIA 上，引擎 wheel 只需要 NVIDIA **驱动**（不需要 CUDA 工具包）。
+其默认 `backend="auto"` 会解析到原生 TensorRT 引擎：**首次**运行构建引擎
+（5090 约 90 秒，旧卡更久）并缓存到 `TRT_ENGINE_CACHE`（默认
+`~/.cache/turbo-ocr`），之后每次启动都很快。`backend="cuda"` 是即时启动
+的 ONNX Runtime 路径 — 不编译任何东西。
 </details>
 
 首个请求，在任何后端上都相同（本机构建监听 `8080`；上文 Docker 快速开始映射 `8000`）：
@@ -176,6 +280,11 @@ curl -X POST http://localhost:8080/ocr/raw \
 PDF 用 `POST /ocr/pdf`，Markdown 导出用 `?markdown=1` 或 `POST /ocr/markdown`，gRPC 在
 50051 端口。`GET /capabilities` 报告运行中的服务器加载了哪些能力；请求服务器未启用的
 阶段会得到明确的 `400`，绝不会静默返回空结果。
+
+构建依赖、GPU 架构说明与部署细节见文档：[构建指南](docs/getting-started/native.md) ·
+[Docker 与 compose](docs/getting-started/docker.md)。从 v2.x 升级请先读
+[升级到 v3](docs/guides/upgrading-v3.md)；v4 的新增内容见
+[v4 变更说明](docs/guides/upgrading-v4.md)。
 
 ---
 
@@ -238,8 +347,10 @@ RTX 5090 上测得：所有引擎使用完全相同的页面，计时窗口 ≥1
 ## Python
 
 `python/` 包封装同一条 C++ 流水线（nanobind，推理时释放 GIL），不是 Python 重写。
-模型按档位自动下载（`tiny` 约 6 MB），带 SHA256 校验。尚未发布到 PyPI；用
-`pip wheel python/` 构建 wheel。
+模型按档位自动下载（`tiny` 约 6 MB），带 SHA256 校验。它以 `turboocr` 伞包
+（客户端 + 引擎门面）加每后端一个引擎 wheel 的形式发布，由 extra 挑选：
+`pip install "turboocr[cpu]"` / `[cuda12]` / `[cuda13]` / `[openvino]` /
+`[rocm]`。引擎 wheel 尚未发布 — 从源码构建的路径见[快速开始](#快速开始)。
 
 ```python
 import turboocr
@@ -271,7 +382,7 @@ ocr.read_pdf("report.pdf")                    # PDF → DocumentResult
 | `POST /ocr/pdf` | PDF → 文本；`?markdown=1` → 整本 PDF 转 Markdown |
 | `POST /ocr/markdown` | 单页 → 忠实 Markdown（需要版面） |
 | `POST /ocr/stream` | PDF → 逐页 newline-delimited JSON 事件 |
-| `POST /infer` | OCR + 版面 / 阅读顺序 / 区块，单次响应 |
+| `POST /infer` | 单个裁剪图经指定的表格/公式后端推理 |
 | `GET /capabilities` | 运行时能力与路由发现 |
 | `GET /metrics` · `/profile` · `/health` | Prometheus · 分阶段耗时 · 探活 |
 
@@ -297,27 +408,6 @@ OCR 与识别类端点在 50051 端口有对应的 gRPC 实现，共用同一套
 | `PIPELINE_POOL_SIZE` | 自动 | 并发 GPU 流水线数量 |
 
 → [完整配置参考（35+ 变量）](docs/reference/configuration.md)
-
----
-
-## 从源码构建
-
-```bash
-# Docker（推荐）
-docker build -f docker/Dockerfile --target nvidia -t turboocr .
-
-# 原生（首次构建自动拉取模型到 ./models/）
-cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt
-cmake --build build -j$(nproc)
-LD_LIBRARY_PATH=/usr/local/tensorrt/lib ./build/turboocr-server
-```
-
-需要 GCC 13.3+/C++20、CUDA + TensorRT 10.2+、OpenCV 4.x、Drogon 1.9+、gRPC。
-Wuffs、Clipper、PDFium 已随仓库内置于 `third_party/`。从 v2.x 升级请先阅读
-**[升级到 v3 — 破坏性变更](docs/guides/upgrading-v3.md)**；v4 的新增内容见
-**[v4 变更说明](docs/guides/upgrading-v4.md)**。
-
-→ [构建指南与 GPU 架构说明](docs/getting-started/native.md)
 
 ---
 

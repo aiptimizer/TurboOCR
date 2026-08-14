@@ -147,29 +147,38 @@ Metal shader library; models auto-download per tier (~6 MB for tiny).
 <details class="phc-static" markdown="1">
 <summary><b>Intel CPU / iGPU / Arc</b> — testing</summary>
 
-**Docker** — built from this repo, no published Intel image yet:
+**Docker** — built from this repo, no published Intel image yet. The image
+pins `--backend intel` for you (via `TURBO_BACKEND=intel`) and defaults to
+OpenVINO's **CPU** device, which needs no device passthrough:
 
 ```bash
 docker build -f docker/Dockerfile --target intel -t turboocr:intel .
-docker run --device /dev/dri -p 8000:8000 -p 50051:50051 turboocr:intel
+docker run -p 8000:8000 -p 50051:50051 turboocr:intel
 ```
 
-`--device /dev/dri` passes the iGPU/Arc into the container; `OV_DEVICE=CPU|GPU|NPU`
-picks the device.
+To run on the **iGPU/Arc**, pass the device through *and* select it —
+`--device /dev/dri` alone only makes the hardware visible:
+
+```bash
+docker run --device /dev/dri -e OV_DEVICE=GPU -p 8000:8000 -p 50051:50051 turboocr:intel
+```
 
 **Build from source:**
 
 ```bash
-cmake -S . -B build-intel -DTURBO_BACKENDS="cpu;intel"
-cmake --build build-intel -j$(nproc)
-./build-intel/turboocr-server --backend intel
+cmake -S . -B build -DTURBO_BACKENDS="cpu;intel"   # compile cpu + intel into the binary
+cmake --build build -j$(nproc)
+./build/turboocr-server --backend intel            # run the intel one
 ```
 
 **`--backend intel` is required.** With it, the server runs OpenVINO. Without it,
 it runs the ONNX Runtime CPU path — even though you just built the Intel backend.
 
 `OV_DEVICE=CPU|GPU|NPU` picks which Intel device OpenVINO runs on; unset it
-targets the iGPU/Arc. The OpenVINO runtime must be on `CMAKE_PREFIX_PATH`.
+targets the iGPU/Arc. (The Docker image pins `OV_DEVICE=CPU` instead for one
+physical reason: a bare binary can see the host's iGPU, a container only sees
+it with `--device /dev/dri`.) The OpenVINO runtime must be on
+`CMAKE_PREFIX_PATH`.
 
 **Python library:**
 

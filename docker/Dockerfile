@@ -225,6 +225,14 @@ RUN useradd -m -s /bin/bash ocr && chmod +x /app/scripts/entrypoint.sh && \
     mkdir -p /home/ocr/.cache/turbo-ocr/models/rec /app/models && \
     ln -s /home/ocr/.cache/turbo-ocr/models/rec /app/models/rec
 RUN bash scripts/models/fetch/fetch_release_models.sh && chown -R ocr:ocr /app /home/ocr/.cache
+# TURBO_BACKEND=intel is REQUIRED for this image to be what its name says: the
+# runtime registry deliberately ranks intel BELOW cpu for auto-detect
+# (src/backends/intel/backend/intel_backend_registry.cpp), so a bare
+# `turboocr-server` in this container would silently serve the ORT CPU path.
+# OV_DEVICE=CPU is the device default that works without any device
+# passthrough — OpenVINO's CPU plugin, not the ORT one. Pass
+# `--device /dev/dri -e OV_DEVICE=GPU` to run on the iGPU/Arc instead.
+ENV TURBO_BACKEND=intel
 ENV OV_DEVICE=CPU
 EXPOSE 8000 50051
 HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \

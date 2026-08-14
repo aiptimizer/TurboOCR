@@ -17,7 +17,7 @@ front.
 |---|---|---|---|
 | `nvidia` | `nvcr.io/nvidia/tensorrt:26.03-py3` (digest-pinned) | published as `ghcr.io/aiptimizer/turboocr` | `--gpus all` |
 | `cpu` | `ubuntu:24.04` (digest-pinned) | build from repo | — |
-| `intel` | `openvino/ubuntu24_dev:2026.2.1` | build from repo | `--device /dev/dri` |
+| `intel` | `openvino/ubuntu24_dev:2026.2.1` | build from repo | none for the CPU device (the default); `--device /dev/dri -e OV_DEVICE=GPU` for iGPU/Arc |
 | `amd` | `rocm/dev-ubuntu-24.04:7.1.1` | build from repo · not yet hardware-tested | `--device /dev/kfd --device /dev/dri --group-add video` |
 
 Two things about running it matter on day one. First start on the NVIDIA

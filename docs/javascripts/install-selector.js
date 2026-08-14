@@ -73,18 +73,17 @@
         docker: {
           command:
             "docker build -f docker/Dockerfile --target intel -t turboocr:intel .\n" +
-            "docker run --device /dev/dri -p 8000:8000 -p 50051:50051 turboocr:intel",
+            "docker run -p 8000:8000 -p 50051:50051 turboocr:intel",
           note:
-            "Built from this repo (no published Intel image yet). --device /dev/dri passes the iGPU/Arc into the container; OV_DEVICE=CPU|GPU|NPU picks the device.",
+            "Built from this repo (no published Intel image yet). The image pins --backend intel for you and defaults to OpenVINO's CPU device, so it runs with no device passthrough. For the iGPU/Arc, pass the device through AND select it: docker run --device /dev/dri -e OV_DEVICE=GPU … (--device /dev/dri alone only makes the hardware visible).",
         },
         source: {
           command:
-            'cmake -S . -B build-intel -DTURBO_BACKENDS="cpu;intel"\n' +
-            "cmake --build build-intel -j$(nproc)\n" +
-            "./build-intel/turboocr-server --backend intel",
+            'cmake -S . -B build -DTURBO_BACKENDS="cpu;intel"\n' +
+            "cmake --build build -j$(nproc)\n" +
+            "./build/turboocr-server --backend intel",
           note:
-            "--backend intel is REQUIRED: with it the server runs OpenVINO, without it it runs the ONNX Runtime CPU path even though you built the Intel backend. OV_DEVICE=CPU|GPU|NPU picks which Intel device OpenVINO runs on; unset it targets the iGPU/Arc. " +
-            "The OpenVINO runtime must be on CMAKE_PREFIX_PATH; OV_DEVICE=CPU|GPU|NPU chooses between your CPU, integrated graphics and NPU.",
+            "-DTURBO_BACKENDS compiles the cpu and intel backends into the one server binary; --backend intel picks which one runs, and it is REQUIRED here — started without it, the server auto-selects the plain CPU path even though you just built the Intel backend. OV_DEVICE=CPU|GPU|NPU picks which Intel silicon OpenVINO uses (default GPU = the iGPU/Arc). The OpenVINO runtime must be on CMAKE_PREFIX_PATH.",
         },
         python: {
           command:
