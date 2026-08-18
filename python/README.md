@@ -58,16 +58,24 @@ install line for it.
 
 ### Where to get them today
 
-**The engine wheels are not on PyPI yet** — the `turboocr-engine-*` names are
-unregistered there (`pip install turboocr` currently resolves to the published
-0.3.0 client SDK, which this repo's `python-sdk/` continues). Two working
-paths right now:
-
-**Build from source** (always current, matches this host exactly). Use the
-helper script — it builds *and* repairs the wheel:
+**On PyPI: cpu and openvino.** `turboocr-engine-cpu` (Linux, macOS with the
+Apple backend, Windows), `turboocr-engine-openvino` and the `turboocr`
+umbrella are published; because `4.0.0a2` is a pre-release, pip needs `--pre`
+or an exact pin to select it:
 
 ```bash
-# <variant> is one of: cpu | cuda | openvino | rocm
+pip install --pre "turboocr[cpu]"       # or [openvino]
+pip install "turboocr[cpu]==4.0.0a2"    # equivalent, explicit
+```
+
+**Not on PyPI yet:** the NVIDIA wheels (`-cuda12` / `-cuda13`) — built and
+verified, awaiting PyPI's file-size approval — and `-rocm` (deliberately
+unpublished until hardware-validated). For those, build from source (always
+current, matches this host exactly). Use the helper script — it builds *and*
+repairs the wheel:
+
+```bash
+# <variant> is one of: cpu | cuda12 | cuda13 | openvino | rocm
 # (cpu builds turboocr-engine-cpu — also the Apple wheel on macOS arm64)
 scripts/python/build_backend_wheel.sh cpu
 pip install build-wheels/cpu/fixed/*.whl
@@ -76,17 +84,6 @@ pip install build-wheels/cpu/fixed/*.whl
 A bare `pip wheel python/` is **not** installable anywhere but the machine that
 built it — see [Building from source](#building-from-source) for why, and for
 the manual `delocate` / `auditwheel` repair if you'd rather drive it by hand.
-
-**Not published yet.** The `turboocr-engine-*` distributions have no PyPI
-release until the first release run of `.github/workflows/wheels.yml`. Once
-they land, the umbrella extras are the install path
-(`pip install "turboocr[cpu]"`); because `4.0.0a1` is a pre-release, pip needs
-`--pre` or an exact pin to select it:
-
-```bash
-pip install --pre "turboocr[cpu]"
-pip install "turboocr[cpu]==4.0.0a1"    # equivalent, explicit
-```
 
 After installing, `turboocr doctor` reports the version and the provider it
 actually selected.

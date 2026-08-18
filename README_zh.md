@@ -72,8 +72,10 @@ TurboOCR 是一个完整的 GPU 文档解析器。它把 PP-OCRv6 文本检测�
 
 ## 快速开始
 
-> **v4.0.0-alpha.1** — 目前没有任何预构建产物。下面每条路径都从源码构建，
-> 或从本仓库构建 Docker 镜像。完整细节见
+> **v4.0.0-alpha** — CPU（Linux/macOS/Windows，macOS 构建内含 Apple 后端）与
+> Intel/OpenVINO 的 Python wheel **已上线 PyPI**：`pip install --pre
+> "turboocr[cpu]"` / `[openvino]`。NVIDIA wheel 正在等待 PyPI 的文件大小
+> 审批；Docker 镜像**尚未发布** — 这些路径仍从本仓库构建。完整细节见
 > **[安装指南](docs/getting-started/install.md)**。
 
 选择后端只有两步，下面每条路径都一样：
@@ -221,12 +223,10 @@ cmake --build build -j$(nproc)
 引擎门面。它的 extras 为你的硬件挑选引擎 wheel（每个环境只装一个后端；
 各引擎 wheel 互斥）：
 
-> **Alpha：v4 引擎 wheel 尚未发布到 PyPI，请从本仓库构建。**
->
-> 现在 `pip install turboocr` 装到的是已发布的 **0.3.0 客户端** — 能连
-> 服务器，但没有进程内引擎。下面的 `turboocr[cpu]` / `[cuda12]` /
-> `[cuda13]` / `[openvino]` / `[rocm]` extras 要等 wheel 发布后才能解析。
-> 在那之前，可用的路径是：
+> **Alpha 状态：`[cpu]` 与 `[openvino]` 今天即可从 PyPI 安装**（需要
+> `--pre`，见下文）。NVIDIA 的 `[cuda12]` / `[cuda13]` extras 要等 PyPI
+> 批准这两个 wheel 的文件大小申请后才能解析；`[rocm]` 刻意未发布。
+> 对尚未上线的后端，可用的路径是：
 
 ```bash
 # 该脚本既构建也修复 wheel — 裸 `pip wheel python/` 不打包任何库，
@@ -251,11 +251,11 @@ pip install "turboocr[rocm]"      # + AMD 引擎
 
 `turboocr doctor` 会为你的机器打印正确的安装命令 — 在 NVIDIA 上还会根据
 驱动版本在 `cuda12` 与 `cuda13` 之间选择。功能 extras 可组合：
-`"turboocr[cuda12,pdf]"`。由于 `4.0.0a1` 是预发布版本，即使发布后 pip
+`"turboocr[cuda12,pdf]"`。由于 `4.0.0a2` 是预发布版本，即使发布后 pip
 默认也不会选它 — 需要显式指定：
 
 ```bash
-pip install --pre "turboocr[cpu]"        # 或固定版本：turboocr[cpu]==4.0.0a1
+pip install --pre "turboocr[cpu]"        # 或固定版本：turboocr[cpu]==4.0.0a2
 ```
 
 在 NVIDIA 上，引擎 wheel 只需要 NVIDIA **驱动**（不需要 CUDA 工具包）。
@@ -350,12 +350,13 @@ RTX 5090 上测得：所有引擎使用完全相同的页面，计时窗口 ≥1
 模型按档位自动下载（`tiny` 约 6 MB），带 SHA256 校验。它以 `turboocr` 伞包
 （客户端 + 引擎门面）加每后端一个引擎 wheel 的形式发布，由 extra 挑选。
 
-**PyPI 上现在有什么、没有什么。** `pip install turboocr` 目前装到的是已发布的
-**0.3.0 客户端** — 能连接运行中的 TurboOCR 服务器，但不含进程内引擎。v4 引擎
-wheel（`turboocr-engine-cpu` / `-cuda12` / `-cuda13` / `-openvino` / `-rocm`）
-**尚未发布** — 如果你在某个引擎名下看到 `0.0.0` 版本，那只是 PyPI 项目初始化
-用的空占位，不是可用的软件。wheel 发布后，一个 extra 即可选中匹配你硬件的
-引擎；`4.0.0a1` 是预发布版本，需要加 `--pre`：
+**PyPI 上现在有什么、没有什么。** `turboocr-engine-cpu`（Linux、含 Apple
+后端的 macOS、Windows）、`turboocr-engine-openvino` 与 `turboocr` 伞包
+**已上线**。NVIDIA wheel（`-cuda12` / `-cuda13`）已构建并验证，但在等待
+PyPI 的文件大小审批 — 在那之前它们的 extras 无法解析，需从本仓库构建；
+`-rocm` 刻意未发布。某个引擎名下的 `0.0.0` 版本只是 PyPI 项目初始化用的
+空占位，不是可用的软件。裸 `pip install turboocr` 仍会解析到旧的
+**0.3.0 客户端**（无引擎）：`4.0.0a2` 是预发布版本，需要加 `--pre`：
 
 ```bash
 pip install --pre "turboocr[cpu]"     # 或 [cuda12] | [cuda13] | [openvino] | [rocm]

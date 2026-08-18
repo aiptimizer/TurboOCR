@@ -77,8 +77,11 @@ Full documentation: **[docs/](docs/index.md)**
 
 ## Quick Start
 
-> **v4.0.0-alpha.1** — nothing is prebuilt yet. Every path below builds from
-> source or builds a Docker image from this checkout. Full details in
+> **v4.0.0-alpha** — the Python wheels for CPU (Linux/macOS/Windows, with the
+> Apple backend in the macOS build) and Intel/OpenVINO are **live on PyPI**:
+> `pip install --pre "turboocr[cpu]"` / `[openvino]`. The NVIDIA wheels are
+> awaiting a PyPI file-size approval, and there is **no published Docker
+> image** — those paths build from this checkout. Full details in
 > **[the install guide](docs/getting-started/install.md)**.
 
 Picking a backend is two steps, the same on every path below:
@@ -230,12 +233,11 @@ plus the in-process engine facade. Its extras pick the engine wheel for your
 hardware (install exactly one backend; the engine wheels are mutually
 exclusive):
 
-> **Alpha: the v4 engine wheels are not on PyPI. Build them from this checkout.**
->
-> `pip install turboocr` today gets you the published **0.3.0 client**, which
-> talks to a server but has no in-process engine. The `turboocr[cpu]` /
-> `[cuda12]` / `[cuda13]` / `[openvino]` / `[rocm]` extras below resolve only
-> once the wheels are published. Until then, this is the working path:
+> **Alpha status: `[cpu]` and `[openvino]` install from PyPI today** (with
+> `--pre` — see below). The NVIDIA `[cuda12]` / `[cuda13]` extras resolve once
+> PyPI approves the file-size requests for those wheels; `[rocm]` is
+> deliberately unpublished. For a backend that is not on PyPI yet, this is the
+> working path:
 
 ```bash
 # The helper builds AND repairs the wheel — a bare `pip wheel python/`
@@ -261,11 +263,11 @@ pip install "turboocr[rocm]"      # + AMD engine
 
 `turboocr doctor` prints the right line for your machine — on NVIDIA it also
 picks between `cuda12` and `cuda13` from your driver. Feature extras combine:
-`"turboocr[cuda12,pdf]"`. Because `4.0.0a1` is a pre-release, pip will
+`"turboocr[cuda12,pdf]"`. Because `4.0.0a2` is a pre-release, pip will
 not select it by default even after publication — ask for it explicitly:
 
 ```bash
-pip install --pre "turboocr[cpu]"        # or pin: turboocr[cpu]==4.0.0a1
+pip install --pre "turboocr[cpu]"        # or pin: turboocr[cpu]==4.0.0a2
 ```
 
 On NVIDIA, the engine wheel needs only an NVIDIA **driver** (no CUDA toolkit).
@@ -373,15 +375,15 @@ during inference) — not a reimplementation. Models auto-download per tier
 (~6 MB for tiny) with SHA256 verification. It ships as the `turboocr` umbrella
 (client + engine facade) plus one engine wheel per backend, picked by an extra.
 
-**What is on PyPI today, and what is not.** `pip install turboocr` currently
-installs the published **0.3.0 client** — it talks to a running TurboOCR
-server, but contains no in-process engine. The v4 engine wheels
-(`turboocr-engine-cpu` / `-cuda12` / `-cuda13` / `-openvino` / `-rocm`) are
-**not published yet** — and if you see a `0.0.0` release under an engine
-name, that is an empty placeholder from the PyPI project setup, not
-installable software. Once the wheels are published, one extra picks the
-engine for your hardware, and `--pre` is required because `4.0.0a1` is a
-pre-release:
+**What is on PyPI today, and what is not.** `turboocr-engine-cpu` (Linux,
+macOS with the Apple backend, Windows), `turboocr-engine-openvino` and the
+`turboocr` umbrella are **live**. The NVIDIA wheels (`-cuda12` / `-cuda13`)
+are built and verified but await PyPI's file-size approval — until then their
+extras do not resolve and the working path is building from this checkout;
+`-rocm` is deliberately unpublished. A `0.0.0` release under an engine name
+is an empty placeholder from the PyPI project setup, not installable
+software. A plain `pip install turboocr` still resolves to the old **0.3.0
+client** (no engine): `--pre` is required because `4.0.0a2` is a pre-release:
 
 ```bash
 pip install --pre "turboocr[cpu]"     # or [cuda12] | [cuda13] | [openvino] | [rocm]

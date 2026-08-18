@@ -67,14 +67,15 @@ _RECOMMEND: dict = {
     "cpu": ("cpu", PACKAGE_CPU, "No supported accelerator detected — the CPU engine wheel works everywhere."),
 }
 
-# Printed under the install command. Keep this honest: the per-backend wheels
-# are not on PyPI yet, so don't imply a bare `pip install` will resolve them.
-# (An earlier version pointed at "the TestPyPI index" — nothing was ever
-# published there; the only working path today is building from the checkout.)
+# Printed under the install command. Keep this honest and current: cpu,
+# openvino and the umbrella are LIVE on PyPI (published 2026-08-18); the
+# NVIDIA cuda12/cuda13 wheels await PyPI's file-size approval and rocm is
+# deliberately unpublished — those still build from the checkout.
 _INSTALL_NOTE = (
-    "Pre-release: the engine wheels aren't on PyPI yet — build one from the "
-    "repo checkout with scripts/python/build_backend_wheel.sh (once published, "
-    "add --pre: pip skips pre-releases by default). "
+    "Pre-release: add --pre (pip skips pre-releases by default). The cpu and "
+    "openvino wheels install from PyPI today; the NVIDIA cuda12/cuda13 wheels "
+    "are awaiting a PyPI file-size approval — until then build them from the "
+    "repo checkout with scripts/python/build_backend_wheel.sh. "
     "Re-run `turboocr doctor` afterwards to confirm the provider is live."
 )
 

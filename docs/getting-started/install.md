@@ -1,12 +1,11 @@
 # Install
 
-> **v4.0.0-alpha.1 — nothing is published yet. You build it yourself.**
->
-> There is **no PyPI release** (`pip install turboocr` will not get you v4) and
-> **no published Docker image**. Every path below builds from this checkout —
-> either a `cmake` build, a `docker build`, or a wheel build. The `pip install
-> "turboocr[...]"` one-liners appear once the wheels are published; until then
-> use `scripts/python/build_backend_wheel.sh`.
+> **v4.0.0-alpha — the CPU and Intel/OpenVINO Python wheels are on PyPI:**
+> `pip install --pre "turboocr[cpu]"` / `[openvino]` works today (`--pre` is
+> required — pre-release). Everything else still builds from this checkout:
+> the NVIDIA wheels await a PyPI file-size approval, and there is **no
+> published Docker image** — use `docker build` / `cmake` / 
+> `scripts/python/build_backend_wheel.sh` for those paths.
 
 Select your hardware and how you want to run it — the command updates below.
 
@@ -463,16 +462,18 @@ Feature extras — `[pdf]` (read PDFs, write searchable PDFs), `[rich]` (prettie
 any backend: `pip install "turboocr[cuda12,pdf]"`, or on a bare engine wheel,
 `pip install "turboocr-engine-cpu[all]"`.
 
-> **The engine wheels are not published yet.**
+> **Published: cpu + openvino. Not yet: the NVIDIA wheels.**
 >
-> `pip install turboocr` today resolves to this project's published 0.3.0
-> client SDK, which the umbrella continues — but the `turboocr-engine-*`
-> distributions have no PyPI release until the first release run of
-> `.github/workflows/wheels.yml`, so the backend extras do not resolve yet.
+> `turboocr-engine-cpu`, `turboocr-engine-openvino` and the `turboocr`
+> umbrella are live on PyPI, so `[cpu]` and `[openvino]` resolve today (with
+> `--pre`). The `-cuda12` / `-cuda13` wheels are built and verified but exceed
+> PyPI's default file-size limit; their extras resolve once the pending
+> limit requests are approved. `-rocm` is deliberately unpublished.
 >
-> **Build from source** — always current, matches the host exactly. Use the
-> helper script: it builds *and* repairs the wheel, which is the part that
-> makes it installable anywhere.
+> **Build from source** — always current, matches the host exactly, and the
+> only path for the NVIDIA wheels today. Use the helper script: it builds
+> *and* repairs the wheel, which is the part that makes it installable
+> anywhere.
 >
 > ```bash
 > # <variant> is one of: cpu | cuda12 | cuda13 | openvino | rocm
@@ -484,14 +485,14 @@ any backend: `pip install "turboocr[cuda12,pdf]"`, or on a bare engine wheel,
 > A bare `pip wheel python/` is **not** enough on its own — see
 > [why the helper script](#why-the-helper-script-not-pip-wheel) below.
 
-> **`4.0.0a1` is a pre-release — pip skips it by default.**
+> **`4.0.0a2` is a pre-release — pip skips it by default.**
 >
 > Once the wheels are published, a plain `pip install "turboocr[cpu]"` still
 > resolves to the newest *stable* release, not the alpha. Ask for it:
 >
 > ```bash
 > pip install --pre "turboocr[cpu]"
-> pip install "turboocr[cpu]==4.0.0a1"    # equivalent, explicit
+> pip install "turboocr[cpu]==4.0.0a2"    # equivalent, explicit
 > ```
 >
 > Verify what you got: `pip show turboocr-engine-cpu` (or your variant) and

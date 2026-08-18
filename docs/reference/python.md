@@ -5,14 +5,13 @@ nanobind extension over `UnifiedOcrPipeline`, not a reimplementation. The GIL
 is released during inference, output is identical to the server's, and
 concurrency comes from a built-in replica pool.
 
-> **v4.0.0-alpha.1 — the engine wheels are not on PyPI yet.** `pip install
-> turboocr` today gets the published 0.3.0 *client* (talks to a server, no
-> in-process engine). Until the wheels are published, build one from the
-> checkout — the exact commands per backend are in
-> [Install](../getting-started/install.md). Once published:
-> `pip install --pre "turboocr[cpu]"` (or `[cuda12]` / `[cuda13]` /
-> `[openvino]` / `[rocm]` — one per environment, mutually exclusive), and
-> `turboocr doctor` names the right one for your machine.
+> **v4.0.0-alpha — `[cpu]` and `[openvino]` install from PyPI today:**
+> `pip install --pre "turboocr[cpu]"` (the `--pre` is required — it is a
+> pre-release; the macOS cpu wheel carries the Apple backend). The NVIDIA
+> `[cuda12]` / `[cuda13]` extras resolve once PyPI approves those wheels'
+> file-size requests — until then build them from the checkout
+> ([Install](../getting-started/install.md)). One engine wheel per
+> environment, mutually exclusive; `turboocr doctor` names the right one.
 
 ```python
 import turboocr_engine as turboocr   # `import turboocr` once the umbrella is installed

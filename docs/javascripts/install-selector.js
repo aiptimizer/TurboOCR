@@ -35,7 +35,7 @@
             "pip install build-wheels/cuda12/fixed/*.whl\n" +
             'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'cuda\').read(\'doc.png\'))"',
           note:
-            "Builds the turboocr-engine-cuda12 wheel from this checkout; the helper also repairs it, because a bare pip wheel only runs on the machine that built it. NVIDIA ships TWO wheels, one per CUDA major — cuda12 needs driver R525+, cuda13 needs R580+ — and both carry TensorRT 10.15.1.29. backend=\u0027cuda\u0027 is the instant-start CUDA execution provider; backend=\u0027turbo\u0027 is native TensorRT with a one-time cached engine build. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[cuda12]\" (or [cuda13]).",
+            "Builds the turboocr-engine-cuda12 wheel from this checkout; the helper also repairs it, because a bare pip wheel only runs on the machine that built it. NVIDIA ships TWO wheels, one per CUDA major — cuda12 needs driver R525+, cuda13 needs R580+ — and both carry TensorRT 10.15.1.29. backend=\u0027cuda\u0027 is the instant-start CUDA execution provider; backend=\u0027turbo\u0027 is native TensorRT with a one-time cached engine build. The cuda12/cuda13 wheels are awaiting a PyPI file-size approval; once live: pip install --pre \"turboocr[cuda12]\" (or [cuda13]).",
         },
       },
     },
@@ -62,7 +62,7 @@
             'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'apple\', replicas=3).read(\'doc.png\'))"',
           note:
             "Needs the same one-time macOS prereqs as the source build (brew packages, Xcode + Metal toolchain, osx-arm64 ONNX Runtime — see Native build → macOS): the wheel compiles the same C++ tree. " +
-            "The macOS arm64 build of turboocr-engine-cpu bundles the Metal shader library; models auto-download per tier (~6 MB for tiny). replicas=3 measured at 94% of the server's multi-replica throughput. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[cpu]\".",
+            "The macOS arm64 build of turboocr-engine-cpu bundles the Metal shader library; models auto-download per tier (~6 MB for tiny). replicas=3 measured at 94% of the server's multi-replica throughput. Published on PyPI: pip install --pre \"turboocr[cpu]\" works today (--pre required, pre-release).",
         },
       },
     },
@@ -90,7 +90,7 @@
             "scripts/python/build_backend_wheel.sh openvino\n" +
             "pip install build-wheels/openvino/fixed/*.whl\n" +
             'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'openvino\').read(\'doc.png\'))"',
-          note: "Builds the turboocr-engine-openvino wheel from this checkout (building needs the OpenVINO dev package; at run time the wheel's own openvino pip dependency supplies the runtime automatically). backend=\x27openvino\x27 runs the native OpenVINO engine; OV_DEVICE=CPU|GPU|NPU or device= picks the device. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[openvino]\".",
+          note: "Builds the turboocr-engine-openvino wheel from this checkout (building needs the OpenVINO dev package; at run time the wheel's own openvino pip dependency supplies the runtime automatically). backend=\x27openvino\x27 runs the native OpenVINO engine; OV_DEVICE=CPU|GPU|NPU or device= picks the device. Published on PyPI: pip install --pre \"turboocr[openvino]\" works today (--pre required, pre-release).",
         },
       },
     },
@@ -149,7 +149,7 @@
             "scripts/python/build_backend_wheel.sh cpu\n" +
             "pip install build-wheels/cpu/fixed/*.whl\n" +
             'python -c "import turboocr_engine; print(turboocr_engine.OCR().read(\'doc.png\'))"',
-          note: "The portable default — works on any machine. Once the engine wheels reach PyPI this becomes: pip install \"turboocr[cpu]\".",
+          note: "The portable default — works on any machine. Published on PyPI: pip install --pre \"turboocr[cpu]\" works today (--pre required, pre-release).",
         },
       },
     },
