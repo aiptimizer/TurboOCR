@@ -610,7 +610,17 @@ ONNX Runtime ≥ 1.27 — the checklist lives in
 Detection and warp run on the GPU (Metal + MPSGraph); recognition is a
 GPU + Neural Engine hybrid, with narrow crops on the ANE through CoreML
 in parallel with the GPU. `turbo_apple.metallib` is compiled next to the
-binary and found automatically. Layout, tables, formulas and autorotate
+binary and found automatically.
+
+That full GPU+ANE configuration is **native mode**, and it needs the
+per-tier export bundle (MPSGraph graphs + ANE CoreML packages). The Python
+wheel provisions the bundle into its model cache automatically when the
+release asset is available; for a source build — or to generate it
+yourself — run `tools/modelgen/apple/export_apple_native.py --tier small
+--models models --out models` and native mode engages on the next start
+(`mode` in the startup log / `info()` flips from `onnx` to `native`).
+Without the bundle the Apple backend runs its ONNX-on-CoreML fallback — a
+normal, supported configuration, just not the fast one. Layout, tables, formulas and autorotate
 all work once their models are supplied (`--layout-onnx
 models/layout.onnx`, `DOC_ORI_ONNX=…`, `TABLE_BACKEND=…`,
 `FORMULA_BACKEND=…`).

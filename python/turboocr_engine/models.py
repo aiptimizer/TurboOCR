@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import platform
 import sys
+import tarfile
 import tempfile
 from dataclasses import dataclass
 from typing import Dict, Optional
@@ -30,6 +32,24 @@ DEFAULT_RELEASE = "models-v3.0.0-ppocrv6"
 RELEASE_BASE = (
     "https://github.com/aiptimizer/TurboOCR/releases/download/" + DEFAULT_RELEASE
 )
+
+# The Apple native-mode bundles live in their OWN release: the models release
+# is immutable, and the bundles are derived artefacts with their own version
+# (regenerating them = new release tag + new pins here, together). The SHA256
+# of every asset is pinned IN CODE — stronger than a sums file, and the
+# download refuses anything that does not match.
+APPLE_NATIVE_RELEASE = "apple-native-v1"
+APPLE_NATIVE_BASE = (
+    "https://github.com/aiptimizer/TurboOCR/releases/download/" + APPLE_NATIVE_RELEASE
+)
+APPLE_NATIVE_SHA256 = {
+    "apple_native_tiny.tar.gz":
+        "38bcb5bcec1ba7deb4cdd59b58689589a5fe338d3e946a2693aabb6576725b48",
+    "apple_native_small.tar.gz":
+        "9e6c91936ca8ae96bf9398516b773e3b726c8e6324d5a90bfd6afb52017545b8",
+    "apple_native_medium.tar.gz":
+        "ef665b298710af1a5692e4011771ae543ec10afef2e8a393db8b975408675596",
+}
 
 
 def _env(name: str) -> Optional[str]:
@@ -92,18 +112,24 @@ class ModelStore:
 
     @staticmethod
     def _pick_local_dir(models_dir: Optional[str]) -> Optional[str]:
-        candidates = [
-            models_dir,
-            _env("TURBO_OCR_MODELS_DIR"),
-            os.path.join(os.getcwd(), "models"),
-        ]
-        for c in candidates:
-            if c and os.path.isdir(c) and os.path.exists(os.path.join(c, "det.onnx")):
+        # EXPLICIT intent wins outright when the directory exists — the
+        # models_dir argument first, then TURBO_OCR_MODELS_DIR. Even a
+        # partially-populated (tier-only) directory is honored: _ensure falls
+        # back per-file to the cache/download for anything missing. These used
+        # to be subject to the same det.onnx probe as the CWD heuristic below,
+        # so OCR(models_dir=<tier-only dir>) run from a checkout with ./models
+        # present silently resolved against the CWD copy instead — different
+        # weights, and different Apple native exports, from the ones the
+        # caller named.
+        for c in (models_dir, _env("TURBO_OCR_MODELS_DIR")):
+            if c and os.path.isdir(c):
                 return os.path.abspath(c)
-        # An explicit models_dir that exists but lacks det.onnx is still honored
-        # (a tier-only dir); fall through to letting resolve() download into it.
-        if models_dir and os.path.isdir(models_dir):
-            return os.path.abspath(models_dir)
+        # The CWD candidate is a heuristic, so it keeps the det.onnx probe:
+        # it guards against latching onto an unrelated directory that merely
+        # happens to be called "models".
+        cwd = os.path.join(os.getcwd(), "models")
+        if os.path.isdir(cwd) and os.path.exists(os.path.join(cwd, "det.onnx")):
+            return os.path.abspath(cwd)
         return None
 
     # -- public ------------------------------------------------------------
@@ -117,6 +143,81 @@ class ModelStore:
     def ensure_asset(self, rel: str) -> str:
         """Public single-asset resolver (used for layout/doc_ori/etc.)."""
         return self._ensure(rel)
+
+    def ensure_apple_native(self, entry: ModelEntry, resolved: "ResolvedModel") -> bool:
+        """Best-effort: provision the Apple NATIVE-mode export bundle next to
+        the resolved models, so ``backend="apple"`` runs Metal+MPSGraph with
+        the ANE lane instead of the CoreML fallback.
+
+        The engine's discovery is path-based (models/<stem>.onnx ->
+        models/<stem>/graph.json, plus coreml/<tier>/ for the ANE packages —
+        src/backends/apple/), so this only has to put the
+        ``apple_native_<tier>.tar.gz`` release asset's contents into the same
+        directory the models resolved from. Rules:
+
+        * already provisioned (det export present) -> True, nothing done;
+        * models resolved from a user-managed directory (models_dir /
+          TURBO_OCR_MODELS_DIR) -> False: extracting into the cache would be
+          invisible next to those models, and writing into a directory the
+          user manages is not this store's call — generate exports there with
+          tools/modelgen/apple/export_apple_native.py instead;
+        * otherwise download + extract into the cache, once.
+
+        Never raises: native mode is an upgrade, and every failure path
+        (no such asset published, offline, bad archive) leaves the engine on
+        its CoreML fallback exactly as before."""
+        try:
+            if sys.platform != "darwin" or platform.machine() != "arm64":
+                return False
+            if entry.name not in ("tiny", "small", "medium"):
+                return False  # script models have no native bundles
+            det_export = os.path.splitext(resolved.det)[0]
+            if os.path.isfile(os.path.join(det_export, "graph.json")):
+                return True
+            cache = os.path.abspath(self.cache_dir)
+            if os.path.abspath(os.path.dirname(resolved.det)) != cache:
+                return False
+            if not self.allow_download:
+                return False
+            rel = f"apple_native_{entry.name}.tar.gz"
+            archive = os.path.join(self.cache_dir, rel)
+            if not os.path.exists(archive):
+                self._download_apple_bundle(rel, archive)
+            with tarfile.open(archive) as tf:
+                # 'data' filter (Python 3.12+): refuses absolute paths,
+                # traversal and special files from the archive.
+                tf.extractall(self.cache_dir, filter="data")
+            return os.path.isfile(os.path.join(det_export, "graph.json"))
+        except Exception as exc:  # pragma: no cover - network/broken archive
+            print(f"[turboocr] apple native bundle unavailable ({exc}); "
+                  "backend='apple' uses the CoreML fallback.", file=sys.stderr)
+            return False
+
+    def _download_apple_bundle(self, rel: str, dest: str) -> str:
+        """Fetch one apple_native_* asset with its code-pinned SHA256.
+
+        Unlike the models release's best-effort sums file, verification here
+        is MANDATORY: an asset whose name is not pinned, or whose digest does
+        not match, is refused."""
+        expected = APPLE_NATIVE_SHA256.get(rel)
+        if not expected:
+            raise RuntimeError(f"no pinned SHA256 for {rel}")
+        url = f"{APPLE_NATIVE_BASE}/{rel}"
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        print(f"[turboocr] downloading {rel} -> {dest}", file=sys.stderr)
+        tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(dest), suffix=".part")
+        os.close(tmp_fd)
+        try:
+            self._fetch_to_file(url, tmp_path)
+            actual = _sha256_file(tmp_path)
+            if actual != expected:
+                raise RuntimeError(
+                    f"SHA256 mismatch for {rel}: expected {expected}, got {actual}")
+            os.replace(tmp_path, dest)
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        return dest
 
     # -- internals ---------------------------------------------------------
     def _ensure(self, rel: str) -> str:

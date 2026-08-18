@@ -71,11 +71,27 @@ what the installed wheel carries.
 | `"cuda"` | ORT CUDA execution provider | NVIDIA wheels; instant start, no engine build |
 | `"turbo"` (`"tensorrt"`, `"trt"`) | Native TensorRT engine | NVIDIA wheels; peak throughput, one-time cached engine build |
 | `"openvino"` (`"ov"`, `"intel"`) | **Native OpenVINO engine** on the openvino wheel; the ORT OpenVINO EP on builds that carry it | `device=` picks `CPU`/`GPU`/`NPU`; the OpenVINO runtime arrives as the wheel's own pip dependency, found automatically |
-| `"apple"` (`"coreml"`) | CoreML EP opt-in on macOS | The macOS default is CPU — measured faster than the CoreML EP on these models |
+| `"apple"` | The Apple backend, in one of two modes — see below | macOS builds of the cpu wheel only |
 | `"rocm"` / `"migraphx"` | ORT ROCm / MIGraphX EPs | rocm wheel (not yet hardware-verified) |
 
 Asking for a backend the installed wheel cannot run raises
 `BackendUnavailable` naming the wheel that can.
+
+### Apple: one backend, two modes
+
+Apple silicon has three engines — CPU, GPU, and the Neural Engine (ANE, which
+is reachable only through CoreML, so there is no `backend="ane"`; it is a
+lane, not an engine you select). `backend="apple"` picks the execution mode
+by which artefacts are present (`info()["mode"]` reports the result):
+
+| Mode | Runs on | When |
+|---|---|---|
+| `native` | Metal + MPSGraph on the **GPU**, narrow recognition buckets on the **ANE** in parallel (`TURBO_APPLE_ANE_MAXW`, default 800) — the measured ~5× configuration | The `apple_native_<tier>` export bundle is present. The wheel provisions it into the model cache automatically when the release asset is available; it can always be generated locally with `tools/modelgen/apple/export_apple_native.py` |
+| `onnx` | The ONNX models on the CoreML execution provider (Apple's scheduler places ops on ANE/GPU/CPU) | No native bundle — the fallback |
+
+The default `auto` on macOS stays on the CPU path (measured faster than the
+CoreML-EP mode for these models); `backend="apple"` opts into the Apple
+backend, and with the native bundle in place it is the fast path.
 
 ## Reading
 

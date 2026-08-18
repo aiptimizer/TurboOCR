@@ -161,3 +161,7 @@ def test_umbrella_extras_pin_the_engine_wheels_to_its_own_version():
         [f"turboocr-engine-cuda12=={version}"],
         [f"turboocr-engine-cuda13=={version}"],
     ), extras.get("cuda")
+    # `[apple]` is an alias for the cpu engine wheel (its macOS build carries
+    # the Apple backend; there is no separate Apple distribution) — it must
+    # track the cpu pin exactly.
+    assert extras.get("apple") == [f"turboocr-engine-cpu=={version}"], extras.get("apple")

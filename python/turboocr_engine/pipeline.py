@@ -211,6 +211,14 @@ class OCR:
         self.paths = store.resolve(self.entry, want_cls=use_cls)
         self._store = store
 
+        # Provision the Apple NATIVE-mode bundle (MPSGraph exports + the ANE
+        # packages) BEFORE construction — the engine probes for the export
+        # dirs at load time, and this must stay outside construct_lock (it may
+        # download once). Best-effort by contract: without the bundle,
+        # backend="apple" runs its CoreML fallback exactly as before.
+        if native.resolve_engine(backend) == "apple":
+            store.ensure_apple_native(self.entry, self.paths)
+
         # Serialize env-mutation + construction: the engine reads its EP from
         # process env at construction, so two OCR(...) builds with different
         # backends must not interleave (env is global).

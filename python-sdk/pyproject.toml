@@ -59,6 +59,11 @@ grpc = [
 # use, and so `pip install turboocr` never drags a CUDA runtime onto a machine
 # that only wants to call a server. `turboocr doctor` names the right one.
 cpu = ["turboocr-engine-cpu==4.0.0a2"]
+# `[apple]` is an ALIAS for the cpu engine wheel: there is no separate Apple
+# distribution — the macOS arm64 build of turboocr-engine-cpu carries the
+# Apple (Metal + ANE) backend. Without the alias, "install cpu to get Apple"
+# reads incoherent; with it, the natural command works on a Mac.
+apple = ["turboocr-engine-cpu==4.0.0a2"]
 # NVIDIA ships as TWO distributions, one per CUDA major: a wheel is built
 # against one CUDA runtime and cannot serve both, and PyPI allows only one
 # build per name+version. Pick by DRIVER: cuda12 runs on R525+, cuda13

@@ -789,3 +789,103 @@ def test_vendor_runtime_hint_names_openvino():
     hint = _vendor_runtime_hint("libopenvino.so.2621: cannot open shared object file")
     assert "openvino>=2026.2" in hint
     assert "tensorrt" not in hint
+
+
+def test_explicit_models_dir_beats_cwd_models(tmp_path, monkeypatch):
+    """OCR(models_dir=...) must resolve against THAT directory, even when it is
+    tier-only (no det.onnx) and the CWD has a fully-populated ./models. The old
+    probe demanded det.onnx (the MEDIUM det) of every candidate, so an explicit
+    tier-only dir silently lost to the checkout's ./models — different weights,
+    and different Apple native exports, from the ones the caller named."""
+    from turboocr_engine.models import ModelStore
+
+    explicit = tmp_path / "mine"
+    explicit.mkdir()
+    (explicit / "det_small.onnx").write_bytes(b"x")  # tier-only: no det.onnx
+
+    cwd = tmp_path / "checkout"
+    (cwd / "models").mkdir(parents=True)
+    (cwd / "models" / "det.onnx").write_bytes(b"x")
+    monkeypatch.chdir(cwd)
+    monkeypatch.delenv("TURBO_OCR_MODELS_DIR", raising=False)
+
+    assert ModelStore(str(explicit)).local_dir == str(explicit)
+    # The CWD heuristic still works when nothing explicit is given...
+    assert ModelStore(None).local_dir == str(cwd / "models")
+    # ...but not for a directory that merely happens to be called "models".
+    (cwd / "models" / "det.onnx").unlink()
+    assert ModelStore(None).local_dir is None
+
+
+def test_apple_native_bundle_provisioning(tmp_path, monkeypatch):
+    """ensure_apple_native must (a) no-op when the export already exists,
+    (b) refuse to touch a user-managed models dir, (c) download+extract the
+    tar into the cache exactly once, and (d) never raise on failure — the
+    engine's CoreML fallback depends on that contract."""
+    import io
+    import tarfile as tf
+
+    from turboocr_engine import models as m
+    from turboocr_engine.catalog import find_model
+
+    monkeypatch.setattr(m.sys, "platform", "darwin")
+    monkeypatch.setattr(m.platform, "machine", lambda: "arm64")
+    entry = find_model("small")
+
+    cache = tmp_path / "cache" / "models" / m.DEFAULT_RELEASE
+    cache.mkdir(parents=True)
+    (cache / "det_small.onnx").write_bytes(b"x")
+    store = m.ModelStore(None, allow_download=True)
+    store.local_dir = None
+    store.cache_dir = str(cache)
+    resolved = m.ResolvedModel(det=str(cache / "det_small.onnx"),
+                               rec=str(cache / "rec_small.onnx"),
+                               dict=str(cache / "keys.txt"), cls=None,
+                               name="small")
+
+    # (c) download+extract: fake the release asset with an in-memory tar.
+    calls = []
+
+    def fake_download(rel, dest):
+        calls.append(rel)
+        buf = io.BytesIO()
+        with tf.open(fileobj=buf, mode="w:gz") as t:
+            info = tf.TarInfo("det_small/graph.json")
+            info.size = 2
+            t.addfile(info, io.BytesIO(b"{}"))
+        (cache / rel).write_bytes(buf.getvalue())
+        return str(cache / rel)
+
+    monkeypatch.setattr(store, "_download_apple_bundle", fake_download)
+    assert store.ensure_apple_native(entry, resolved) is True
+    assert calls == [f"apple_native_small.tar.gz"]
+    assert (cache / "det_small" / "graph.json").is_file()
+
+    # (a) second call: already provisioned, no new download.
+    assert store.ensure_apple_native(entry, resolved) is True
+    assert len(calls) == 1
+
+    # (b) user-managed dir: never write there, never download.
+    managed = tmp_path / "mine"
+    managed.mkdir()
+    (managed / "det_small.onnx").write_bytes(b"x")
+    resolved2 = m.ResolvedModel(det=str(managed / "det_small.onnx"),
+                                rec=str(managed / "rec_small.onnx"),
+                                dict=str(managed / "keys.txt"), cls=None,
+                                name="small")
+    assert store.ensure_apple_native(entry, resolved2) is False
+    assert len(calls) == 1
+
+    # (d) a broken download must not raise, only report False.
+    (cache / "det_small" / "graph.json").unlink()
+    (cache / "apple_native_small.tar.gz").unlink()
+
+    def broken_download(rel, dest):
+        raise RuntimeError("release asset missing")
+
+    monkeypatch.setattr(store, "_download_apple_bundle", broken_download)
+    assert store.ensure_apple_native(entry, resolved) is False
+
+    # Not macOS -> clean False before any path logic.
+    monkeypatch.setattr(m.sys, "platform", "linux")
+    assert store.ensure_apple_native(entry, resolved) is False

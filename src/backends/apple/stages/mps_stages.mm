@@ -22,6 +22,8 @@
 
 #include <fstream>
 
+#include <filesystem>
+
 #include "turbo_ocr/analysis/classification/cls_config.h"     // cls canvas/thresh/norm/flip
 #include "turbo_ocr/base/env_utils.h"                      // env::* — every read is recorded
 #include "turbo_ocr/base/geometry/perspective.h" // compute_crop_transform
@@ -122,12 +124,30 @@ bool MpsRecognizer::load(const std::string &model_path) {
   // rec_ane_<W>.mlpackage set. A bucket with no package falls back to MPSGraph.
   // 0 disables the ANE, so the lower bound is 0 rather than 1.
   int ane_maxw = env::env_int("TURBO_APPLE_ANE_MAXW", 800, 0, 8192);
-  // HOME is the process's ambient identity, not a TurboOCR knob, so it is read
-  // raw — listing it in the startup override inventory would be noise.
-  const char *home = std::getenv("HOME");  // pre-commit-allow-getenv (not a knob)
-  std::string coreml_dir =
-      env::env_or("TURBO_APPLE_COREML_DIR",
-                  std::string(home ? home : "") + "/.apple_ocr_ml/coreml");
+  // DEFAULT LOOKUP ORDER for the package set, so a shipped model bundle is
+  // self-contained: (1) TURBO_APPLE_COREML_DIR, an explicit override;
+  // (2) <models>/coreml — `model_path` is the rec export base
+  //     (<models>/rec_<tier>), so its parent is the models directory and a
+  //     bundle dropped there (the apple_native_<tier> release asset layout)
+  //     carries its own ANE packages;
+  // (3) ~/.apple_ocr_ml/coreml — the bring-up machine's location, kept last so
+  //     dev setups keep working. Before (2) existed, the DEFAULT pointed at
+  //     the dev path only, and every wheel install ran GPU-only ANE-less
+  //     native mode with nothing in the log but per-bucket fallbacks.
+  std::string coreml_dir = env::env_or("TURBO_APPLE_COREML_DIR", "");
+  if (coreml_dir.empty()) {
+    std::error_code ec;
+    const std::filesystem::path sibling =
+        std::filesystem::path(model_path).parent_path() / "coreml";
+    if (std::filesystem::is_directory(sibling, ec)) {
+      coreml_dir = sibling.string();
+    } else {
+      // HOME is the process's ambient identity, not a TurboOCR knob, so it is
+      // read raw — listing it in the startup override inventory would be noise.
+      const char *home = std::getenv("HOME");  // pre-commit-allow-getenv (not a knob)
+      coreml_dir = std::string(home ? home : "") + "/.apple_ocr_ml/coreml";
+    }
+  }
 
   // ---- ANE TIER RESOLUTION -------------------------------------------------
   // The ANE package encodes a FIXED output dictionary. PP-OCRv6's tiers do NOT
