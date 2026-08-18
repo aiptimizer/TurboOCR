@@ -749,6 +749,36 @@ class OCR:
         with self._checkout() as pipe:
             return int(pipe.detect_orientation(img))
 
+    # -- asyncio -----------------------------------------------------------
+    # Thin, honest sugar: each coroutine runs its sync twin in a worker thread
+    # via asyncio.to_thread. The parallelism is real and comes from the layers
+    # below — the GIL is released during native inference and one OCR object
+    # is thread-safe against its replica pool — so `asyncio.gather()` over
+    # these genuinely overlaps work up to `replicas`. There is no separate
+    # async engine to configure, and awaiting with replicas=1 serializes
+    # exactly like the sync API (construct with replicas=N to scale).
+
+    async def aread(self, image: ImageInput, **kwargs) -> PageResult:
+        """Async :meth:`read` — same parameters, same :class:`PageResult`."""
+        import asyncio
+
+        return await asyncio.to_thread(self.read, image, **kwargs)
+
+    async def aread_batch(self, images: List[ImageInput], **kwargs) -> DocumentResult:
+        """Async :meth:`read_batch` — same parameters, same result.
+
+        Prefer this over gathering many :meth:`aread` calls when you have the
+        list up front: the batch path feeds the detector real batches."""
+        import asyncio
+
+        return await asyncio.to_thread(self.read_batch, images, **kwargs)
+
+    async def aread_pdf(self, pdf: ImageInput, **kwargs) -> DocumentResult:
+        """Async :meth:`read_pdf` — same parameters, same result."""
+        import asyncio
+
+        return await asyncio.to_thread(self.read_pdf, pdf, **kwargs)
+
     def close(self) -> None:
         """Release the native ONNX sessions. The engine is unusable afterward.
         Optional — fine to rely on GC for the common one-engine-per-process

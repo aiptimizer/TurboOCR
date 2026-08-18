@@ -38,17 +38,20 @@ RELEASE_BASE = (
 # (regenerating them = new release tag + new pins here, together). The SHA256
 # of every asset is pinned IN CODE — stronger than a sums file, and the
 # download refuses anything that does not match.
-APPLE_NATIVE_RELEASE = "apple-native-v1"
+APPLE_NATIVE_RELEASE = "apple-native-v2"
 APPLE_NATIVE_BASE = (
     "https://github.com/aiptimizer/TurboOCR/releases/download/" + APPLE_NATIVE_RELEASE
 )
+# v2 = the multi-canvas detection bundles (4 det canvases per tier, picked
+# per page by the shared aspect policy). v1 (single 992x768 canvas) stays
+# published and untouched — the 4.0.0a2 wheels have ITS url+hashes baked in.
 APPLE_NATIVE_SHA256 = {
     "apple_native_tiny.tar.gz":
-        "38bcb5bcec1ba7deb4cdd59b58689589a5fe338d3e946a2693aabb6576725b48",
+        "7967c9ecf3a8ae204922a58d9b36388b65a763c902e005d8ce8c41a04baecded",
     "apple_native_small.tar.gz":
-        "9e6c91936ca8ae96bf9398516b773e3b726c8e6324d5a90bfd6afb52017545b8",
+        "178a5241c36db9f0d05faa5db65e6d7d5e292089d94a5f9bed61f99812fe76f6",
     "apple_native_medium.tar.gz":
-        "ef665b298710af1a5692e4011771ae543ec10afef2e8a393db8b975408675596",
+        "76f3883d84509d83d591c2f047425465f3ed178308d5163a14e7d356c9abd6d8",
 }
 
 

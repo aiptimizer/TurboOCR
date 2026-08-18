@@ -86,7 +86,7 @@ by which artefacts are present (`info()["mode"]` reports the result):
 
 | Mode | Runs on | When |
 |---|---|---|
-| `native` | Metal + MPSGraph on the **GPU**, narrow recognition buckets on the **ANE** in parallel (`TURBO_APPLE_ANE_MAXW`, default 800) — the measured ~5× configuration | The `apple_native_<tier>` export bundle is present. The wheel provisions it into the model cache automatically when the release asset is available; it can always be generated locally with `tools/modelgen/apple/export_apple_native.py` |
+| `native` | Metal + MPSGraph on the **GPU**, narrow recognition buckets on the **ANE** in parallel (`TURBO_APPLE_ANE_MAXW`, default 800) — the measured ~5× configuration. Detection holds one compiled engine per exported canvas (portrait, landscape, tall, square) and picks per page via the shared aspect policy, so screenshots and documents both detect undistorted | The `apple_native_<tier>` export bundle is present. The wheel provisions it into the model cache automatically when the release asset is available; it can always be generated locally with `tools/modelgen/apple/export_apple_native.py` |
 | `onnx` | The ONNX models on the CoreML execution provider (Apple's scheduler places ops on ANE/GPU/CPU) | No native bundle — the fallback |
 
 The default `auto` on macOS stays on the CPU path (measured faster than the
@@ -125,6 +125,28 @@ doc = ocr.read_pdf(pdf, *, dpi=150, pages=None, max_pages=None, ...)
 
 Renders with PDFium (the `pdf` extra: `pip install "turboocr[cpu,pdf]"`) and
 OCRs each page. Pass `keep_image=False` for long documents.
+
+## Async
+
+Every read method has an `async` twin — `aread`, `aread_batch`, `aread_pdf` —
+with identical parameters and results:
+
+```python
+ocr = turboocr.OCR("small", backend="apple", replicas=3)
+
+async def main():
+    pages = await asyncio.gather(*[ocr.aread(img) for img in images])
+```
+
+The mechanics are deliberately transparent: each coroutine runs its sync twin
+in a worker thread (`asyncio.to_thread`), and the parallelism is real because
+the GIL is released during native inference and one `OCR` object is
+thread-safe against its replica pool. Concurrency scales with `replicas` —
+measured on Apple silicon: six gathered `aread` calls at `replicas=3` ran
+**2.65×** faster than the same six serial reads, byte-identical output.
+With `replicas=1` awaiting serializes exactly like the sync API. When the
+image list is known up front, prefer `aread_batch` — the batch path feeds the
+detector real batches.
 
 **One-shots and introspection.** For a single call, the module-level
 `turboocr_engine.read(image, model=..., backend=...)` and

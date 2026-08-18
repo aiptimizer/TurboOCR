@@ -86,25 +86,41 @@ private:
 
   std::shared_ptr<MetalAllocator> alloc_;
   MetalKernels kernels_;
-  MpsEngine engine_;
-  int c_ = 3, h_ = 640, w_ = 640; // det canvas (from the model input template)
+  // MULTI-CANVAS: MPSGraph is single-shape, so one compiled engine serves one
+  // static canvas. load() discovers every det_c<H>x<W>/ export subdir (or one
+  // flat graph.json — the pre-multi-canvas bundle layout, still honored) and
+  // holds one engine + resident buffer pair per canvas; select_canvas_() runs
+  // the SHARED aspect picker (detection::pick_det_canvas — the same policy the
+  // Intel backend's per-canvas static compile uses) before every submit. The
+  // single-slot async contract makes `active_` stable between enqueue() and
+  // collect(), so the futures read through it safely.
+  struct DetCanvas {
+    MpsEngine engine;
+    int c = 3, h = 0, w = 0;
+    backend::DeviceBuffer in_buf;  // [1,3,h,w] normalized input
+    backend::DeviceBuffer out_buf; // [1,1,h,w] prob map
+  };
+  std::vector<std::unique_ptr<DetCanvas>> canvases_;
+  DetCanvas *active_ = nullptr; // canvas of the LAST select_canvas_()
+  // Pick (and make active) the loaded canvas nearest the shared policy's
+  // aspect for this page. No-op with a single canvas.
+  void select_canvas_(int orig_h, int orig_w);
   // SHARED DB thresholds, resolved ONCE at load() from the per-tier base plus
   // the DET_DB_THRESH / DET_BOX_THRESH / DET_UNCLIP env overrides
   // (detection::read_db_params). These were hardcoded in db_postprocess_(),
   // which pinned box_thresh at the tiny tier's 0.40 for every tier and made the
   // env knobs dead on this backend alone.
   turbo_ocr::detection::DbParams db_ = turbo_ocr::detection::kDbDefaults;
-  backend::DeviceBuffer in_buf_;  // [1,3,h,w] normalized input
-  backend::DeviceBuffer out_buf_; // [1,1,h,w] prob map
   // Private lane for enqueue(); created lazily on first async use.
   std::unique_ptr<backend::DeviceQueue> async_q_;
   // Optional CoreML det forward (TURBO_APPLE_DET_COREML=<path.mlpackage>):
-  // same normalized in_buf_ canvas in (zero-copy — Metal SHARED storage), same
-  // out_buf_ prob map out, so db_postprocess_ and every caller are untouched.
-  // The package's input constraint must match the canvas or load falls back to
-  // the MPSGraph engine, loudly. Opaque: CoreML types stay out of this header.
+  // same normalized in_buf canvas in (zero-copy — Metal SHARED storage), same
+  // out_buf prob map out, so db_postprocess_ and every caller are untouched.
+  // The package encodes ONE input shape, so it binds to the one loaded canvas
+  // whose dims it matches (coreml_canvas_) and other canvases use MPSGraph.
   struct CoremlDet;
   std::unique_ptr<CoremlDet> coreml_;
+  const DetCanvas *coreml_canvas_ = nullptr;
   bool ready_ = false;
 };
 

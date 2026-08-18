@@ -10,8 +10,11 @@ if the artefacts sit next to the ONNX files, `mode="auto"` selects native.
 Layout produced (drop it INTO a models directory, or ship it as the
 `apple_native_<tier>.tar.gz` release asset):
 
-    det_<tier>/         graph.json + weights.bin   MPSGraph detector,
-                                                   static 992x768 canvas
+    det_<tier>/det_c<H>x<W>/  graph.json+weights.bin  MPSGraph detector, one
+                                                   static engine per canvas of
+                                                   DET_CANVASES; the runtime
+                                                   picks per page (shared
+                                                   aspect policy)
     rec_<tier>/rec_b<W>/  ...                      MPSGraph recognizer, one
                                                    static graph per width of
                                                    the SHARED 9-bucket ladder
@@ -56,8 +59,15 @@ MPS_EXPORT = os.path.join(HERE, "..", "mps_export_rec.py")
 LADDER = [320, 480, 800, 1200, 1600, 2000, 2500, 3200, 4000]
 #: ANE lane widths: buckets at or below the TURBO_APPLE_ANE_MAXW default (800).
 ANE_WIDTHS = [320, 480, 800]
-#: Conformance-validated det canvas (H, W).
-DET_CANVAS = (992, 768)
+#: Det canvas set (H, W) — one static MPSGraph engine per canvas; the runtime
+#: picks per page via the SHARED aspect policy (detection::pick_det_canvas).
+#: 992x768 is the conformance-validated portrait-document canvas and MUST stay
+#: first/present (FUNSD-class pages keep landing on it — aspect 0.774);
+#: 800x1280 covers landscape screens/screenshots (1.6); 1280x800 covers tall
+#: phone captures (0.625); 1024x1024 covers near-square images (1.0). The
+#: picker matches by log-aspect distance, so these four cover the plane
+#: without any pair shadowing another.
+DET_CANVASES = [(992, 768), (800, 1280), (1280, 800), (1024, 1024)]
 #: cls canvas (H, W). cls.onnx declares STATIC 80x160 spatial dims, and the
 #: export tool defers to a model's static dims — these values only matter if a
 #: future cls export ships with dynamic spatial dims.
@@ -88,10 +98,11 @@ def export_mpsgraph(models: str, tier: str, out: str) -> None:
     det_stem = os.path.splitext(files["det"])[0]
     rec_stem = os.path.splitext(files["rec"])[0]
 
-    dh, dw = DET_CANVAS
-    print(f"[det] {files['det']} @ {dh}x{dw} -> {det_stem}/")
-    run_mps_export(os.path.join(models, files["det"]),
-                   os.path.join(out, det_stem), dh, dw)
+    for dh, dw in DET_CANVASES:
+        sub = f"det_c{dh}x{dw}"
+        print(f"[det] {files['det']} @ {dh}x{dw} -> {det_stem}/{sub}/")
+        run_mps_export(os.path.join(models, files["det"]),
+                       os.path.join(out, det_stem, sub), dh, dw)
 
     for w in LADDER:
         print(f"[rec] {files['rec']} @ 48x{w} -> {rec_stem}/rec_b{w}/")

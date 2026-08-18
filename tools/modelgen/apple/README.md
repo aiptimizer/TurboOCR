@@ -19,7 +19,7 @@ directory and native mode lights up — no configuration):
 
 | Artefact | What |
 |---|---|
-| `det_<tier>/graph.json` + `weights.bin` | MPSGraph detector, static **992×768** canvas (the conformance-validated one; the earlier 1280×1280 export was the conformance-red artifact) |
+| `det_<tier>/det_c<H>x<W>/…` | MPSGraph detector, one static engine per canvas — 992×768 (portrait documents, the conformance-validated canvas), 800×1280 (landscape screens), 1280×800 (tall captures), 1024×1024 (near-square). The runtime picks per page via the shared `pick_det_canvas` policy; a flat `det_<tier>/graph.json` (the v1 layout) still loads as a single canvas |
 | `rec_<tier>/rec_b<W>/…` | MPSGraph recognizer, one static graph per width of the shared 9-bucket ladder (`recognition::kRecWidthBuckets`) |
 | `cls/…` | MPSGraph 0°/180° line classifier (cls.onnx is statically 80×160) |
 | `coreml/<tier>/rec_ane_<W>.mlpackage` | ANE-lane packages for W ∈ {320, 480, 800} — `--ane` only |

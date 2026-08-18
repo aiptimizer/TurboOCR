@@ -889,3 +889,35 @@ def test_apple_native_bundle_provisioning(tmp_path, monkeypatch):
     # Not macOS -> clean False before any path logic.
     monkeypatch.setattr(m.sys, "platform", "linux")
     assert store.ensure_apple_native(entry, resolved) is False
+
+
+def test_async_wrappers_delegate_and_are_coroutines():
+    """aread/aread_batch/aread_pdf are asyncio sugar over the sync methods via
+    asyncio.to_thread — this pins (a) they are real coroutine functions, (b)
+    they pass arguments through unchanged and return the sync result, without
+    needing the native extension (the instance is constructed bare)."""
+    import asyncio
+    import inspect
+
+    from turboocr_engine.pipeline import OCR
+
+    for name in ("aread", "aread_batch", "aread_pdf"):
+        assert inspect.iscoroutinefunction(getattr(OCR, name)), name
+
+    o = object.__new__(OCR)  # no native init — the wrappers touch only self.<sync>
+    calls = []
+    o.read = lambda image, **kw: calls.append(("read", image, kw)) or "P"
+    o.read_batch = lambda images, **kw: calls.append(("batch", images, kw)) or "D"
+    o.read_pdf = lambda pdf, **kw: calls.append(("pdf", pdf, kw)) or "F"
+
+    async def drive():
+        assert await o.aread("img.png", layout=True) == "P"
+        assert await o.aread_batch(["a", "b"], batch_size=4) == "D"
+        assert await o.aread_pdf("doc.pdf", dpi=200) == "F"
+
+    asyncio.run(drive())
+    assert calls == [
+        ("read", "img.png", {"layout": True}),
+        ("batch", ["a", "b"], {"batch_size": 4}),
+        ("pdf", "doc.pdf", {"dpi": 200}),
+    ]

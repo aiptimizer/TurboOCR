@@ -14,7 +14,9 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <string>
 
@@ -154,25 +156,94 @@ bool MpsDetector::load(const std::string &model_path) {
   // unified merge dropped, and wrong for any custom-named model file; the
   // installed base carries the registry's pairing for every backend.
   db_ = turbo_ocr::detection::read_db_params();
-  if (!engine_.load(model_path)) return false;
-  auto chw = engine_.input_chw();
-  if (chw.size() == 3) { c_ = chw[0]; h_ = chw[1]; w_ = chw[2]; }
-  // Resident input canvas + prob-map output (DBNet output is spatially [1,1,h,w]).
-  in_buf_ = alloc_->allocate_buffer((size_t)c_ * h_ * w_ * sizeof(float));
-  out_buf_ = alloc_->allocate_buffer((size_t)h_ * w_ * sizeof(float));
-  // Optional CoreML forward — an A/B knob, off unless the env names a package.
-  // Every failure path falls back to the MPSGraph engine loudly (never
-  // silently: a het det would return DIFFERENT boxes, not slower ones).
-  if (const std::string cm = env::env_or("TURBO_APPLE_DET_COREML", "");
-      !cm.empty()) {
-    auto det = std::make_unique<CoremlDet>();
-    if (det->load(cm, c_, h_, w_)) {
-      coreml_ = std::move(det);
-      NSLog(@"[apple] det forward on CoreML(GPU): %s", cm.c_str());
+
+  // CANVAS DISCOVERY, mirroring the recognizer's bucket discovery one class
+  // below: a flat export (graph.json directly in model_path — the
+  // pre-multi-canvas bundle layout) is one canvas; otherwise every
+  // det_c<H>x<W>/ subdir carrying a graph.json becomes one. Each canvas gets
+  // its own engine AND its own resident buffers — sharing one buffer pair
+  // across shapes would make the single-slot async contract a lie the moment
+  // two consecutive pages pick different canvases.
+  std::vector<std::string> dirs;
+  {
+    std::error_code ec;
+    if (std::filesystem::exists(std::filesystem::path(model_path) / "graph.json", ec)) {
+      dirs.push_back(model_path);
+    } else if (std::filesystem::is_directory(model_path, ec)) {
+      for (const auto &e : std::filesystem::directory_iterator(model_path, ec)) {
+        if (!e.is_directory()) continue;
+        const std::string name = e.path().filename().string();
+        int ph = 0, pw = 0;
+        if (std::sscanf(name.c_str(), "det_c%dx%d", &ph, &pw) == 2 &&
+            std::filesystem::exists(e.path() / "graph.json", ec)) {
+          dirs.push_back(e.path().string());
+        }
+      }
+      std::sort(dirs.begin(), dirs.end()); // deterministic load order
     }
   }
-  ready_ = (bool)in_buf_ && (bool)out_buf_;
+  if (dirs.empty()) {
+    NSLog(@"[apple] det: no export (graph.json or det_c<H>x<W>/) under %s",
+          model_path.c_str());
+    return false;
+  }
+  for (const auto &d : dirs) {
+    auto cv = std::make_unique<DetCanvas>();
+    if (!cv->engine.load(d)) {
+      NSLog(@"[apple] det canvas failed to load, skipping: %s", d.c_str());
+      continue;
+    }
+    auto chw = cv->engine.input_chw();
+    if (chw.size() == 3) { cv->c = chw[0]; cv->h = chw[1]; cv->w = chw[2]; }
+    // Resident input canvas + prob-map output (DBNet output is [1,1,h,w]).
+    cv->in_buf = alloc_->allocate_buffer((size_t)cv->c * cv->h * cv->w * sizeof(float));
+    cv->out_buf = alloc_->allocate_buffer((size_t)cv->h * cv->w * sizeof(float));
+    if (!cv->in_buf || !cv->out_buf) continue;
+    canvases_.push_back(std::move(cv));
+  }
+  if (canvases_.empty()) return false;
+  active_ = canvases_.front().get();
+  if (canvases_.size() > 1) {
+    std::string set;
+    for (const auto &cv : canvases_)
+      set += std::to_string(cv->h) + "x" + std::to_string(cv->w) + " ";
+    NSLog(@"[apple] det canvases: %s(picked per page by the shared aspect policy)",
+          set.c_str());
+  }
+
+  // Optional CoreML forward — an A/B knob, off unless the env names a package.
+  // The package encodes ONE input shape; bind it to the loaded canvas whose
+  // dims it accepts, and every other canvas keeps the MPSGraph engine. Every
+  // failure path falls back loudly (never silently: a het det would return
+  // DIFFERENT boxes, not slower ones).
+  if (const std::string cm = env::env_or("TURBO_APPLE_DET_COREML", "");
+      !cm.empty()) {
+    for (const auto &cv : canvases_) {
+      auto det = std::make_unique<CoremlDet>();
+      if (det->load(cm, cv->c, cv->h, cv->w)) {
+        coreml_ = std::move(det);
+        coreml_canvas_ = cv.get();
+        NSLog(@"[apple] det forward on CoreML(GPU) for canvas %dx%d: %s",
+              cv->h, cv->w, cm.c_str());
+        break;
+      }
+    }
+  }
+  ready_ = true;
   return ready_;
+}
+
+void MpsDetector::select_canvas_(int orig_h, int orig_w) {
+  if (canvases_.size() <= 1) return;
+  // Warmup/thumbnail inputs have no meaningful aspect — keep whatever canvas
+  // is active rather than flapping on a 32x32 synthetic image.
+  if (orig_h < 128 || orig_w < 128) return;
+  std::vector<std::pair<int, int>> avail;
+  avail.reserve(canvases_.size());
+  for (const auto &cv : canvases_) avail.emplace_back(cv->h, cv->w);
+  const auto [h, w] = turbo_ocr::detection::pick_det_canvas(orig_h, orig_w, avail);
+  for (const auto &cv : canvases_)
+    if (cv->h == h && cv->w == w) { active_ = cv.get(); return; }
 }
 
 bool MpsDetector::submit_forward_(const backend::ImageView &img,
@@ -185,20 +256,21 @@ bool MpsDetector::submit_forward_(const backend::ImageView &img,
   // retyped here — see turbo_ocr/core/norm_params.h.
   const backend::NormParams det = backend::norm::imagenet_bgr();
 
+  DetCanvas &cv = *active_;
   bool fwd_ok = false;
   {
     backend::BatchScope batch(queue); // fuse resize + forward in one command buffer
-    kernels_.resize_normalize(img, static_cast<float *>(in_buf_.data()), w_, h_,
-                              det, queue);
+    kernels_.resize_normalize(img, static_cast<float *>(cv.in_buf.data()), cv.w,
+                              cv.h, det, queue);
     backend::DeviceTensor in{
-        .name = engine_.input_names().empty() ? std::string{} : engine_.input_names()[0],
-        .data = in_buf_.data(), .space = backend::DeviceKind::Metal,
-        .dtype = backend::DType::F32, .shape = {1, c_, h_, w_}};
+        .name = cv.engine.input_names().empty() ? std::string{} : cv.engine.input_names()[0],
+        .data = cv.in_buf.data(), .space = backend::DeviceKind::Metal,
+        .dtype = backend::DType::F32, .shape = {1, cv.c, cv.h, cv.w}};
     backend::DeviceTensor out{
-        .name = {}, .data = out_buf_.data(), .space = backend::DeviceKind::Metal,
-        .dtype = backend::DType::F32, .shape = {1, 1, h_, w_}};
+        .name = {}, .data = cv.out_buf.data(), .space = backend::DeviceKind::Metal,
+        .dtype = backend::DType::F32, .shape = {1, 1, cv.h, cv.w}};
     std::vector<backend::OutputLease> leases;
-    fwd_ok = engine_.run({in}, {out}, leases, queue);
+    fwd_ok = cv.engine.run({in}, {out}, leases, queue);
   } // BatchScope closes => the command buffer is COMMITTED here. Never
     // synchronize() with it still open (device_queue.h contract).
   return fwd_ok;
@@ -208,8 +280,9 @@ std::vector<turbo_ocr::Box> MpsDetector::db_postprocess_(int orig_h, int orig_w)
   TURBO_APPLE_PROF("det.dbpost(host)");
   // HOST DB post-process — bit-identical to mps_ocr.mm:99-107, reading the prob
   // map through unified memory. Boxes come back in ORIGINAL coordinates.
-  const float *map = static_cast<const float *>(out_buf_.data());
-  cv::Mat pred(h_, w_, CV_32F, const_cast<float *>(map));
+  const DetCanvas &cvs = *active_;
+  const float *map = static_cast<const float *>(cvs.out_buf.data());
+  cv::Mat pred(cvs.h, cvs.w, CV_32F, const_cast<float *>(map));
   cv::Mat bitmap;
   // SHARED DB parameters (detection::read_db_params), resolved once at load().
   //
@@ -230,7 +303,7 @@ std::vector<turbo_ocr::Box> MpsDetector::db_postprocess_(int orig_h, int orig_w)
   std::vector<std::vector<cv::Point>> contours_buf;
   std::vector<cv::Vec4i> hier_buf;
   return turbo_ocr::detection::extract_boxes_from_bitmap(
-      pred, bitmap, orig_h, orig_w, h_, w_, db_.box_thresh, db_.unclip_ratio,
+      pred, bitmap, orig_h, orig_w, cvs.h, cvs.w, db_.box_thresh, db_.unclip_ratio,
       turbo_ocr::detection::kMinBoxSide,
       turbo_ocr::detection::kMinUnclippedSide,
       shifted_buf, mask_buf, contours_buf, hier_buf);
@@ -239,7 +312,8 @@ std::vector<turbo_ocr::Box> MpsDetector::db_postprocess_(int orig_h, int orig_w)
 // SHARED canvas decision for a FIXED-CANVAS detector.
 //
 // MPSGraph compiles one graph per static input shape, so this backend holds a
-// single det canvas (h_ x w_, from the export's graph.json) and every page is
+// nearest loaded det canvas (each from its export's graph.json) and a page far
+// from every canvas's aspect is
 // resized onto it. That used to be an Apple-LOCAL stretch: the shared
 // aspect-preserving resize policy (short >= 64, long <= 1280, /32-rounded) was
 // never consulted, which made DET_LIMIT_TYPE / DET_LIMIT_SIDE_LEN / DET_MAX_SIDE
@@ -259,23 +333,26 @@ void MpsDetector::check_canvas_policy_(int orig_h, int orig_w) const {
   // Ignore warmup/thumbnail inputs: a synthetic 32x32 warmup image has no
   // meaningful aspect and would fire the warning on every process start.
   if (orig_h < 128 || orig_w < 128) return;
-  const std::pair<int, int> have[] = {{h_, w_}};
-  const auto [ch, cw] = turbo_ocr::detection::pick_det_canvas(orig_h, orig_w, have);
-  (void)ch; (void)cw; // single-canvas backend: always our own canvas
+  std::vector<std::pair<int, int>> have;
+  have.reserve(canvases_.size());
+  for (const auto &cv : canvases_) have.emplace_back(cv->h, cv->w);
+  const auto [ch, cw] = turbo_ocr::detection::pick_det_canvas(
+      orig_h, orig_w, have);
   const auto [want_h, want_w] = turbo_ocr::detection::compute_det_resize(
       orig_h, orig_w, turbo_ocr::detection::read_det_resize());
   const double want_ar = (double)want_w / std::max(1, want_h);
-  const double have_ar = (double)w_ / std::max(1, h_);
+  const double have_ar = (double)cw / std::max(1, ch);
   const double err = std::abs(std::log(have_ar / want_ar));
-  if (err > 0.15) { // ~16% aspect deviation
+  if (err > 0.15) { // ~16% aspect deviation even from the BEST loaded canvas
     static bool warned = false;
     if (!warned) {
       warned = true;
-      NSLog(@"[apple] det canvas %dx%d is %.0f%% off the shared resize policy's "
-            @"%dx%d for this page shape. MPSGraph is single-shape, so the page "
-            @"is stretched. Export a closer canvas (tools/modelgen/mps_export_rec.py) if "
-            @"this corpus has varied aspects.",
-            h_, w_, err * 100.0, want_h, want_w);
+      NSLog(@"[apple] nearest det canvas %dx%d is %.0f%% off the shared resize "
+            @"policy's %dx%d for this page shape (loaded canvases: %zu). "
+            @"MPSGraph is single-shape per canvas, so the page is stretched. "
+            @"Export a closer canvas (tools/modelgen/apple/) if this corpus "
+            @"has varied aspects.",
+            ch, cw, err * 100.0, want_h, want_w, canvases_.size());
     }
   }
 }
@@ -284,8 +361,10 @@ std::vector<turbo_ocr::Box> MpsDetector::run(const backend::ImageView &img,
                                              int orig_h, int orig_w,
                                              backend::DeviceQueue &queue) {
   if (!ready_ || img.empty()) return {};
+  select_canvas_(orig_h, orig_w);
   check_canvas_policy_(orig_h, orig_w);
-  if (coreml_) {
+  // The CoreML package is bound to ONE canvas; other canvases use MPSGraph.
+  if (coreml_ && active_ == coreml_canvas_) {
     // Resize+normalize stays a Metal kernel (its own command buffer, CHECKED
     // sync — CoreML reads in_buf_ on the host side right after); only the
     // forward pass moves to CoreML. Same in_buf_ in, same out_buf_ out, so
@@ -297,16 +376,18 @@ std::vector<turbo_ocr::Box> MpsDetector::run(const backend::ImageView &img,
       const unsigned long long mark = mq.sync_mark();
       {
         backend::BatchScope batch(queue);
-        kernels_.resize_normalize(img, static_cast<float *>(in_buf_.data()),
-                                  w_, h_, backend::norm::imagenet_bgr(), queue);
+        kernels_.resize_normalize(img, static_cast<float *>(active_->in_buf.data()),
+                                  active_->w, active_->h,
+                                  backend::norm::imagenet_bgr(), queue);
       }
       ok = mq.sync_ok(mark);
     }
     if (ok) {
       TURBO_APPLE_PROF("det.coreml(predict)");
       TURBO_APPLE_STAT(det_coreml);
-      ok = coreml_->predict(static_cast<float *>(in_buf_.data()),
-                            static_cast<float *>(out_buf_.data()), c_, h_, w_);
+      ok = coreml_->predict(static_cast<float *>(active_->in_buf.data()),
+                            static_cast<float *>(active_->out_buf.data()),
+                            active_->c, active_->h, active_->w);
     }
     if (!ok) {
       NSLog(@"[apple] det CoreML forward FAILED — returning no boxes for this "
@@ -355,7 +436,8 @@ backend::BoxesFuture MpsDetector::enqueue(const backend::ImageView &img,
   // Private lane — see the header for why the shared queue cannot be used.
   if (!async_q_) async_q_ = std::make_unique<MetalDeviceQueue>();
 
-  if (coreml_) {
+  select_canvas_(orig_h, orig_w);
+  if (coreml_ && active_ == coreml_canvas_) {
     // Async shape of the CoreML path: the resize rides the private lane, the
     // predict runs on the CoreML serial lane so enqueue() returns without
     // blocking, and collect() waits the semaphore. Single-slot (out_buf_ and
@@ -365,8 +447,9 @@ backend::BoxesFuture MpsDetector::enqueue(const backend::ImageView &img,
     const unsigned long long mark = amq.sync_mark();
     {
       backend::BatchScope batch(*async_q_);
-      kernels_.resize_normalize(img, static_cast<float *>(in_buf_.data()), w_,
-                                h_, backend::norm::imagenet_bgr(), *async_q_);
+      kernels_.resize_normalize(img, static_cast<float *>(active_->in_buf.data()),
+                                active_->w, active_->h,
+                                backend::norm::imagenet_bgr(), *async_q_);
     }
     CoremlDet *cd = coreml_.get();
     dispatch_async(cd->lane, ^{
@@ -375,8 +458,9 @@ backend::BoxesFuture MpsDetector::enqueue(const backend::ImageView &img,
       // semaphore below is always signalled.
       bool ok = as_metal(*async_q_).sync_ok(mark);
       if (ok)
-        ok = cd->predict(static_cast<float *>(in_buf_.data()),
-                         static_cast<float *>(out_buf_.data()), c_, h_, w_);
+        ok = cd->predict(static_cast<float *>(active_->in_buf.data()),
+                         static_cast<float *>(active_->out_buf.data()),
+                         active_->c, active_->h, active_->w);
       cd->pending_ok = ok;
       dispatch_semaphore_signal(cd->done);
     });

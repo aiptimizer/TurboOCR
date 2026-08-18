@@ -98,3 +98,6 @@ model.cache
 /.claude/
 python/turboocr/turbo_apple.metallib
 build-wheels/
+
+# User-local IDE config (interpreter choice etc.) — never commit.
+.vscode/
