@@ -843,14 +843,18 @@ def test_apple_native_bundle_provisioning(tmp_path, monkeypatch):
                                dict=str(cache / "keys.txt"), cls=None,
                                name="small")
 
-    # (c) download+extract: fake the release asset with an in-memory tar.
+    # (c) download+extract: fake the release asset with an in-memory tar in
+    # the REAL v2 layout — det export as a canvas subdir, no flat graph.json.
+    # (The old fake used the flat v1 layout, which is exactly how the
+    # re-extract-on-every-construction regression slipped past this test:
+    # the presence probe knew only the flat form.)
     calls = []
 
     def fake_download(rel, dest):
         calls.append(rel)
         buf = io.BytesIO()
         with tf.open(fileobj=buf, mode="w:gz") as t:
-            info = tf.TarInfo("det_small/graph.json")
+            info = tf.TarInfo("det_small/det_c992x768/graph.json")
             info.size = 2
             t.addfile(info, io.BytesIO(b"{}"))
         (cache / rel).write_bytes(buf.getvalue())
@@ -859,9 +863,19 @@ def test_apple_native_bundle_provisioning(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_download_apple_bundle", fake_download)
     assert store.ensure_apple_native(entry, resolved) is True
     assert calls == [f"apple_native_small.tar.gz"]
-    assert (cache / "det_small" / "graph.json").is_file()
+    assert (cache / "det_small" / "det_c992x768" / "graph.json").is_file()
 
-    # (a) second call: already provisioned, no new download.
+    # (a) second call: already provisioned (canvas layout!), no new download —
+    # and no re-extract: a poisoned archive would throw if extraction re-ran.
+    (cache / "apple_native_small.tar.gz").write_bytes(b"not a tar")
+    assert store.ensure_apple_native(entry, resolved) is True
+    assert len(calls) == 1
+
+    # (a') flat v1 layout is still recognized as provisioned.
+    import shutil
+    shutil.rmtree(cache / "det_small")
+    (cache / "det_small").mkdir()
+    (cache / "det_small" / "graph.json").write_bytes(b"{}")
     assert store.ensure_apple_native(entry, resolved) is True
     assert len(calls) == 1
 

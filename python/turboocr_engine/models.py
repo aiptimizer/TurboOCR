@@ -13,6 +13,7 @@ not the whole 1.5 GB bundle.
 
 from __future__ import annotations
 
+import glob
 import hashlib
 import os
 import platform
@@ -152,6 +153,20 @@ class ModelStore:
         """Public single-asset resolver (used for layout/doc_ori/etc.)."""
         return self._ensure(rel)
 
+    @staticmethod
+    def _det_export_present(det_export: str) -> bool:
+        """Is the MPSGraph det export already provisioned at ``det_export``?
+
+        Two layouts count: the flat v1 form (``det_<tier>/graph.json``) and
+        the v2 canvas form (``det_<tier>/det_c<H>x<W>/graph.json`` — the
+        engine JIT-specializes from that one export). The probe MUST accept
+        both, or a v2-provisioned cache re-extracts the whole bundle archive
+        on every OCR() construction (measured 0.6 s for tiny, several seconds
+        for medium) while reporting the bundle as absent."""
+        if os.path.isfile(os.path.join(det_export, "graph.json")):
+            return True
+        return bool(glob.glob(os.path.join(det_export, "det_c*", "graph.json")))
+
     def ensure_apple_native(self, entry: ModelEntry, resolved: "ResolvedModel") -> bool:
         """Best-effort: provision the Apple NATIVE-mode export bundle next to
         the resolved models, so ``backend="apple"`` runs Metal+MPSGraph with
@@ -180,7 +195,7 @@ class ModelStore:
             if entry.name not in ("tiny", "small", "medium"):
                 return False  # script models have no native bundles
             det_export = os.path.splitext(resolved.det)[0]
-            if os.path.isfile(os.path.join(det_export, "graph.json")):
+            if self._det_export_present(det_export):
                 return True
             cache = os.path.abspath(self.cache_dir)
             if os.path.abspath(os.path.dirname(resolved.det)) != cache:
@@ -195,7 +210,7 @@ class ModelStore:
                 # 'data' filter (Python 3.12+): refuses absolute paths,
                 # traversal and special files from the archive.
                 tf.extractall(self.cache_dir, filter="data")
-            return os.path.isfile(os.path.join(det_export, "graph.json"))
+            return self._det_export_present(det_export)
         except Exception as exc:  # pragma: no cover - network/broken archive
             print(f"[turboocr] apple native bundle unavailable ({exc}); "
                   "backend='apple' uses the CoreML fallback.", file=sys.stderr)
