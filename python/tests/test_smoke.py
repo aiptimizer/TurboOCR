@@ -935,3 +935,225 @@ def test_async_wrappers_delegate_and_are_coroutines():
         ("batch", ["a", "b"], {"batch_size": 4}),
         ("pdf", "doc.pdf", {"dpi": 200}),
     ]
+
+
+def test_parallel_map_ordered_bounded_and_contained():
+    """_parallel_map (ordered mode) is the page fan-out under read_pdf/pdf_to_searchable:
+    (a) results come back in INPUT order even when later items finish first,
+    (b) at most `workers` calls run concurrently and at most workers+lookahead
+    items are in flight (this is what bounds retained page rasters),
+    (c) workers<=1 is a plain inline loop (no threads at all),
+    (d) a failing item re-raises at its position and queued work is cancelled.
+    """
+    import threading
+    import time
+
+    from turboocr_engine.pipeline import _parallel_map
+
+    # (a)+(b): earlier items sleep LONGER, so completion order is reversed —
+    # the yield order must still be input order.
+    running = 0
+    peak = 0
+    mu = threading.Lock()
+
+    def slow_inverse(i):
+        nonlocal running, peak
+        with mu:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.03 - i * 0.002)
+        with mu:
+            running -= 1
+        return i * 10
+
+    out = list(_parallel_map(range(8), slow_inverse, workers=3))
+    assert out == [i * 10 for i in range(8)]
+    assert peak <= 3
+
+    # (b) in-flight window: the producer must not run ahead of the consumer by
+    # more than workers+lookahead items.
+    produced = []
+
+    def counting_items():
+        for i in range(20):
+            produced.append(i)
+            yield i
+
+    consumed = 0
+    for _ in _parallel_map(counting_items(), lambda i: i, workers=2, lookahead=1):
+        consumed += 1
+        assert len(produced) - consumed <= 2 + 1
+
+    # (c) inline degenerate path: no thread may be created.
+    before = threading.active_count()
+    assert list(_parallel_map(range(4), lambda i: i + 1, workers=1)) == [1, 2, 3, 4]
+    assert threading.active_count() == before
+
+    # (d) exception propagation at the failing item's position.
+    def boom(i):
+        if i == 2:
+            raise RuntimeError("page 2 failed")
+        return i
+
+    got = []
+    try:
+        for v in _parallel_map(range(6), boom, workers=3):
+            got.append(v)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "page 2 failed" in str(e)
+    assert got == [0, 1]  # everything before the failure, in order
+
+
+def test_read_pdf_uses_parallel_map(monkeypatch):
+    """read_pdf must route pages through _parallel_map with the replica
+    count — pin the wiring so a refactor cannot silently fall back to the
+    sequential loop."""
+    from turboocr_engine import pipeline as P
+
+    calls = {}
+
+    def fake_map(items, fn, workers, ordered=True, lookahead=1):
+        calls["workers"] = workers
+        calls["ordered"] = ordered
+        for item in items:
+            yield fn(item)
+
+    monkeypatch.setattr(P, "_parallel_map", fake_map)
+
+    ocr = object.__new__(P.OCR)  # no native engine needed
+    ocr.replicas = 3
+    pages_read = []
+
+    def fake_read_array(arr, *, drop_score, page, keep_image):
+        pages_read.append(page)
+        r = P.PageResult(width=1, height=1, page=page)
+        return r
+
+    ocr._read_array = fake_read_array
+
+    import sys
+    import types
+
+    fake_pdf_mod = types.SimpleNamespace(
+        pdf_page_count=lambda p: 3,
+        render_pdf=lambda p, dpi, pages, max_pages: iter(
+            [(1, "a1"), (2, "a2"), (3, "a3")]
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "turboocr_engine.pdf", fake_pdf_mod)
+
+    doc = P.OCR.read_pdf(ocr, "fake.pdf")
+    assert calls["workers"] == 3 and calls["ordered"] is True
+    assert pages_read == [1, 2, 3]
+    assert [p.page for p in doc.pages] == [1, 2, 3]
+
+
+def test_parallel_map_completion_mode_bounded_and_complete():
+    """_parallel_map ordered=False (read_pdf_stream's completion mode): yields the
+    full result set in completion order, never exceeds the worker bound, and
+    a failure propagates. The inline workers=1 path stays ordered."""
+    import threading
+    import time
+
+    from turboocr_engine.pipeline import _parallel_map
+
+    running = 0
+    peak = 0
+    mu = threading.Lock()
+
+    def slow_inverse(i):
+        nonlocal running, peak
+        with mu:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.03 - i * 0.002)
+        with mu:
+            running -= 1
+        return i
+
+    out = list(_parallel_map(range(8), slow_inverse, workers=3, ordered=False))
+    assert sorted(out) == list(range(8))  # complete...
+    assert out != list(range(8))          # ...and genuinely completion-ordered
+    assert peak <= 3
+
+    assert list(_parallel_map(range(4), lambda i: i, workers=1, ordered=False)) == [0, 1, 2, 3]
+
+    def boom(i):
+        if i == 1:
+            raise RuntimeError("bad page")
+        return i
+
+    with pytest.raises(RuntimeError, match="bad page"):
+        list(_parallel_map(range(5), boom, workers=2, ordered=False))
+
+
+def _fake_pdf_ocr(monkeypatch, n_pages=4):
+    """An OCR shell whose read_pdf_stream renders n fake pages and 'OCRs' them
+    without the native engine."""
+    import sys
+    import types
+
+    from turboocr_engine import pipeline as P
+
+    ocr = object.__new__(P.OCR)
+    ocr.replicas = 3
+
+    def fake_read_array(arr, *, drop_score, page, keep_image):
+        return P.PageResult(width=1, height=1, page=page)
+
+    ocr._read_array = fake_read_array
+    fake_pdf_mod = types.SimpleNamespace(
+        pdf_page_count=lambda p: n_pages,
+        render_pdf=lambda p, dpi, pages, max_pages: iter(
+            (i, f"arr{i}") for i in range(1, n_pages + 1)
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "turboocr_engine.pdf", fake_pdf_mod)
+    return P, ocr
+
+
+def test_read_pdf_stream_modes_and_early_close(monkeypatch):
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=6)
+
+    # ordered: page order, streaming.
+    got = [pr.page for pr in P.OCR.read_pdf_stream(ocr, "f.pdf")]
+    assert got == [1, 2, 3, 4, 5, 6]
+
+    # unordered: full set, each result self-identifies via .page.
+    got = sorted(pr.page for pr in P.OCR.read_pdf_stream(ocr, "f.pdf", ordered=False))
+    assert got == [1, 2, 3, 4, 5, 6]
+
+    # early close: taking one page and closing must not leak worker threads.
+    import threading
+    import time
+
+    gen = P.OCR.read_pdf_stream(ocr, "f.pdf")
+    first = next(gen)
+    assert first.page == 1
+    gen.close()
+    deadline = time.time() + 5
+    while threading.active_count() > 1 and time.time() < deadline:
+        time.sleep(0.01)
+    assert threading.active_count() == 1
+
+
+def test_aread_pdf_stream_iterates_and_cleans_up(monkeypatch):
+    import asyncio
+
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=5)
+
+    async def consume_all():
+        return [pr.page async for pr in P.OCR.aread_pdf_stream(ocr, "f.pdf")]
+
+    assert asyncio.run(consume_all()) == [1, 2, 3, 4, 5]
+
+    async def consume_two():
+        out = []
+        async for pr in P.OCR.aread_pdf_stream(ocr, "f.pdf"):
+            out.append(pr.page)
+            if len(out) == 2:
+                break  # must trigger clean shutdown of the sync generator
+        return out
+
+    assert asyncio.run(consume_two()) == [1, 2]

@@ -125,7 +125,30 @@ doc = ocr.read_pdf(pdf, *, dpi=150, pages=None, max_pages=None, ...)
 ```
 
 Renders with PDFium (the `pdf` extra: `pip install "turboocr[cpu,pdf]"`) and
-OCRs each page. Pass `keep_image=False` for long documents.
+OCRs each page. Pages fan out across the replica pool: with
+`OCR(replicas=3)`, a 24-page scan measured **2.41×** faster than the
+sequential read (24.5 → 59 pages/s on Apple silicon, tiny tier),
+byte-identical output — results are assembled strictly in page order, and at
+most `replicas + 1` page rasters are in flight, so memory stays bounded on
+large documents. `replicas=1` is exactly the sequential read.
+`pdf_to_searchable(...)` uses the same fan-out while still writing pages in
+order. Pass `keep_image=False` for long documents.
+
+```python
+for page in ocr.read_pdf_stream(pdf, ordered=False):   # generator of PageResult
+    handle(page)          # each page as soon as it is ready
+
+async for page in ocr.aread_pdf_stream(pdf):           # async twin
+    await handle(page)
+```
+
+`read_pdf_stream` is the streaming form — `read_pdf` is exactly this drained
+into a `DocumentResult`. It yields each page as soon as it is ready (measured:
+first page after 57 ms where the full 24-page document takes ~400 ms), with
+the same replica fan-out and bounded memory. `ordered=True` (default) yields
+strictly in page order; `ordered=False` yields in completion order — no
+finished page waits on a slower earlier one; reassemble by `PageResult.page`.
+Breaking out of either loop cancels the queued pages.
 
 ## Async
 
@@ -147,7 +170,9 @@ measured on Apple silicon: six gathered `aread` calls at `replicas=3` ran
 **2.65×** faster than the same six serial reads, byte-identical output.
 With `replicas=1` awaiting serializes exactly like the sync API. When the
 image list is known up front, prefer `aread_batch` — the batch path feeds the
-detector real batches.
+detector real batches. A single `aread_pdf` already uses every replica (the
+pages fan out inside the call), so there is no need to split a document
+yourself to get concurrency.
 
 **One-shots and introspection.** For a single call, the module-level
 `turboocr_engine.read(image, model=..., backend=...)` and

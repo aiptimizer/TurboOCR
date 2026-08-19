@@ -13,7 +13,7 @@ import contextlib
 import os
 import queue
 import threading
-from typing import List, Optional
+from typing import AsyncIterator, Iterator, List, Optional
 
 import numpy as np
 
@@ -62,6 +62,65 @@ def _make_progress(progress, total, unit):
         print(f"\r[turboocr] {done}{tot} {unit}", end=end, file=_sys.stderr, flush=True)
 
     return report
+
+
+def _parallel_map(items, fn, workers: int, *, ordered: bool = True,
+                  lookahead: int = 1):
+    """Map ``fn`` over the ``items`` iterator with ``workers`` threads and a
+    bounded look-ahead window, yielding results in input order
+    (``ordered=True``) or as each completes (``ordered=False``).
+
+    This is the page fan-out primitive under :meth:`OCR.read_pdf` /
+    :meth:`OCR.read_pdf_stream` / :meth:`OCR.pdf_to_searchable`: producing an
+    item (rendering a PDF page, ~5 ms) is far cheaper than mapping it (OCR,
+    50-250 ms), so the producer stays on the calling thread and at most
+    ``workers + lookahead`` items are in flight — which is what bounds
+    retained page rasters. Ordered mode keeps progress monotone and assembles
+    documents identically to a sequential run (each ``fn`` call is
+    independent); completion mode never lets a slow page hold finished ones
+    back — consumers reassemble by ``PageResult.page``.
+
+    ``workers <= 1`` degenerates to a plain inline loop: zero threads, the
+    exact sequential semantics (where completion order and input order
+    coincide, so ``ordered`` is moot).
+
+    A failing ``fn`` re-raises here; queued-but-unstarted work is cancelled,
+    already-running calls finish and are discarded (same containment as
+    read_batch's fan-out). Closing the generator early cleans up the same
+    way.
+    """
+    if workers <= 1:
+        for item in items:
+            yield fn(item)
+        return
+
+    from collections import deque
+    from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+
+    window = workers + max(0, lookahead)
+    it = iter(items)
+    pending: "deque" = deque()  # FIFO for ordered mode; a plain bag otherwise
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        try:
+            exhausted = False
+            while True:
+                while not exhausted and len(pending) < window:
+                    try:
+                        pending.append(ex.submit(fn, next(it)))
+                    except StopIteration:
+                        exhausted = True
+                if not pending:
+                    break
+                if ordered:
+                    yield pending.popleft().result()
+                else:
+                    done, rest = wait(pending, return_when=FIRST_COMPLETED)
+                    pending = deque(rest)
+                    for f in done:
+                        yield f.result()
+        finally:
+            for f in pending:
+                f.cancel()
 
 
 def _chunks(seq, n: int):
@@ -676,15 +735,62 @@ class OCR:
         extra (``pip install "turboocr[cpu,pdf]"``). ``progress`` may be True (log to
         stderr) or a callable ``progress(done, total)``.
 
+        Pages fan out across the replica pool: with ``OCR(replicas=N)``, up to
+        N pages are OCR'd concurrently (rendering stays on the calling thread
+        — it is ~5 ms/page against 50-250 ms of OCR). Results are assembled
+        strictly in page order and each page's result is independent of the
+        others, so the document is identical to a sequential run; ``replicas=1``
+        IS the sequential run. At most ``replicas + 1`` page rasters are in
+        flight at any moment.
+
         ``keep_image=False`` drops each page raster once the page is read.
         The default keeps them (so ``save_searchable_pdf`` / ``draw`` work),
         but a raster is ~6 MB at 150 DPI, so a few hundred pages is GBs of
         retained memory — pass False when you only want the text."""
-        from .pdf import pdf_page_count, render_pdf
-
         doc = DocumentResult(
             source=str(pdf) if isinstance(pdf, (str, os.PathLike)) else ""
         )
+        for pr in self.read_pdf_stream(
+            pdf, dpi=dpi, pages=pages, drop_score=drop_score,
+            max_pages=max_pages, progress=progress, keep_image=keep_image,
+        ):
+            doc.pages.append(pr)
+        return doc
+
+    def read_pdf_stream(
+        self,
+        pdf: ImageInput,
+        *,
+        dpi: int = 150,
+        pages: Optional[List[int]] = None,
+        drop_score: float = DROP_SCORE,
+        max_pages: Optional[int] = None,
+        ordered: bool = True,
+        progress=None,
+        keep_image: Optional[bool] = None,
+    ) -> Iterator[PageResult]:
+        """Stream a PDF's pages as a generator of :class:`PageResult`, yielding
+        each page as soon as it is ready instead of assembling a whole
+        :class:`DocumentResult` first — :meth:`read_pdf` is exactly this,
+        drained into a document.
+
+        Pages OCR across the replica pool with the same bounded window as
+        :meth:`read_pdf` (at most ``replicas + 1`` page rasters in flight), so
+        streaming a thousand-page scan holds a handful of pages of memory, not
+        the document.
+
+        ``ordered=True`` (default) yields strictly in page order — the first
+        page arrives as soon as IT is done, which for a long document is far
+        before the last page even renders. ``ordered=False`` yields in
+        COMPLETION order: no finished page ever waits on a slower earlier one;
+        use ``PageResult.page`` (1-based) to reassemble. Each page's result is
+        independent, so both modes produce the same set of results.
+
+        ``progress`` counts YIELDED pages (monotone in both modes). The
+        generator cleans up after itself when closed early — breaking out of
+        the loop cancels queued pages."""
+        from .pdf import pdf_page_count, render_pdf
+
         if pages is not None:
             total = min(len(pages), max_pages) if max_pages else len(pages)
         else:
@@ -692,16 +798,24 @@ class OCR:
             if max_pages:
                 total = min(total, max_pages)
         report = _make_progress(progress, total, "pages")
-        for i, (page_no, arr) in enumerate(
-            render_pdf(pdf, dpi=dpi, pages=pages, max_pages=max_pages), 1
-        ):
+
+        def _ocr_page(item):
+            page_no, arr = item
             pr = self._read_array(
                 arr, drop_score=drop_score, page=page_no, keep_image=keep_image
             )
             pr.dpi = dpi
-            doc.pages.append(pr)
+            return pr
+
+        for i, pr in enumerate(
+            _parallel_map(
+                render_pdf(pdf, dpi=dpi, pages=pages, max_pages=max_pages),
+                _ocr_page, self.replicas, ordered=ordered,
+            ),
+            1,
+        ):
+            yield pr
             report(i)
-        return doc
 
     def pdf_to_searchable(
         self,
@@ -715,30 +829,22 @@ class OCR:
         progress=None,
     ) -> str:
         """Stream a PDF through OCR into a SEARCHABLE PDF (page image + invisible
-        text layer), writing ``output_pdf``. Streams page-by-page — only one
-        page raster is held at a time — so it scales to large scans. Requires
-        the ``pdf`` extra (pypdfium2 + reportlab)."""
-        from .pdf import pdf_page_count, render_pdf
+        text layer), writing ``output_pdf``. This is :meth:`read_pdf_stream`
+        (ordered) piped into the PDF writer: pages OCR across the replica pool
+        but the output is written strictly in page order, holding at most
+        ``replicas + 1`` page rasters at a time — so it scales to large scans.
+        ``keep_image=True`` is forced: the output embeds each page's raster,
+        regardless of the engine-level ``keep_image`` default. Requires the
+        ``pdf`` extra (pypdfium2 + reportlab)."""
         from .searchable_pdf import build_searchable_pdf
 
-        if pages is not None:
-            total = min(len(pages), max_pages) if max_pages else len(pages)
-        else:
-            total = pdf_page_count(input_pdf) if progress else 0
-            if max_pages:
-                total = min(total, max_pages)
-        report = _make_progress(progress, total, "pages")
-
-        def _page_stream():
-            for i, (page_no, arr) in enumerate(
-                render_pdf(input_pdf, dpi=dpi, pages=pages, max_pages=max_pages), 1
-            ):
-                pr = self._read_array(arr, drop_score=drop_score, page=page_no)
-                pr.dpi = dpi
-                yield pr
-                report(i)  # raster is dropped as soon as this page is written
-
-        build_searchable_pdf(_page_stream(), out_path=output_pdf)
+        build_searchable_pdf(
+            self.read_pdf_stream(
+                input_pdf, dpi=dpi, pages=pages, drop_score=drop_score,
+                max_pages=max_pages, progress=progress, keep_image=True,
+            ),
+            out_path=output_pdf,
+        )
         return output_pdf
 
     # -- introspection -----------------------------------------------------
@@ -774,10 +880,38 @@ class OCR:
         return await asyncio.to_thread(self.read_batch, images, **kwargs)
 
     async def aread_pdf(self, pdf: ImageInput, **kwargs) -> DocumentResult:
-        """Async :meth:`read_pdf` — same parameters, same result."""
+        """Async :meth:`read_pdf` — same parameters, same result. Pages
+        already fan out across the replica pool inside one call, so a single
+        awaited ``aread_pdf`` uses every replica; gathering several documents
+        at once shares the same pool between them."""
         import asyncio
 
         return await asyncio.to_thread(self.read_pdf, pdf, **kwargs)
+
+    async def aread_pdf_stream(
+        self, pdf: ImageInput, **kwargs
+    ) -> AsyncIterator[PageResult]:
+        """Async :meth:`read_pdf_stream` — ``async for page in
+        ocr.aread_pdf_stream(pdf)`` yields each :class:`PageResult` as it is
+        ready (``ordered=False`` for completion order), without blocking the
+        event loop: each step of the underlying generator runs in a worker
+        thread, while the replica pool keeps OCR-ing the queued pages between
+        steps. Breaking out of the loop cleans up the queued work."""
+        import asyncio
+
+        gen = self.read_pdf_stream(pdf, **kwargs)
+        sentinel = object()
+        try:
+            while True:
+                item = await asyncio.to_thread(next, gen, sentinel)
+                if item is sentinel:
+                    return
+                yield item
+        finally:
+            # Close the sync generator off-loop: closing triggers its cleanup
+            # (cancel queued pages, drain the executor), which can block
+            # briefly on in-flight OCR.
+            await asyncio.to_thread(gen.close)
 
     def close(self) -> None:
         """Release the native ONNX sessions. The engine is unusable afterward.
