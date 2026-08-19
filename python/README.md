@@ -60,12 +60,12 @@ install line for it.
 
 **On PyPI: cpu and openvino.** `turboocr-engine-cpu` (Linux, macOS with the
 Apple backend, Windows), `turboocr-engine-openvino` and the `turboocr`
-umbrella are published; because `4.0.0a3` is a pre-release, pip needs `--pre`
+umbrella are published; because `4.0.0a4` is a pre-release, pip needs `--pre`
 or an exact pin to select it:
 
 ```bash
 pip install --pre "turboocr[cpu]"       # or [openvino]
-pip install "turboocr[cpu]==4.0.0a3"    # equivalent, explicit
+pip install "turboocr[cpu]==4.0.0a4"    # equivalent, explicit
 ```
 
 **Not on PyPI yet:** the NVIDIA wheels (`-cuda12` / `-cuda13`) — built and
