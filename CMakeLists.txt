@@ -58,6 +58,12 @@ endmacro()
 # previously hand-duplicated blocks did.
 macro(turbo_setup_grpc_codegen)
   turbo_find_protobuf()
+  # Homebrew's gRPC config (1.76+) references OpenSSL::SSL and expects the
+  # CONSUMER to have imported it; without this, generation fails with
+  # "OpenSSL::SSL ... target was not found" on every macOS source build.
+  # QUIET + non-REQUIRED: where OpenSSL is absent the CONFIG lookup below
+  # fails as before and the pkg-config fallback takes over unchanged.
+  find_package(OpenSSL QUIET)
   find_package(gRPC CONFIG QUIET)
   if(NOT gRPC_FOUND)
     find_package(PkgConfig REQUIRED)

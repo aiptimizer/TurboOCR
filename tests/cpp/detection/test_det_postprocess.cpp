@@ -4,6 +4,7 @@
 
 #include "turbo_ocr/analysis/detection/det_config.h"
 #include "turbo_ocr/analysis/detection/det_postprocess.h"
+#include "turbo_ocr/core/db_post_config.h" // kMaxDbComponents (candidate budget)
 
 using turbo_ocr::Box;
 using turbo_ocr::detection::box_score_fast;
@@ -183,4 +184,64 @@ TEST_CASE("DET_LIMIT_TYPE=max without DET_LIMIT_SIDE_LEN targets the max-side ca
     ::unsetenv("DET_MAX_SIDE_LIMIT");
     ::unsetenv("DET_LIMIT_SIDE_LEN");
   }
+}
+
+TEST_CASE("candidate budget keeps the largest regions, not scan-order winners",
+          "[det_postprocess]") {
+  // A dense page: >3000 legitimate small candidates (4x4 px, full-probability,
+  // so they pass every cheap filter and genuinely compete for the budget)
+  // plus five large text-line boxes at the corners and center. The old
+  // behaviour sliced the first kMaxDbComponents contours in findContours scan
+  // order, so whichever big boxes fell in the dropped tail vanished — exactly
+  // PaddleOCR's silent max_candidates slice. Merit selection must keep ALL
+  // five regardless of where they sit on the page.
+  const int S = 1024;
+  cv::Mat pred(S, S, CV_32F, cv::Scalar(0.0f));
+  cv::Mat bitmap(S, S, CV_8U, cv::Scalar(0));
+
+  const auto stamp = [&](int x, int y, int w, int h) {
+    cv::Rect r(x, y, w, h);
+    pred(r).setTo(1.0f);
+    bitmap(r).setTo(255);
+  };
+
+  // Five large boxes (60x20) far apart.
+  const int bw = 60, bh = 20;
+  const int big[5][2] = {{8, 8},        {S - 76, 8},        {8, S - 36},
+                         {S - 76, S - 36}, {S / 2 - 30, S / 2 - 10}};
+  for (const auto &b : big) stamp(b[0], b[1], bw, bh);
+
+  // 4x4 specks on a 14px grid, skipping cells that touch a big box.
+  int specks = 0;
+  for (int y = 60; y + 4 < S - 60 && specks < 3100; y += 14) {
+    for (int x = 60; x + 4 < S - 60 && specks < 3100; x += 14) {
+      bool clash = false;
+      for (const auto &b : big)
+        if (std::abs(x - b[0]) < 90 && std::abs(y - b[1]) < 50) clash = true;
+      if (clash) continue;
+      stamp(x, y, 4, 4);
+      ++specks;
+    }
+  }
+  REQUIRE(specks + 5 > turbo_ocr::detection::kMaxDbComponents);
+
+  std::vector<cv::Point> shifted;
+  cv::Mat mask;
+  std::vector<std::vector<cv::Point>> contours;
+  std::vector<cv::Vec4i> hier;
+  const auto boxes = turbo_ocr::detection::extract_boxes_from_bitmap(
+      pred, bitmap, S, S, S, S, /*box_thresh=*/0.3f, /*unclip=*/1.4f,
+      /*min_box_side=*/3.0f, /*min_unclipped_side=*/5.0f, shifted, mask,
+      contours, hier);
+
+  // The budget itself must hold...
+  CHECK(static_cast<int>(boxes.size()) <=
+        turbo_ocr::detection::kMaxDbComponents);
+  // ...and every large region must have survived it.
+  int wide = 0;
+  for (const auto &b : boxes) {
+    const int w = std::abs(b[1][0] - b[0][0]);
+    if (w >= bw - 10) ++wide;
+  }
+  CHECK(wide == 5);
 }

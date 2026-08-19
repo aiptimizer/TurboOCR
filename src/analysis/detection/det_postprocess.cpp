@@ -5,9 +5,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <iostream>
 #include <ranges>
+#include <utility>
+#include <vector>
 #include <opencv2/imgproc.hpp>
 
 using turbo_ocr::Box;
@@ -174,25 +177,67 @@ std::vector<Box> extract_boxes_from_bitmap(
                 "shared DB budget changed — re-verify the GPU scratch sizing "
                 "that the vendor static_asserts pin to it");
   const int total = static_cast<int>(contours_buf.size());
-  const int num_contours = std::min(total, kMaxCandidates);
-  if (total > kMaxCandidates) {
-    std::cerr << "[Det] WARNING: truncated to " << kMaxCandidates
-              << " contours (found " << total << ")\n";
-  }
 
-  for (int i = 0; i < num_contours; ++i) {
-    const auto &contour = contours_buf[i];
-    if (contour.size() <= 2)
+  // Spend the budget on MERIT, not scan order. PaddleOCR's DBPostProcess
+  // slices the first max_candidates=1000 contours in findContours order and
+  // silently drops the rest — on a dense page (a UI screenshot easily emits
+  // 3000+ components) that discards whole spatial regions unexamined, since
+  // scan order is position, not quality. Here the free rejects (degenerate
+  // point counts, sub-3px bounding rects — the specks that dominate dense
+  // pages) run over EVERY contour first, which on real pages usually brings
+  // the survivors under budget with nothing dropped at all; only if genuine
+  // candidates still exceed it are the LARGEST kept, so what goes is by
+  // construction the least likely to be a text line. The bounding rect is
+  // computed once per contour and reused as both the filter and the rank.
+  std::vector<std::pair<long, int>> cand; // (bounding-rect area, contour idx)
+  cand.reserve(static_cast<std::size_t>(total));
+  for (int i = 0; i < total; ++i) {
+    const auto &c = contours_buf[i];
+    if (c.size() <= 2)
       continue;
-
-    const cv::Rect br = cv::boundingRect(contour);
+    const cv::Rect br = cv::boundingRect(c);
     if (br.width < 3 || br.height < 3)
       continue;
+    cand.emplace_back(static_cast<long>(br.width) * br.height, i);
+  }
+  if (static_cast<int>(cand.size()) > kMaxCandidates) {
+    // Partial-select the largest; ties broken by index so the kept set is
+    // deterministic. Restore index order afterwards — the filters below are
+    // order-independent, but the returned boxes should not depend on the
+    // selection algorithm's internal ordering.
+    std::nth_element(cand.begin(), cand.begin() + kMaxCandidates, cand.end(),
+                     [](const std::pair<long, int> &a,
+                        const std::pair<long, int> &b) {
+                       return a.first != b.first ? a.first > b.first
+                                                 : a.second < b.second;
+                     });
+    // A note, not a warning: the dropped candidates are the smallest specks
+    // on an unusually dense page, which the score/size filters below would
+    // almost certainly have rejected anyway. Logged once per process.
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+      std::cerr << "[Det] dense page: " << cand.size()
+                << " candidate regions after filtering; scoring the "
+                << kMaxCandidates
+                << " largest (further dense pages not logged)\n";
+    }
+    cand.resize(static_cast<std::size_t>(kMaxCandidates));
+    std::sort(cand.begin(), cand.end(),
+              [](const std::pair<long, int> &a, const std::pair<long, int> &b) {
+                return a.second < b.second;
+              });
+  }
+
+  for (const auto &[area, idx] : cand) {
+    (void)area;
+    const auto &contour = contours_buf[idx];
 
     // Filters below are commutative (all reject via `continue`), so the kept
     // set is order-independent. The min-side test runs before the score to
     // match PaddleOCR's ordering and to skip the area-proportional
     // fillPoly+mean of box_score_fast on candidates too thin to survive.
+    // (The free rejects — point count, sub-3px rect — already ran above,
+    // before the candidate budget.)
     float ssid = 0.0f;
     (void)get_mini_boxes(contour, ssid);
     if (ssid < min_box_side)

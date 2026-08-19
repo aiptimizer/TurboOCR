@@ -13,6 +13,7 @@
 #import <dispatch/dispatch.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -205,13 +206,17 @@ bool MpsDetector::load(const std::string &model_path) {
   cache_cap_ = (std::size_t)env::env_int("TURBO_APPLE_DET_CANVAS_CACHE", 6, 2, 32);
   if (jit_) {
     if (source_.load(dirs[0])) {
-      const auto chw = source_.input_chw();
-      NSLog(@"[apple] det: JIT canvas mode (shared 128-grid snap per page; "
-            @"template %dx%d from %s; cache cap %zu). One-time compile per new "
-            @"canvas, then shape-independent speed. TURBO_APPLE_DET_JIT=0 "
-            @"restores the fixed canvas set.",
-            chw.size() == 3 ? chw[1] : 0, chw.size() == 3 ? chw[2] : 0,
-            dirs[0].c_str(), cache_cap_);
+      // Once per PROCESS, not per detector: a replica pool constructs one
+      // detector per replica, and repeating an identical banner three times
+      // reads like something is wrong when nothing is.
+      static std::atomic<bool> logged{false};
+      if (!logged.exchange(true)) {
+        const auto chw = source_.input_chw();
+        NSLog(@"[apple] det: dynamic page shapes (engine specialized per "
+              @"shape from the %dx%d export, cached). TURBO_APPLE_DET_JIT=0 "
+              @"pins the exported canvas instead.",
+              chw.size() == 3 ? chw[1] : 0, chw.size() == 3 ? chw[2] : 0);
+      }
       ready_ = true;
       return true; // canvases_ fills lazily via jit_canvas_()
     }
@@ -286,9 +291,15 @@ MpsDetector::DetCanvas *MpsDetector::jit_canvas_(int h, int w) {
       if (p->last_use < oldest) { oldest = p->last_use; victim = i; }
     }
     if (victim == canvases_.size()) break; // only protected canvases left
-    NSLog(@"[apple] det canvas cache full (%zu/%zu): evicting %dx%d "
-          @"(TURBO_APPLE_DET_CANVAS_CACHE raises the cap)",
-          canvases_.size(), cache_cap_, canvases_[victim]->h, canvases_[victim]->w);
+    // Eviction is near-free to undo (a re-specialization of a recently seen
+    // shape measures ~7 ms — Metal keeps its own compiled-kernel caches), so
+    // this is a note for the curious, once per process, not a per-event alarm.
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true)) {
+      NSLog(@"[apple] det: page shapes exceed the engine cache (%zu); "
+            @"recycling least-recently-used (TURBO_APPLE_DET_CANVAS_CACHE "
+            @"raises it; further recycling not logged)", cache_cap_);
+    }
     canvases_.erase(canvases_.begin() + (std::ptrdiff_t)victim);
   }
 
@@ -312,8 +323,14 @@ MpsDetector::DetCanvas *MpsDetector::jit_canvas_(int h, int w) {
     NSLog(@"[apple] det canvas %dx%d: buffer allocation failed", h, w);
     return nullptr;
   }
-  NSLog(@"[apple] det canvas %dx%d specialized in %.0f ms (one-time; cache %zu/%zu)",
-        cv->h, cv->w, ms, canvases_.size() + 1, cache_cap_);
+  // Only compiles that COST something get a line (a fresh shape on a cold
+  // Metal cache runs 50-400 ms; re-specializing a recently seen shape is
+  // ~7 ms and logging those turns a normal varied-shape workload into a
+  // wall of noise — the exact confusion the old per-canvas log caused).
+  if (ms > 50.0) {
+    NSLog(@"[apple] det: compiled engine for %dx%d pages in %.0f ms "
+          @"(one-time per shape)", cv->h, cv->w, ms);
+  }
   cv->last_use = ++use_tick_;
   canvases_.push_back(std::move(cv));
   return canvases_.back().get();
