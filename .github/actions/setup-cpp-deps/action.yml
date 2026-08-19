@@ -11,8 +11,39 @@ runs:
     - name: APT packages
       shell: bash
       run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
+        # Mirror stalls are the #1 cause of cancelled CI jobs here: apt would
+        # sit on a dead archive.ubuntu.com connection with NO timeout until the
+        # 30-minute job limit killed the whole run (observed repeatedly, e.g.
+        # a hang right after the InRelease fetches). Three defenses, all bounded:
+        #   - hard network timeouts + retries INSIDE apt, so a dead mirror
+        #     fails in seconds and is retried instead of hanging forever;
+        #   - force IPv4 (runner IPv6 to the archive is a known stall mode);
+        #   - one bounded outer retry loop with `timeout` as the backstop, so
+        #     the step's worst case is ~7 minutes, never the job limit.
+        # Persist the acquire settings machine-wide so every LATER apt call in
+        # the same job (clang-tidy/cppcheck installs etc.) inherits them too.
+        printf '%s\n' \
+          'Acquire::Retries "5";' \
+          'Acquire::http::Timeout "30";' \
+          'Acquire::https::Timeout "30";' \
+          'Acquire::ForceIPv4 "true";' | sudo tee /etc/apt/apt.conf.d/99turbo-ci >/dev/null
+        APT_OPTS=(-o Acquire::Retries=5
+                  -o Acquire::http::Timeout=30
+                  -o Acquire::https::Timeout=30
+                  -o Acquire::ForceIPv4=true)
+        apt_bounded() {
+          local attempt
+          for attempt in 1 2 3; do
+            if sudo timeout 420 apt-get "${APT_OPTS[@]}" "$@"; then
+              return 0
+            fi
+            echo "::warning::apt-get $1 attempt ${attempt} failed/stalled; retrying"
+            sleep 10
+          done
+          return 1
+        }
+        apt_bounded update
+        apt_bounded install -y --no-install-recommends \
           build-essential cmake ninja-build pkg-config \
           libopencv-dev libwebp-dev libturbojpeg0-dev \
           libgrpc++-dev libc-ares-dev libprotobuf-dev protobuf-compiler protobuf-compiler-grpc \
