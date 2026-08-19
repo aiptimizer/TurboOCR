@@ -42,30 +42,31 @@ in; the engine name on the right is what it pins:
 There is no separate Apple package: the macOS arm64 `turboocr-engine-cpu`
 wheel is built with the Apple backend and bundles the Metal shader library.
 
-Feature extras work on any engine wheel (and combine with the umbrella's
-backend extras):
+PDF support (read PDFs, write searchable PDFs) is **built in** — no extra
+needed. Feature extras work on any engine wheel (and combine with the
+umbrella's backend extras):
 
 ```bash
-pip install "turboocr[cpu,pdf]"         # pypdfium2 + reportlab — read PDFs, write searchable PDFs
-pip install "turboocr[cuda,pdf]"        # extras combine with any backend
-pip install "turboocr-engine-cpu[all]"  # engine-only: pdf + rich + pandas
+pip install "turboocr[cuda,rich]"       # extras combine with any backend
+pip install "turboocr-engine-cpu[all]"  # engine-only: rich + pandas
 ```
 
-`[pdf]` reads PDFs and writes searchable ones, `[rich]` prettifies the
-`turboocr doctor` panel, `[pandas]` enables `PageResult.to_pandas()`, `[all]`
-is all three. `turboocr doctor` inspects the machine and prints the right
-install line for it.
+`[rich]` prettifies the `turboocr doctor` panel, `[pandas]` enables
+`PageResult.to_pandas()`, `[all]` is both. (`[pdf]` still resolves for
+backwards compatibility — it is now a subset of the base install.)
+`turboocr doctor` inspects the machine and prints the right install line for
+it.
 
 ### Where to get them today
 
 **On PyPI: cpu and openvino.** `turboocr-engine-cpu` (Linux, macOS with the
 Apple backend, Windows), `turboocr-engine-openvino` and the `turboocr`
-umbrella are published; because `4.0.0a5` is a pre-release, pip needs `--pre`
+umbrella are published; because `4.0.0a6` is a pre-release, pip needs `--pre`
 or an exact pin to select it:
 
 ```bash
 pip install --pre "turboocr[cpu]"       # or [apple] | [openvino]
-pip install "turboocr[cpu]==4.0.0a5"    # equivalent, explicit
+pip install "turboocr[cpu]==4.0.0a6"    # equivalent, explicit
 ```
 
 **Not on PyPI yet:** the NVIDIA wheels (`-cuda12` / `-cuda13`) — built and
@@ -156,16 +157,30 @@ Layout regions:
 ocr = turboocr.OCR(layout=True)            # loads PP-DocLayoutV3
 page = ocr.read("paper.png", layout=True)
 for region in page.layout:
-    print(region.label, region.score, region.box)   # text / table / figure / ...
+    print(region.label, region.confidence, region.box)   # text / table / figure / ...
 ```
 
-PDF (needs the `pdf` extra — e.g. `pip install "turboocr[cpu,pdf]"`):
+PDF — built in, no extra needed:
 
 ```python
 doc = ocr.read_pdf("paper.pdf", dpi=150)
 print(doc.to_markdown())
 for page in doc:
     print(page.page, len(page.lines))
+```
+
+Pages fan out across the replica pool (`OCR(replicas=N)`) — on accelerator
+backends a multi-page document reads ~2.4× faster at `replicas=3`, with
+byte-identical output. Stream pages instead of waiting for the whole
+document, or go async — every read method has an `async` twin:
+
+```python
+for page in ocr.read_pdf_stream("paper.pdf"):      # each page as soon as it's ready
+    print(page.page, page.text[:40])               # ordered=False -> completion order
+
+page = await ocr.aread("scan.png")                 # aread / aread_batch / aread_pdf
+async for page in ocr.aread_pdf_stream("paper.pdf"):
+    ...
 ```
 
 Inputs: paths, raw bytes, NumPy arrays (BGR), and PIL images.
@@ -187,7 +202,7 @@ Formats: `text` (default), `json`, `markdown`, `tsv`, `hocr`.
 
 | name | tier / script |
 |---|---|
-| `tiny` (default) / `small` / `medium` | PP-OCRv6 — Latin + Chinese + Japanese |
+| `tiny` (default) / `small` / `medium` | PP-OCRv6 — Latin + Chinese (Japanese needs `small`/`medium` — tiny omits kana) |
 | `arabic` `eslav` `korean` `thai` `greek` | retained PP-OCRv5 script recognizers |
 
 Weights resolve from an explicit `models_dir=`, `TURBO_OCR_MODELS_DIR`, a
@@ -196,12 +211,18 @@ from the pinned TurboOCR GitHub release (cached under `~/.cache/turboocr`).
 
 ## Backends
 
-`auto` (default, best no-build EP) · `turbo` (TensorRT, NVIDIA) · `cpu` ·
+`auto` (the wheel's default — resolves to `turbo` on the NVIDIA wheels,
+first run builds a cached engine; CPU elsewhere) · `turbo` (TensorRT,
+NVIDIA) · `apple` (native Metal/MPSGraph — the ~5x fast path on Apple
+silicon) · `cpu` ·
 `cuda` · `openvino` · `directml` · `rocm`/`migraphx` · `coreml`.
 
-On Apple Silicon, `auto` uses **CPU** on purpose — for these SVTR/DBNet models
-the CoreML EP is typically slower than MLAS (and stumbles on dynamic shapes).
-Pass `backend="coreml"` to force it.
+On Apple Silicon, `auto` uses **CPU** on purpose — for these SVTR/DBNet
+models the CoreML EP is typically slower than MLAS (and stumbles on dynamic
+shapes). The fast path is `backend="apple"`: the native Metal/MPSGraph
+backend with the ANE lane (its export bundle downloads automatically), the
+measured ~5x configuration. `backend="coreml"` forces the (slower) CoreML
+EP if you specifically want it.
 
 ## Building from source
 

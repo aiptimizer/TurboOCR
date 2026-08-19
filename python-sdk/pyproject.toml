@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "turboocr"
-version = "4.0.0a5"
+version = "4.0.0a6"
 description = "TurboOCR for Python — in-process OCR engine, and a typed client for the TurboOCR server"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -58,29 +58,30 @@ grpc = [
 # stay `py3-none-any` so it installs on any Python and any OS for client-only
 # use, and so `pip install turboocr` never drags a CUDA runtime onto a machine
 # that only wants to call a server. `turboocr doctor` names the right one.
-cpu = ["turboocr-engine-cpu==4.0.0a5"]
+cpu = ["turboocr-engine-cpu==4.0.0a6"]
 # `[apple]` is an ALIAS for the cpu engine wheel: there is no separate Apple
 # distribution — the macOS arm64 build of turboocr-engine-cpu carries the
 # Apple (Metal + ANE) backend. Without the alias, "install cpu to get Apple"
 # reads incoherent; with it, the natural command works on a Mac.
-apple = ["turboocr-engine-cpu==4.0.0a5"]
+apple = ["turboocr-engine-cpu==4.0.0a6"]
 # NVIDIA ships as TWO distributions, one per CUDA major: a wheel is built
 # against one CUDA runtime and cannot serve both, and PyPI allows only one
 # build per name+version. Pick by DRIVER: cuda12 runs on R525+, cuda13
 # needs R580+. `turboocr doctor` reports which one this machine can take.
-cuda12 = ["turboocr-engine-cuda12==4.0.0a5"]
-cuda13 = ["turboocr-engine-cuda13==4.0.0a5"]
+cuda12 = ["turboocr-engine-cuda12==4.0.0a6"]
+cuda13 = ["turboocr-engine-cuda13==4.0.0a6"]
 # `[cuda]` stays as the low-friction default and resolves to the widely
 # installable one. Ask for [cuda13] explicitly to get the newer stack.
-cuda = ["turboocr-engine-cuda12==4.0.0a5"]
-openvino = ["turboocr-engine-openvino==4.0.0a5"]
-rocm = ["turboocr-engine-rocm==4.0.0a5"]
+cuda = ["turboocr-engine-cuda12==4.0.0a6"]
+openvino = ["turboocr-engine-openvino==4.0.0a6"]
+rocm = ["turboocr-engine-rocm==4.0.0a6"]
 # Engine feature extras mirrored at the umbrella, so backend + feature combine
-# in one spec: `pip install "turboocr[cuda,pdf]"`. The engine wheels declare
-# their own [pdf]/[pandas] with the same contents; reportlab is already a base
+# in one spec: `pip install "turboocr[cuda,pandas]"`. PDF deps are BASE deps of
+# the engine wheels since 4.0.0a6 — [pdf] stays as a back-compat alias here
+# and on the engines; reportlab is already a base
 # dependency here but is restated so the mirror stays complete on its own.
 pdf = ["pypdfium2>=4", "reportlab>=4.2"]
-pandas = ["pandas>=1.3"]
+pandas = ["pandas>=1.3", "lxml>=4.9"]  # lxml: the read_html parser for TableRegion.to_pandas()
 # Convenience alias: everything optional that is safe everywhere. Deliberately
 # does NOT pull an engine — there is no single right one, and picking would
 # make `[all]` fail on unsupported platforms.

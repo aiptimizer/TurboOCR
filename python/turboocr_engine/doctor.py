@@ -174,7 +174,8 @@ def recommend(hw: Optional[HardwareInfo] = None) -> Recommendation:
                        " which loads on the widest range of drivers; cuda13"
                        f" needs driver {CUDA13_MIN_DRIVER}+.")
     b = _backend_by_key(key)
-    assert b is not None
+    if b is None:  # pragma: no cover — defensive; survives python -O
+        raise RuntimeError("internal error: no backend row resolved")
     return Recommendation(b, package, reason, install_commands(package))
 
 
@@ -214,6 +215,10 @@ def build_report(hw: Optional[HardwareInfo] = None) -> dict:
         # Device backends compiled into the seam registry of this build — the
         # names OCR(backend=...) can actually reach (see native.resolve_engine).
         "native_backends": native.native_backends(),
+        # Vendor runtime libraries dlopen'ed from pip packages before the
+        # extension import (empty off-Linux or when nothing needed
+        # preloading) — the debugging visibility the preloader promises.
+        "vendor_preloads": list(native._vendor_preloaded),
         "onnxruntime": {
             "installed": native_built or onnxruntime_available(),
             "version": ort_version,

@@ -25,7 +25,8 @@ To also run OCR **in-process** (no server), add exactly one backend extra —
 it pins the matching native `turboocr-engine-*` wheel:
 
 ```bash
-pip install 'turboocr[cpu]'       # any CPU — and Apple Silicon (Metal/ANE build)
+pip install 'turboocr[cpu]'       # any CPU
+pip install 'turboocr[apple]'     # Apple Silicon — Metal GPU + Neural Engine
 pip install 'turboocr[cuda12]'    # NVIDIA (TensorRT + CUDA EP), driver R525+
 pip install 'turboocr[cuda13]'    # same, CUDA 13 — driver R580+
 pip install 'turboocr[openvino]'  # Intel CPU / iGPU / Arc / NPU
@@ -42,9 +43,14 @@ page = turboocr.OCR().read("invoice.png")   # in-process, no server
 print(page.text)
 ```
 
+The in-process engine has the full API — replica pools, `read_pdf` with
+page fan-out, `read_pdf_stream` / `aread_pdf_stream` streaming, and async
+twins for every read — see the
+[Python library reference](https://github.com/aiptimizer/TurboOCR/blob/main/docs/reference/python.md).
+
 Without one, the client API works everywhere and `turboocr.OCR()` raises an
 ImportError naming the extra to install. Feature extras combine with any
-backend: `'turboocr[cuda,pdf]'` (PDF in/out), `[pandas]`.
+backend: `'turboocr[cuda,pandas]'`. PDF in/out is built in — no extra needed.
 
 Requires Python 3.12+.
 
@@ -60,7 +66,11 @@ docker run --gpus all -p 8000:8000 -p 50051:50051 \
   ghcr.io/aiptimizer/turboocr:latest
 ```
 
-The default `OCR_MODEL=tiny` covers Latin + Chinese + Japanese; `small`/`medium`
+(`:latest` is the v3.5 release image — this client talks to it fine; the
+v4-alpha server has no published image yet and builds from
+[the repo](https://github.com/aiptimizer/TurboOCR).)
+
+The default `OCR_MODEL=tiny` covers Latin + Chinese (Japanese needs `small`/`medium` — tiny omits kana); `small`/`medium`
 trade speed for accuracy, and `arabic`, `eslav`, `korean`, `thai`, `greek` are
 baked in too. The two backend env vars enable table → HTML and formula → LaTeX
 recognition (strict per-request opt-ins). See the

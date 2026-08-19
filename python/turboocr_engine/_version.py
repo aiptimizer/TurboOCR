@@ -6,4 +6,4 @@ PEP 440 spelling of the version CMakeLists.txt and the docs call
 `turboocr --version` and `turboocr doctor` all follow from this line.
 """
 
-__version__ = "4.0.0a5"
+__version__ = "4.0.0a6"

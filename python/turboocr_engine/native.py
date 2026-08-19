@@ -29,7 +29,15 @@ def quiet_stdout(enabled: bool = True) -> Iterator[None]:
     The C++ engine prints a few ``[OrtEngine] ...`` banners to stdout at load
     time via raw std::cout, which Python's contextlib.redirect_stdout cannot
     catch. We redirect the OS file descriptor instead. stderr (errors) is left
-    intact."""
+    intact.
+
+    KNOWN TRADE-OFF: fd 1 is process-global, so OTHER threads' stdout is also
+    discarded for the duration (on the NVIDIA wheel that can span a minutes-
+    long first-run TensorRT build inside warmup). The alternative — letting
+    every construction spray C++ banners into user programs — was judged
+    worse; a host app that logs to stdout from other threads during engine
+    construction should construct with verbose=True (which skips this) or
+    log to stderr."""
     if not enabled:
         yield
         return
@@ -44,11 +52,25 @@ def quiet_stdout(enabled: bool = True) -> Iterator[None]:
         os.close(saved)
 
 
+# The exact LOG_LEVEL value this module last wrote, or None. Authorship is
+# judged by VALUE, not a latch: a latch marked the variable "ours" forever,
+# so a user exporting LOG_LEVEL=debug AFTER the first engine was clobbered
+# by the next quiet one.
+_log_level_written: Optional[str] = None
+
+
 def set_log_level_default(verbose: bool) -> None:
     """Quiet the C++ structured logger by default (users can still set
-    LOG_LEVEL explicitly to override)."""
-    if "LOG_LEVEL" not in os.environ:
-        os.environ["LOG_LEVEL"] = "info" if verbose else "warn"
+    LOG_LEVEL explicitly to override).
+
+    A value WE wrote is ours to update (so a later OCR(verbose=True) is not
+    a silent no-op); any OTHER value — pre-existing or set by the user at
+    any point — always wins."""
+    global _log_level_written
+    current = os.environ.get("LOG_LEVEL")
+    if current is None or current == _log_level_written:
+        _log_level_written = "info" if verbose else "warn"
+        os.environ["LOG_LEVEL"] = _log_level_written
 
 
 #: Native symbols this Python layer requires. A `_turboocr` older than these
@@ -190,7 +212,7 @@ def load_native():
     except ImportError as first_exc:
         # NVIDIA wheel + pip-provided runtimes: preload and retry ONCE. Only on
         # ImportError — anything else is not a missing-library problem.
-        exc = first_exc
+        exc: Optional[BaseException] = first_exc
         retried = _preload_vendor_pip_libs() > 0
         if retried:
             try:
@@ -374,6 +396,13 @@ _DEVICE_ID_ENV: Dict[str, str] = {
     "migraphx": "ROCM_DEVICE_ID",
 }
 
+# Every env key configure_backend() may set or pop. OCR.__init__ snapshots
+# these (plus its structure-model keys) around the construct_lock block and
+# restores them on exit, so building one engine cannot leak EP configuration
+# into the next build or into the caller's environment. Keep this in sync
+# with configure_backend below — a key written there but missing here leaks.
+CONSTRUCT_ENV_KEYS: Tuple[str, ...] = ("ORT_EP", "TURBO_EP_DEVICE", "OV_DEVICE", "OPENVINO_DEVICE", "DISABLE_COREML", "COREML_DEVICE", *tuple(sorted(set(_DEVICE_ID_ENV.values()))))
+
 
 # Backend names that mean "you pick" — what OCR() uses when the caller names no
 # backend at all. "fast"/"onnx" are deliberately NOT here: those explicitly ask
@@ -433,6 +462,33 @@ def ensure_backend_supported(backend: str) -> None:
     # provider when we'll actually be running the ORT path.
     if resolve_engine(backend) != "cpu":
         return
+    # A seam-only name (no EP fallback in its row) on a build without that
+    # seam has NOTHING to run: backend="intel" on the cpu wheel used to fall
+    # into the generic ORT_EP switch and die with a ModelLoadError that
+    # blamed backend 'cpu'; backend="turbo" silently OCR'd on CPU where the
+    # docs promise a refusal. Raise the documented BackendUnavailable naming
+    # the wheel instead. (openvino/apple carry an EP fallback in their rows
+    # and keep their documented degrade.)
+    row = _BY_ALIAS.get(backend)
+    if row is not None and row.engine and not row.provider:
+        try:
+            seams = native_backends()
+        except Exception:
+            seams = []
+        if seams and row.engine not in seams:
+            from .errors import BackendUnavailable
+
+            seam_wheel = {
+                "nvidia": "turboocr-engine-cuda12 (driver R525+) or "
+                          "turboocr-engine-cuda13 (R580+)",
+                "intel": "turboocr-engine-openvino",
+                "amd": "turboocr-engine-rocm",
+            }.get(row.engine, f"a build with the '{row.engine}' backend")
+            raise BackendUnavailable(
+                f"backend='{backend}' needs the native {row.engine} engine, "
+                f"which this build does not carry. Install {seam_wheel} — "
+                "run `turboocr doctor` for the exact command."
+            )
     need = _NEEDS_PROVIDER.get(backend)
     if not need:
         return  # cpu/auto/fast/turbo/xnnpack/dnnl always resolve to something valid
@@ -444,7 +500,7 @@ def ensure_backend_supported(backend: str) -> None:
         # DirectML used to map to "turboocr-directml", a wheel nobody builds —
         # so the remedy for a missing DML EP was `pip install` a name that
         # resolves nowhere. An EP with no wheel gets the honest remedy instead.
-        wheel = {
+        wheel: Optional[str] = {
             # NVIDIA is two distributions (CUDA 12 vs 13); the right one
             # depends on the host driver, so name both rather than
             # printing an install line that may not fit this machine.
@@ -534,6 +590,14 @@ def configure_backend(
         # `auto` has no row of its own — it resolved to a seam backend, so
         # describe THAT backend (_BY_ALIAS["nvidia"]) rather than KeyError-ing.
         spec = _BY_ALIAS.get(backend) or _BY_ALIAS[engine]
+        # The vendor engine runs det/rec itself, but the AUX stages (cls,
+        # layout, doc-ori, formula) still load OrtEngine sessions — and those
+        # honour ORT_EP. A stale value in the caller's environment poisoned
+        # them (measured: OCR(backend="apple", autorotate=True) with a
+        # leftover ORT_EP=cuda failed to load the doc-ori model). Cleared, so
+        # OrtEngine picks this build's best compiled-in provider; the
+        # construct-lock env guard restores the caller's value afterwards.
+        env.pop("ORT_EP", None)
         if device:
             # TURBO_EP_DEVICE is the name the engine reads
             # (src/service/server/unified/backend_stages.cpp); TURBO_DEVICE was read by nothing.
@@ -545,6 +609,11 @@ def configure_backend(
             # silently ran on the default device.
             if engine == "intel":
                 env["OV_DEVICE"] = device
+        # device=None deliberately leaves any pre-set TURBO_EP_DEVICE /
+        # OV_DEVICE alone: configuration.md documents them as operator
+        # knobs, so a value in the environment is an interface (same
+        # precedence as the DET_* overrides), NOT staleness. Only ORT_EP is
+        # derived state owned by backend= and therefore always written.
         summary = spec.summary or spec.key
         if engine == "nvidia":
             _note_trt_first_run(implicit=backend in _AUTO_NAMES)
@@ -557,20 +626,38 @@ def configure_backend(
     if is_apple_silicon():
         # On these SVTR/DBNet models the CoreML EP is slower than MLAS and can
         # fail on dynamic shapes, so auto/cpu force CPU by disabling CoreML;
-        # coreml is opt-in.
-        if backend in ("coreml", "mps", "apple"):
+        # coreml is opt-in. Every path here also states its ORT_EP explicitly:
+        # this branch used to leave a pre-existing ORT_EP untouched, so a
+        # stale value in the caller's environment (ORT_EP=cuda from a Linux
+        # dotfile, say) poisoned the load with "Unknown ORT_EP" even though
+        # the caller asked for plain cpu.
+        if backend in ("coreml", "mps", "apple", "metal"):
+            # "metal" is an apple alias everywhere else (resolve_engine);
+            # leaving it out here sent one spelling to CPU and its synonyms
+            # to CoreML on builds without the apple seam.
             env.pop("DISABLE_COREML", None)
+            env["ORT_EP"] = "coreml"
             if device_id:
                 env["COREML_DEVICE"] = str(device_id)
             return "coreml", "CoreML (Apple GPU/ANE)"
         env["DISABLE_COREML"] = "1"
+        if backend in ("cpu",):
+            env["ORT_EP"] = "cpu"
+            return "cpu", "CPU (MLAS)"
+        env.pop("ORT_EP", None)
         if backend in ("turbo", "tensorrt", "trt"):
             # Not swallowed into plain CPU silently: on a Mac wheel there is
             # no nvidia seam backend, so say what the caller actually got.
             return "turbo", "CPU (turbo/TensorRT needs a turboocr-engine-cuda12/13 wheel)"
-        return "cpu", "CPU (MLAS)"
+        if backend in ("auto", "fast", "onnx", "default", ""):
+            return "cpu", "CPU (MLAS)"
+        # An EXPLICIT EP request (xnnpack, dnnl, an unknown name) falls
+        # through to the generic ORT_EP switch below instead of being
+        # silently swallowed into CPU — same spelling behaves the same on
+        # every platform, and an unavailable EP fails loudly at load.
 
-    # Non-Apple: drive the ORT_EP switch.
+    # The generic ORT_EP switch (non-Apple, plus explicit EP requests on
+    # Apple silicon falling through from above).
     if backend in ("cpu",):
         env["ORT_EP"] = "cpu"
         return "cpu", "CPU (MLAS)"
@@ -596,9 +683,24 @@ def configure_backend(
         # CUDA (src/backends/onnx/cpu_engine.cpp CUDA_DEVICE_ID), DirectML
         # (DML_DEVICE_ID) and ROCm/MIGraphX (ROCM_DEVICE_ID). Only the ROCm arm
         # was written, so OCR(backend="cuda", device_id=1) ran on GPU 0.
+        # Explicit device_id wins; device_id=0 (the default) defers to a
+        # pre-set env ordinal — CUDA_DEVICE_ID etc. are documented operator
+        # knobs (configuration.md), same precedence as the DET_* overrides.
         if device_id and ep in _DEVICE_ID_ENV:
             env[_DEVICE_ID_ENV[ep]] = str(device_id)
         return backend, ep
-    # Unknown: pass through as a raw ORT_EP so new EPs work without a code change.
+    # Unknown: pass through as a raw ORT_EP so new EPs work without a code
+    # change — but SAY so: a typo used to surface later as a ModelLoadError
+    # blaming the model ("Unknown ORT_EP='bogus'"), which reads as a
+    # download problem, not a spelling problem.
+    import warnings as _w
+
+    _w.warn(
+        f"backend={backend!r} is not a known backend name — passing it "
+        "through as a raw ONNX Runtime EP. If this is a typo, valid names "
+        "include: auto, cpu, turbo, apple, cuda, openvino, rocm, directml, "
+        "coreml (see the docs' backend table).",
+        stacklevel=3,
+    )
     env["ORT_EP"] = backend
     return backend, backend

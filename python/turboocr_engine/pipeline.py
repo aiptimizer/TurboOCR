@@ -13,7 +13,7 @@ import contextlib
 import os
 import queue
 import threading
-from typing import AsyncIterator, Iterator, List, Optional
+from typing import AsyncIterator, Generator, List, Optional
 
 import numpy as np
 
@@ -33,7 +33,13 @@ from .result import (
     TextLine,
 )
 
-DROP_SCORE = 0.5  # kDropScore in the C++ engine (applied there too; a safety net here)
+from .options import DEFAULT_DPI, DROP_SCORE
+from .options import check_on_error as _check_on_error_impl
+
+# Placed into the replica pool by close(): a reader that raced past the
+# _closed flag and parked in Queue.get() receives this instead of blocking
+# forever, re-puts it for the next parked reader, and raises.
+_POOL_CLOSED = object()
 
 # lang codes that map to a dedicated PP-OCRv5 script recognizer (tier N/A).
 _SCRIPT_LANGS = {
@@ -65,7 +71,7 @@ def _make_progress(progress, total, unit):
 
 
 def _parallel_map(items, fn, workers: int, *, ordered: bool = True,
-                  lookahead: int = 1):
+                  lookahead: int = 1, executor=None):
     """Map ``fn`` over the ``items`` iterator with ``workers`` threads and a
     bounded look-ahead window, yielding results in input order
     (``ordered=True``) or as each completes (``ordered=False``).
@@ -100,27 +106,34 @@ def _parallel_map(items, fn, workers: int, *, ordered: bool = True,
     window = workers + max(0, lookahead)
     it = iter(items)
     pending: "deque" = deque()  # FIFO for ordered mode; a plain bag otherwise
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        try:
-            exhausted = False
-            while True:
-                while not exhausted and len(pending) < window:
-                    try:
-                        pending.append(ex.submit(fn, next(it)))
-                    except StopIteration:
-                        exhausted = True
-                if not pending:
-                    break
-                if ordered:
-                    yield pending.popleft().result()
-                else:
-                    done, rest = wait(pending, return_when=FIRST_COMPLETED)
-                    pending = deque(rest)
-                    for f in done:
-                        yield f.result()
-        finally:
-            for f in pending:
-                f.cancel()
+    # An EXTERNAL executor (the engine's shared page pool) is used as-is and
+    # never shut down here — sharing one pool across every stream of an
+    # engine is what bounds total page-worker threads no matter how many
+    # documents stream concurrently. Owning executors are torn down fully.
+    own = executor is None
+    ex = executor if executor is not None else ThreadPoolExecutor(max_workers=workers)
+    try:
+        exhausted = False
+        while True:
+            while not exhausted and len(pending) < window:
+                try:
+                    pending.append(ex.submit(fn, next(it)))
+                except StopIteration:
+                    exhausted = True
+            if not pending:
+                break
+            if ordered:
+                yield pending.popleft().result()
+            else:
+                done, rest = wait(pending, return_when=FIRST_COMPLETED)
+                pending = deque(rest)
+                for f in done:
+                    yield f.result()
+    finally:
+        for f in pending:
+            f.cancel()
+        if own:
+            ex.shutdown(wait=True)
 
 
 def _chunks(seq, n: int):
@@ -153,10 +166,128 @@ def _fill_lines(page_res: PageResult, items, drop_score: float) -> PageResult:
         kept += 1
 
     if items and kept == 0:
-        page_res.warnings.append(
-            "text_degraded: detection found regions but no text survived recognition"
+        # Honest attribution: if the CALLER's stricter drop_score (engine
+        # floor is 0.5) is what filtered everything, that is their filter
+        # working, not recognition degrading. And the C++ side reports its
+        # own text_degraded flag on the structure path — never double-append.
+        # Items with EMPTY text are the degradation signal (recognition
+        # produced a box but no characters); items with text that only the
+        # CALLER's stricter drop_score removed are their filter working.
+        # Warn when the empty-text signal exists at all — one caller-filtered
+        # line must not silence ten genuinely empty ones.
+        genuinely_empty = any(not it.text.strip() for it in items)
+        caller_filtered = any(
+            it.text.strip() and DROP_SCORE <= it.confidence < drop_score
+            for it in items
         )
+        already = any(w.startswith("text_degraded") for w in page_res.warnings)
+        if (genuinely_empty or not caller_filtered) and not already:
+            page_res.warnings.append(
+                "text_degraded: detection found regions but no text survived recognition"
+            )
     return page_res
+
+
+@contextlib.contextmanager
+def _restore_env(keys):
+    """Snapshot the named env keys and restore them (value or absence) on
+    exit — the leak-guard around the construct block's env mutations."""
+    before = {k: os.environ.get(k) for k in keys}
+    try:
+        yield
+    finally:
+        for k, v in before.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+_check_on_error = _check_on_error_impl
+
+
+def _failed_page(exc: BaseException, *, page: Optional[int] = None,
+                 width: int = 0, height: int = 0) -> PageResult:
+    """The ``on_error="skip"`` placeholder: an empty page that says WHY it is
+    empty (``warnings=["page_failed: ..."]``), so a contained failure can never
+    masquerade as a genuinely blank page."""
+    pr = PageResult(width=width, height=height, page=page)
+    pr.warnings.append(f"page_failed: {type(exc).__name__}: {exc}")
+    return pr
+
+
+def _ensure_stage_asset(store: ModelStore, stage: str, rel: str) -> str:
+    """Resolve a structure-stage asset, converting a download failure (404,
+    offline) into ModelLoadError instead of a bare urllib traceback — the
+    error a user actually hit when OCR(formulas=True) fetched from a release
+    that does not carry the asset."""
+    from .errors import ModelLoadError
+
+    try:
+        return store.ensure_asset(rel)
+    except Exception as exc:
+        raise ModelLoadError(
+            f"{stage}=True needs the asset '{rel}', which could not be "
+            f"resolved ({type(exc).__name__}: {exc}). Point models_dir= at a "
+            "directory that contains it, or check the model release."
+        ) from exc
+
+
+def _fill_structure(page_res: PageResult, r, *, want_layout: bool,
+                    want_tables: bool, want_formulas: bool,
+                    want_reading_order: bool) -> None:
+    """Marshal the native run_with_layout result's STRUCTURE outputs
+    (layout regions, tables, formulas, reading order, degradation warnings)
+    into ``page_res`` — pure translation, no engine or pool state, the
+    structure-side sibling of :func:`_fill_lines`."""
+    if want_layout:
+        for lb in r.layout:
+            page_res.layout.append(
+                LayoutBox(
+                    label=lb.label, confidence=float(lb.score),
+                    box=tuple((int(p[0]), int(p[1])) for p in lb.box),  # type: ignore
+                    id=lb.id,
+                    # getattr: bindings older than the nesting support
+                    # have no parent_id attribute.
+                    parent_id=getattr(lb, "parent_id", -1),
+                )
+            )
+    if r.reading_order:
+        # NOT nested under want_layout: reading order is its own request
+        # (the engine may compute it while the caller opted out of layout
+        # REGIONS in the result).
+        page_res.reading_order = list(r.reading_order)
+    if want_tables:
+        for t in r.tables:
+            page_res.tables.append(
+                TableRegion(
+                    html=t.content, score=float(t.score),
+                    box=tuple((int(p[0]), int(p[1])) for p in t.box),  # type: ignore
+                    layout_id=t.layout_id,
+                )
+            )
+        # The FLAG is authoritative; the warning string is optional detail.
+        # Requiring both meant a producer that set the flag with no message
+        # yielded warnings == [] — a clean-looking degraded page, which is
+        # what the mechanism exists to prevent.
+        if r.table_degraded:
+            page_res.warnings.append(
+                f"table_degraded: {r.table_warning or 'no detail'}")
+    if want_formulas:
+        for f in r.formulas:
+            page_res.formulas.append(
+                FormulaRegion(
+                    latex=f.content, score=float(f.score),
+                    box=tuple((int(p[0]), int(p[1])) for p in f.box),  # type: ignore
+                    layout_id=f.layout_id,
+                )
+            )
+        if r.formula_degraded:
+            page_res.warnings.append(
+                f"formula_degraded: {r.formula_warning or 'no detail'}")
+    if r.text_degraded:
+        page_res.warnings.append(
+            f"text_degraded: {r.text_warning or 'no detail'}")
 
 
 def _resolve_entry(model, lang, tier):
@@ -187,6 +318,14 @@ def _resolve_entry(model, lang, tier):
                 f"unknown lang {lang!r}. Latin/CJK use tier=tiny|small|medium; "
                 f"scripts: {sorted(set(_SCRIPT_LANGS))}."
             )
+        if key in ("ja", "japanese") and (tier or "tiny") == "tiny":
+            import warnings as _w
+
+            _w.warn(
+                "lang='ja' resolved to the tiny tier, which omits Japanese "
+                "kana — pass tier='small' or 'medium' for Japanese.",
+                stacklevel=3,
+            )
     return resolve_model(tier or "tiny")
 
 
@@ -200,13 +339,18 @@ class OCR:
         or a script (``"arabic"``, ``"korean"``, ...).
     mode:
         ``"auto"`` (default — the vendor graph engine when its artefact exists,
-        else the ONNX path), ``"native"``/``"ultra"`` (require the graph
-        engine), or ``"onnx"``/``"fast"`` (the .onnx on the vendor's ORT
-        provider, fp16 where supported, no graph build).
+        else the ONNX path), ``"native"``/``"ultra"`` (prefer the graph
+        engine; falls back to the ONNX path when no artefact exists —
+        ``info()["mode"]`` reports what actually came up), or
+        ``"onnx"``/``"fast"`` (the .onnx on the vendor's ORT provider, fp16
+        where supported, no graph build).
     backend:
-        ``"auto"`` (fast-setup — best no-build EP for your hardware), ``"turbo"``
-        (TensorRT on the NVIDIA build), ``"cpu"``, or an explicit EP
-        (``"cuda"``, ``"openvino"``, ``"coreml"``, ``"directml"``, ``"rocm"``).
+        ``"auto"`` (the wheel's best default: on the NVIDIA wheels this is
+        the ``"turbo"`` engine — the first run builds a cached TensorRT
+        engine — elsewhere the CPU path), ``"turbo"`` (TensorRT on the
+        NVIDIA build), ``"apple"`` (native Metal/MPSGraph on macOS arm64),
+        ``"cpu"``, or an explicit EP (``"cuda"``, ``"openvino"``,
+        ``"coreml"``, ``"directml"``, ``"rocm"``).
     replicas:
         Number of independent native pipelines in this engine's pool
         (default 1). ``read_batch`` fans out across them, and concurrent
@@ -235,7 +379,7 @@ class OCR:
         formulas: bool = False,
         autorotate: bool = False,
         verbose: bool = False,
-        keep_image: bool = True,
+        keep_image: Optional[bool] = None,
     ) -> None:
         # Resolution priority: explicit model= wins; else lang(+tier); else tier;
         # else the default tiny tier. lang picks a script recognizer (ko/ar/th/
@@ -249,9 +393,19 @@ class OCR:
         # provider with fp16 where supported and NO graph build; "auto" (the
         # default) takes native when its artefact exists and falls back
         # otherwise. The resolved value is reported by info()["mode"].
+        _MODES = ("auto", "native", "ultra", "onnx", "fast")
+        if mode not in _MODES:
+            # read_pdf(mode=) and on_error= are validated; this one silently
+            # accepted any string and behaved like "auto".
+            raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
         self.requested_mode = mode
         self.fp16 = fp16
         self.verbose = verbose
+        # Tri-state: None = unset, so each method applies its own default —
+        # read() keeps the raster (single image, draw()/overlay is the common
+        # next step), read_pdf/read_batch DROP it (hundreds of ~6 MB rasters
+        # is GBs of silent retention). An explicit OCR(keep_image=...) wins
+        # over the per-method default; a per-call keep_image= wins over both.
         self.keep_image = keep_image
         # One native pipeline reuses internal scratch buffers, so it is
         # single-flight even though the GIL is released during inference.
@@ -263,6 +417,21 @@ class OCR:
         if replicas < 1:
             raise ValueError(f"replicas must be >= 1, got {replicas}")
         self.replicas = replicas
+        self._closed = False
+        # ONE shared page-worker pool per engine (created lazily at the
+        # first multi-replica stream): every PDF stream of this engine
+        # submits its page work here, so M concurrent documents share
+        # `replicas` worker threads instead of stacking M*replicas. This
+        # replaced a per-generator document-permit gate whose hold-across-
+        # yield design deadlocked nested and gathered streams (a permit held
+        # while consumer code runs is hold-and-wait by construction, and its
+        # thread-id-keyed reentrancy broke under CPython tid recycling).
+        # Workers never wait on consumers, so queued work always drains.
+        self._pdf_executor = None
+        # close() coordination: idempotence + a sentinel for readers parked
+        # in the pool queue (see _checkout/close); also guards lazy creation
+        # of the shared executor above.
+        self._close_mu = threading.Lock()
         set_log_level_default(verbose)
 
         _native = load_native()
@@ -280,8 +449,18 @@ class OCR:
 
         # Serialize env-mutation + construction: the engine reads its EP from
         # process env at construction, so two OCR(...) builds with different
-        # backends must not interleave (env is global).
-        with native.construct_lock:
+        # backends must not interleave (env is global). The guard restores
+        # every mutated key on exit — everything that reads them (pipe.init /
+        # load_structure / warmup, all replicas) runs inside this same lock
+        # hold, so one build cannot leak EP or structure-model config into the
+        # next build or the caller's environment. The native DET config base
+        # installed below is process-global but per-instance SAFE: every
+        # backend's stages capture their det config at init() — inside this
+        # same lock hold — so each engine keeps its own tier's thresholds for
+        # life. The base is not restored because only future constructions
+        # read it, and each installs its own first.
+        _env_keys = (*native.CONSTRUCT_ENV_KEYS, "TABLE_SLANEXT_ENCODER_ONNX", "FORMULA_ONNX", "FORMULA_TOKENIZER")
+        with native.construct_lock, _restore_env(_env_keys):
             self.backend, self.provider_summary = configure_backend(
                 backend, device=device, device_id=device_id
             )
@@ -295,18 +474,32 @@ class OCR:
             # BEFORE init: the unified pipeline loads its whole stage set at
             # construction (env-driven table/formula bootstrap included).
             need_layout = layout or tables or formulas
-            layout_path = store.ensure_asset("layout/layout.onnx") if need_layout else ""
-            doc_ori_path = store.ensure_asset("doc_ori.onnx") if autorotate else ""
+            layout_path = (_ensure_stage_asset(
+                store, "layout (or tables/formulas, which imply it)",
+                "layout/layout.onnx") if need_layout else "")
+            doc_ori_path = (_ensure_stage_asset(
+                store, "autorotate", "doc_ori.onnx") if autorotate else "")
             if tables:
-                os.environ["TABLE_SLANEXT_ENCODER_ONNX"] = store.ensure_asset(
-                    "table/slanext_encoder/SLANeXt_wired_encoder.onnx"
+                os.environ["TABLE_SLANEXT_ENCODER_ONNX"] = _ensure_stage_asset(
+                    store, "tables",
+                    "table/slanext_encoder/SLANeXt_wired_encoder.onnx",
                 )
+                # The C++ table backend derives the decoder + dict paths
+                # from the encoder's directory — ensuring only the encoder
+                # left a cache the load then failed against.
+                for sibling in (
+                    "table/slanext_encoder/SLANeXt_wired_decoder.bin",
+                    "table/slanext_encoder/SLANeXt_dict_infer.txt",
+                ):
+                    _ensure_stage_asset(store, "tables", sibling)
             if formulas:
-                os.environ["FORMULA_ONNX"] = store.ensure_asset(
-                    "formula/ppformulanet_s/inference_trt.onnx"
+                os.environ["FORMULA_ONNX"] = _ensure_stage_asset(
+                    store, "formulas",
+                    "formula/ppformulanet_s/inference_trt.onnx",
                 )
-                os.environ["FORMULA_TOKENIZER"] = store.ensure_asset(
-                    "formula/ppformulanet_s/tokenizer.json"
+                os.environ["FORMULA_TOKENIZER"] = _ensure_stage_asset(
+                    store, "formulas",
+                    "formula/ppformulanet_s/tokenizer.json",
                 )
             # Install the tier's official detection config (catalog det_cfg —
             # tiny's box_thresh is 0.40, not the 0.45 default) into the native
@@ -354,20 +547,16 @@ class OCR:
         # What the backend actually came up on (an "auto" that fell back to the
         # ONNX path must say so rather than claim the native engine).
         self.mode = self._pipe.mode() if hasattr(self._pipe, "mode") else mode
-        # LOADED, not requested. `need_layout` is only the constructor's
-        # intent; the engine can come up without the layout stage (missing or
-        # unreadable layout.onnx, or a backend that declined it) while init()
-        # still succeeds, because layout is optional. Reporting intent made
-        # info()/capabilities() claim a capability the engine does not have —
-        # and let an explicit layout=True silently return zero regions instead
-        # of the capability-unavailable rejection the shared gate now raises.
-        # Intersected with the request for the same reason as the three below:
-        # a stage the engine loaded but this object opted out of is not
-        # available here (tables=True alone still loads layout internally).
-        self.has_layout = need_layout and self._pipe.has_layout()
-        self.has_tables = tables and self._pipe.has_table_backend()
-        self.has_formulas = formulas and self._pipe.has_formula_backend()
-        self.autorotate = autorotate and self._pipe.has_doc_ori()
+        # Requested-but-unloaded is an ERROR, not a silent degrade: init() can
+        # succeed without an optional stage (missing/unreadable model, or a
+        # backend that declined it), and an OCR(tables=True) built that way
+        # used to return zero tables forever — implicit reads default to the
+        # built capability set, so nothing ever raised. _bind_stages raises
+        # ModelLoadError for any requested stage whose probe is false, and
+        # binds has_* to what was requested (== loaded, once it returns).
+        self._bind_stages(self._pipe, layout=layout, tables=tables,
+                          formulas=formulas, autorotate=autorotate,
+                          layout_path=layout_path)
         # {capability_name: bool}, keyed by the SAME names the HTTP API uses
         # (layout/tables/formulas/autorotate), so Python and the server describe
         # the same build identically. Intersected with what THIS Pipeline was
@@ -387,6 +576,106 @@ class OCR:
             for name, loaded in engine_caps().items():
                 self.capabilities.setdefault(name, loaded)
 
+    def _bind_stages(self, pipe, *, layout: bool, tables: bool, formulas: bool,
+                     autorotate: bool, layout_path: str = "") -> None:
+        """Bind the optional-stage capability flags after construction,
+        raising :class:`ModelLoadError` for any REQUESTED stage whose model
+        did not actually load — a request that cannot be honoured must fail
+        at construction, not silently return pages without its output.
+        tables/formulas IMPLY layout (they run per-layout-region, so the
+        layout stage loads and is exposed as a capability — same implication
+        the server's capability table applies); autorotate stays strictly
+        what was requested."""
+        from .errors import ModelLoadError
+
+        need_layout = layout or tables or formulas
+        if need_layout and not pipe.has_layout():
+            raise ModelLoadError(
+                "the layout stage was requested (layout/tables/formulas=True) "
+                f"but failed to load on backend '{self.engine}'"
+                + (f" (layout model: {layout_path})" if layout_path else "")
+                + ". Check the model file exists and matches the backend."
+            )
+        if tables and not pipe.has_table_backend():
+            raise ModelLoadError(
+                f"tables=True but the table backend failed to load on "
+                f"'{self.engine}' — check the SLANeXt encoder asset "
+                "(TABLE_SLANEXT_ENCODER_ONNX)."
+            )
+        if formulas and not pipe.has_formula_backend():
+            raise ModelLoadError(
+                f"formulas=True but the formula backend failed to load on "
+                f"'{self.engine}' — check the PP-FormulaNet assets "
+                "(FORMULA_ONNX / FORMULA_TOKENIZER)."
+            )
+        if autorotate and not pipe.has_doc_ori():
+            raise ModelLoadError(
+                "autorotate=True but the document-orientation model failed "
+                f"to load on '{self.engine}'."
+            )
+        self.has_layout = need_layout
+        self.has_tables = tables
+        self.has_formulas = formulas
+        self.autorotate = autorotate
+
+    def _live_pipe(self):
+        """The capability-probe replica, or the closed error — the ONE place
+        that owns the closed-engine message and the close() race (a
+        concurrent close() nulls self._pipe; the local read keeps this an
+        orderly RuntimeError instead of an AttributeError)."""
+        pipe = self._pipe
+        if self._closed or pipe is None:
+            raise RuntimeError(
+                "this OCR engine was closed — construct a new OCR()"
+            )
+        return pipe
+
+    @staticmethod
+    def _require_doc_ori(pipe) -> None:
+        """Refusal-beats-silent-no-op for autorotate: an explicit request on
+        an engine without the doc-orientation model must raise."""
+        if not pipe.has_doc_ori():
+            raise ValueError(
+                "autorotate requested but this pipeline has no "
+                "document-orientation model (construct OCR(..., "
+                "autorotate=True) so the model is loaded)"
+            )
+
+    def _stream_executor(self):
+        """The engine's shared page-worker pool (see __init__). Lazy: image-
+        only users never pay for it; replicas=1 streams run inline and never
+        call this."""
+        from concurrent.futures import ThreadPoolExecutor
+
+        ex = self._pdf_executor
+        if ex is None:
+            with self._close_mu:
+                if self._closed:
+                    # A stream created before close() but first advanced
+                    # after it used to re-mint a pool nothing would ever
+                    # shut down — `replicas` leaked threads per engine.
+                    raise RuntimeError(
+                        "this OCR engine was closed — construct a new OCR()"
+                    )
+                ex = self._pdf_executor
+                if ex is None:
+                    ex = ThreadPoolExecutor(
+                        max_workers=self.replicas,
+                        thread_name_prefix="turboocr-pdf-pages",
+                    )
+                    self._pdf_executor = ex
+        return ex
+
+    def _keep(self, keep_image: Optional[bool], default: bool) -> bool:
+        """Resolve the raster-retention tri-state: per-call beats engine-level
+        beats the calling method's own default (True for read(), False for the
+        PDF/batch paths)."""
+        if keep_image is not None:
+            return keep_image
+        if self.keep_image is not None:
+            return self.keep_image
+        return default
+
     @contextlib.contextmanager
     def _checkout(self):
         """Borrow a free replica; blocks when all are in flight.
@@ -394,8 +683,27 @@ class OCR:
         The queue IS the mutual exclusion: a checked-out pipeline is owned by
         exactly one thread until returned, so no per-pipeline lock is needed.
         Concurrent read() calls from user threads spread across the pool
-        automatically."""
+        automatically. The _closed flag check is a fast path, not the safety
+        net: a reader that passes it just before close() drains the pool
+        would otherwise park in Queue.get() forever (TOCTOU) — close() puts a
+        sentinel into the drained pool, and every parked reader re-puts it
+        for the next one and raises."""
+        if self._closed:
+            raise RuntimeError(
+                "this OCR engine was closed — construct a new OCR(); read() "
+                "after close() used to block forever on the empty replica pool"
+            )
         pipe = self._pool.get()
+        if pipe is _POOL_CLOSED:
+            try:
+                raise RuntimeError(
+                    "this OCR engine was closed — construct a new OCR()"
+                )
+            finally:
+                # The re-put wakes the next parked reader; in a finally so
+                # even an asynchronous exception in this window cannot eat
+                # the only sentinel and re-hang the chain.
+                self._pool.put(pipe)
         try:
             yield pipe
         finally:
@@ -422,7 +730,9 @@ class OCR:
         ``layout=True`` also returns layout regions; ``tables=True`` /
         ``formulas=True`` return recognized tables (HTML) / formulas (LaTeX)
         (require ``OCR(tables=True)`` / ``OCR(formulas=True)``).
-        ``autorotate=True`` corrects a rotated page first.
+        ``autorotate=True`` corrects a rotated page first; an explicit
+        non-zero ``rotate=`` WINS over autorotate (you told the engine the
+        rotation, so the classifier is not consulted).
 
         ``text=False`` (a layout-only run, the library spelling of the HTTP
         ``?text=0``) goes through the SAME shared request-option gate the server
@@ -451,12 +761,7 @@ class OCR:
         # with autorotate=False, read(autorotate=True) silently OCR'd the
         # sideways page.
         if do_auto and angle == 0:
-            if not self._pipe.has_doc_ori():
-                raise ValueError(
-                    "autorotate requested but this pipeline has no "
-                    "document-orientation model (construct OCR(..., "
-                    "autorotate=True) so the model is loaded)"
-                )
+            self._require_doc_ori(self._live_pipe())
             with self._checkout() as pipe:
                 angle = int(pipe.detect_orientation(np.ascontiguousarray(img, np.uint8)))
         if angle:
@@ -483,10 +788,23 @@ class OCR:
         keep_image: Optional[bool] = None,
     ) -> PageResult:
         h, w = img.shape[:2]
+        # Metal's maximum texture axis is 16384: on the apple backend a
+        # larger image reached MTLTextureDescriptor validation and killed
+        # the PROCESS with an uncatchable SIGABRT — from a plain read(), an
+        # ndarray, or a PDF page rendered at high dpi. The area-based
+        # TURBO_MAX_IMAGE_MP ceiling cannot catch it (17000x2000 is 34 MP).
+        # A ValueError here is catchable and, on the PDF paths, containable
+        # by on_error="skip".
+        if getattr(self, "engine", None) == "apple" and max(h, w) > 16384:
+            raise ValueError(
+                f"image is {w}x{h} px — the apple backend (Metal) caps each "
+                "axis at 16384. Downscale the image, or lower the render "
+                "dpi for PDF pages."
+            )
         page_res = PageResult(width=w, height=h, page=page, orientation=rotate % 360)
 
         img = np.ascontiguousarray(img, dtype=np.uint8)
-        if self.keep_image if keep_image is None else keep_image:
+        if self._keep(keep_image, True):
             page_res.image = img
 
         def _resolve(req, have, name):
@@ -505,7 +823,11 @@ class OCR:
         use_layout = _resolve(want_layout, self.has_layout, "layout")
         use_tables = _resolve(want_tables, self.has_tables, "tables")
         use_formulas = _resolve(want_formulas, self.has_formulas, "formulas")
-        use_structure = use_layout or use_tables or use_formulas
+        # reading_order routes through run_with_layout too: the shared gate
+        # auto-enables layout for it (and rejects when layout is not loaded).
+        # It used to be missing here, so read(reading_order=True) took the
+        # plain run() branch and silently returned reading_order == [].
+        use_structure = use_layout or use_tables or use_formulas or want_reading_order
 
         with self._checkout() as pipe:  # one replica per in-flight run (GIL released in C++)
             # `not want_text` takes this branch even with no structure requested:
@@ -533,49 +855,11 @@ class OCR:
                     text=want_text,
                 )
                 items = r.items
-                if use_layout:
-                    for lb in r.layout:
-                        page_res.layout.append(
-                            LayoutBox(
-                                label=lb.label, confidence=float(lb.score),
-                                box=tuple((int(p[0]), int(p[1])) for p in lb.box),  # type: ignore
-                                id=lb.id,
-                            )
-                        )
-                    if r.reading_order:
-                        page_res.reading_order = list(r.reading_order)
-                if use_tables:
-                    for t in r.tables:
-                        page_res.tables.append(
-                            TableRegion(
-                                html=t.content, score=float(t.score),
-                                box=tuple((int(p[0]), int(p[1])) for p in t.box),  # type: ignore
-                                layout_id=t.layout_id,
-                            )
-                        )
-                    # The FLAG is authoritative; the warning string is optional
-                    # detail. Requiring both meant a producer that set the flag
-                    # with no message yielded warnings == [] — a clean-looking
-                    # degraded page, which is what the mechanism exists to
-                    # prevent. Every C++ emitter tests the flag first.
-                    if r.table_degraded:
-                        page_res.warnings.append(
-                            f"table_degraded: {r.table_warning or 'no detail'}")
-                if use_formulas:
-                    for f in r.formulas:
-                        page_res.formulas.append(
-                            FormulaRegion(
-                                latex=f.content, score=float(f.score),
-                                box=tuple((int(p[0]), int(p[1])) for p in f.box),  # type: ignore
-                                layout_id=f.layout_id,
-                            )
-                        )
-                    if r.formula_degraded:
-                        page_res.warnings.append(
-                            f"formula_degraded: {r.formula_warning or 'no detail'}")
-                if r.text_degraded:
-                    page_res.warnings.append(
-                        f"text_degraded: {r.text_warning or 'no detail'}")
+                _fill_structure(
+                    page_res, r, want_layout=use_layout,
+                    want_tables=use_tables, want_formulas=use_formulas,
+                    want_reading_order=want_reading_order,
+                )
             else:
                 items = pipe.run(img)  # native C++ det->sort->(cls)->rec
 
@@ -593,6 +877,7 @@ class OCR:
         progress=None,
         keep_image: Optional[bool] = None,
         batch_size: int = 8,
+        on_error: str = "raise",
     ) -> DocumentResult:
         """OCR a list of images into a :class:`DocumentResult` (one page each).
 
@@ -604,40 +889,95 @@ class OCR:
 
         ``progress`` may be True (log to stderr) or a callable
         ``progress(done, total)``. ``keep_image=False`` drops each page raster
-        after reading (see :meth:`read_pdf`). Returns a DocumentResult —
-        iterate it for the per-image pages, or use ``doc.to_tsv()`` /
-        ``doc.text`` etc."""
+        after reading (see :meth:`read_pdf`).
+
+        ``on_error="raise"`` (default) propagates the first failing image's
+        exception and cancels images not yet started. ``on_error="skip"``
+        contains a failure to ITS page: the failed image becomes an empty
+        :class:`PageResult` carrying ``warnings=["page_failed: ..."]`` and
+        every other image is still read — for a long unattended batch where
+        one corrupt file must not cost the other results.
+
+        Returns a DocumentResult — iterate it for the per-image pages, or use
+        ``doc.to_tsv()`` / ``doc.text`` etc."""
+        _check_on_error(on_error)
+        self._live_pipe()
+        # Batch reads default to DROPPING rasters (keep_image=False): a long
+        # batch at ~6 MB/raster retains GBs invisibly. Pass keep_image=True
+        # (per call or on the engine) when you need draw()/searchable PDFs.
+        keep_image = self._keep(keep_image, False)
         total = len(images)
         report = _make_progress(progress, total, "images")
         doc = DocumentResult()
 
         if self._can_batch(layout=layout, autorotate=autorotate):
-            keep = self.keep_image if keep_image is None else keep_image
             chunks = list(_chunks(images, batch_size))
 
             def _run_chunk(chunk) -> List[PageResult]:
-                arrays = [
-                    np.ascontiguousarray(load_image(im), dtype=np.uint8)
-                    for im in chunk
-                ]
-                with self._checkout() as pipe:
-                    batch = pipe.run_batch(arrays)
-                # The native call returns exactly one result list per input, in
-                # input order. Assert it rather than zip(): a short list would
-                # silently DROP pages, turning a backend bug into missing text.
-                if len(batch) != len(arrays):
+                # Load with per-image containment: one unreadable file in a
+                # chunk must not (in skip mode) take its chunk-mates down.
+                slots: List[Optional[PageResult]] = [None] * len(chunk)
+                loaded = []  # (index-in-chunk, array)
+                for j, im in enumerate(chunk):
+                    try:
+                        loaded.append(
+                            (j, np.ascontiguousarray(load_image(im), dtype=np.uint8))
+                        )
+                    except Exception as exc:
+                        if on_error == "raise":
+                            raise
+                        slots[j] = _failed_page(exc)
+                arrays = [a for _, a in loaded]
+                batch = None
+                if arrays:
+                    try:
+                        with self._checkout() as pipe:
+                            batch = pipe.run_batch(arrays)
+                        # The native call returns exactly one result list per
+                        # input, in input order. Assert it rather than zip(): a
+                        # short list would silently DROP pages, turning a
+                        # backend bug into missing text.
+                        if len(batch) != len(arrays):
+                            raise RuntimeError(
+                                f"native run_batch returned {len(batch)} results "
+                                f"for {len(arrays)} images — refusing to drop pages"
+                            )
+                    except Exception:
+                        if on_error == "raise":
+                            raise
+                        # The whole native chunk failed; re-run its images one
+                        # at a time so the failure lands on the image that
+                        # caused it, not on the chunk.
+                        batch = None
+                        for j, arr in loaded:
+                            try:
+                                # want_layout=False: the batched path is only
+                                # entered when the resolved layout request is
+                                # off (_can_batch), so the rescue run must not
+                                # resurrect engine-default layout regions the
+                                # successfully-batched pages don't carry.
+                                slots[j] = self._read_array(
+                                    arr, drop_score=drop_score,
+                                    keep_image=keep_image, want_layout=False,
+                                )
+                            except Exception as exc:
+                                slots[j] = _failed_page(
+                                    exc, width=arr.shape[1], height=arr.shape[0]
+                                )
+                if batch is not None:
+                    for (j, arr), items in zip(loaded, batch):
+                        h, w = arr.shape[:2]
+                        pr = PageResult(width=w, height=h)
+                        if keep_image:
+                            pr.image = arr
+                        slots[j] = _fill_lines(pr, items, drop_score)
+                if any(pr is None for pr in slots):  # pragma: no cover
+                    # A real raise, not an assert: under python -O an assert
+                    # vanishes and a None would land in DocumentResult.pages.
                     raise RuntimeError(
-                        f"native run_batch returned {len(batch)} results for "
-                        f"{len(arrays)} images — refusing to drop pages"
-                    )
-                pages = []
-                for arr, items in zip(arrays, batch):
-                    h, w = arr.shape[:2]
-                    pr = PageResult(width=w, height=h)
-                    if keep:
-                        pr.image = arr
-                    pages.append(_fill_lines(pr, items, drop_score))
-                return pages
+                        "internal error: a chunk slot was left unfilled — "
+                        "refusing to emit None pages")
+                return slots  # type: ignore[return-value]
 
             # Per-IMAGE progress, even though a chunk completes as a unit: the
             # callback contract is progress(done, total) counted in images, and
@@ -664,16 +1004,34 @@ class OCR:
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             per_chunk: List[Optional[List[PageResult]]] = [None] * len(chunks)
-            with ThreadPoolExecutor(max_workers=self.replicas) as ex:
+            # Not `with`: __exit__ is shutdown(wait=True) WITHOUT cancellation,
+            # which on a raise would still run every queued chunk to completion
+            # before propagating. cancel_futures stops queueing at the failure.
+            ex = ThreadPoolExecutor(max_workers=self.replicas)
+            try:
                 futs = {ex.submit(_run_chunk, c): i for i, c in enumerate(chunks)}
                 for fut in as_completed(futs):
                     i = futs[fut]
                     per_chunk[i] = fut.result()  # re-raises worker failures
                     _tick(len(chunks[i]))
+            finally:
+                ex.shutdown(wait=True, cancel_futures=True)
             for pages in per_chunk:
-                assert pages is not None  # every future resolved or raised
+                if pages is None:  # pragma: no cover — every future resolved or raised
+                    raise RuntimeError(
+                        "internal error: a chunk result went missing — "
+                        "refusing to drop pages")
                 doc.pages.extend(pages)
             return doc
+
+        def _read_one(im) -> PageResult:
+            try:
+                return self.read(im, drop_score=drop_score, layout=layout,
+                                 autorotate=autorotate, keep_image=keep_image)
+            except Exception as exc:
+                if on_error == "raise":
+                    raise
+                return _failed_page(exc)
 
         if self.replicas > 1 and total > 1:
             # Per-image stages (layout/autorotate/...) cannot use the native
@@ -681,28 +1039,32 @@ class OCR:
             # checks a free one out per call.
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
-            slots: List[Optional[PageResult]] = [None] * total
+            img_slots: List[Optional[PageResult]] = [None] * total
             done = 0
-            with ThreadPoolExecutor(max_workers=self.replicas) as ex:
-                futs = {
-                    ex.submit(self.read, im, drop_score=drop_score, layout=layout,
-                              autorotate=autorotate, keep_image=keep_image): i
-                    for i, im in enumerate(images)
-                }
-                for fut in as_completed(futs):
-                    slots[futs[fut]] = fut.result()
+            # Same reason as the chunk fan-out above: `with` would drain the
+            # queue before propagating a failure. Distinct names from the
+            # chunk fan-out above — one function, two executors of different
+            # result types.
+            image_ex = ThreadPoolExecutor(max_workers=self.replicas)
+            try:
+                img_futs = {image_ex.submit(_read_one, im): i
+                            for i, im in enumerate(images)}
+                for img_fut in as_completed(img_futs):
+                    img_slots[img_futs[img_fut]] = img_fut.result()
                     done += 1
                     report(done)
-            for pr in slots:
-                assert pr is not None
+            finally:
+                image_ex.shutdown(wait=True, cancel_futures=True)
+            for pr in img_slots:
+                if pr is None:  # pragma: no cover — every future resolved or raised
+                    raise RuntimeError(
+                        "internal error: an image slot was left unfilled — "
+                        "refusing to emit None pages")
                 doc.pages.append(pr)
             return doc
 
         for i, im in enumerate(images, 1):
-            doc.pages.append(
-                self.read(im, drop_score=drop_score, layout=layout,
-                          autorotate=autorotate, keep_image=keep_image)
-            )
+            doc.pages.append(_read_one(im))
             report(i)
         return doc
 
@@ -724,16 +1086,37 @@ class OCR:
         self,
         pdf: ImageInput,
         *,
-        dpi: int = 150,
+        dpi: int = DEFAULT_DPI,
         pages: Optional[List[int]] = None,
         drop_score: float = DROP_SCORE,
         max_pages: Optional[int] = None,
+        mode: str = "auto",
         progress=None,
         keep_image: Optional[bool] = None,
+        on_error: str = "raise",
+        autorotate: Optional[bool] = None,
+        password: Optional[str] = None,
     ) -> DocumentResult:
-        """Render a PDF with PDFium and OCR each page. Requires the ``pdf``
-        extra (``pip install "turboocr[cpu,pdf]"``). ``progress`` may be True (log to
-        stderr) or a callable ``progress(done, total)``.
+        """Read a PDF — PDF support is built in (pypdfium2 ships with the
+        engine wheel). ``progress`` may be True (log to stderr) or a callable
+        ``progress(done, total)``.
+
+        ``mode`` picks how each page's text is obtained:
+
+        * ``"auto"`` (default) — per page: the embedded text layer when the
+          page has one (~0 ms, byte-exact), OCR only for the pages that
+          don't. Born-digital PDFs read at hundreds of pages/s; scans OCR
+          exactly as before. The one caveat: a scan that ALREADY carries a
+          text layer (from earlier, possibly worse, OCR software) is served
+          as-is — pass ``mode="ocr"`` to force re-OCR of every page;
+        * ``"ocr"`` — render every page and OCR it, ignoring any text layer;
+        * ``"text"`` — the EMBEDDED text layer only: no rendering, no OCR, no
+          models. (PDFium itself is globally single-threaded — every pdfium
+          call in this process serializes behind one lock, which is also what
+          makes concurrent ``aread_pdf`` calls safe — so the speed here comes
+          from skipping rasterization and OCR, not from workers.) Lines carry
+          ``source="pdf"`` and confidence 1.0; a scanned page simply comes
+          back empty.
 
         Pages fan out across the replica pool: with ``OCR(replicas=N)``, up to
         N pages are OCR'd concurrently (rendering stays on the calling thread
@@ -743,16 +1126,33 @@ class OCR:
         IS the sequential run. At most ``replicas + 1`` page rasters are in
         flight at any moment.
 
-        ``keep_image=False`` drops each page raster once the page is read.
-        The default keeps them (so ``save_searchable_pdf`` / ``draw`` work),
-        but a raster is ~6 MB at 150 DPI, so a few hundred pages is GBs of
-        retained memory — pass False when you only want the text."""
+        ``keep_image`` defaults to **False** here (since 4.0.0a6): a raster is
+        ~6 MB at 150 DPI, so a few hundred pages silently retained GBs. Pass
+        ``keep_image=True`` when you need the rasters afterwards
+        (``doc.save_searchable_pdf`` / ``draw``) — or use
+        :meth:`pdf_to_searchable`, which keeps them automatically. An
+        engine-level ``OCR(keep_image=...)`` overrides this default;
+        ``read()`` still keeps rasters by default.
+
+        ``on_error="raise"`` (default) propagates the first failing page's
+        exception; ``on_error="skip"`` contains a page failure to that page —
+        it comes back as an empty :class:`PageResult` with
+        ``warnings=["page_failed: ..."]`` while every other page is still
+        read. A document that cannot be OPENED at all always raises.
+
+        ``autorotate`` corrects rotated scans per page before OCR (``None``
+        inherits the engine-level setting; text-layer pages are never
+        rotated) — see :meth:`read_pdf_stream`.
+
+        ``password`` unlocks an encrypted PDF (user or owner password)."""
         doc = DocumentResult(
             source=str(pdf) if isinstance(pdf, (str, os.PathLike)) else ""
         )
         for pr in self.read_pdf_stream(
             pdf, dpi=dpi, pages=pages, drop_score=drop_score,
-            max_pages=max_pages, progress=progress, keep_image=keep_image,
+            max_pages=max_pages, mode=mode, progress=progress,
+            keep_image=keep_image, on_error=on_error, autorotate=autorotate,
+            password=password,
         ):
             doc.pages.append(pr)
         return doc
@@ -761,14 +1161,18 @@ class OCR:
         self,
         pdf: ImageInput,
         *,
-        dpi: int = 150,
+        dpi: int = DEFAULT_DPI,
         pages: Optional[List[int]] = None,
         drop_score: float = DROP_SCORE,
         max_pages: Optional[int] = None,
+        mode: str = "auto",
         ordered: bool = True,
         progress=None,
         keep_image: Optional[bool] = None,
-    ) -> Iterator[PageResult]:
+        on_error: str = "raise",
+        autorotate: Optional[bool] = None,
+        password: Optional[str] = None,
+    ) -> Generator[PageResult, None, None]:
         """Stream a PDF's pages as a generator of :class:`PageResult`, yielding
         each page as soon as it is ready instead of assembling a whole
         :class:`DocumentResult` first — :meth:`read_pdf` is exactly this,
@@ -786,47 +1190,243 @@ class OCR:
         use ``PageResult.page`` (1-based) to reassemble. Each page's result is
         independent, so both modes produce the same set of results.
 
+        ``mode`` works exactly as in :meth:`read_pdf` — ``"text"`` streams
+        the embedded text layer with no OCR at all, ``"auto"`` serves trusted
+        text layers and OCRs everything else. Under ``"auto"``, engines built
+        with layout/tables/formulas still run those STRUCTURE stages on
+        text-layer pages (the page is rendered for the structure pass while
+        its text comes byte-exact from the layer — the server's Geometric
+        behavior); ``reading_order`` is not computed for text-layer pages.
+
         ``progress`` counts YIELDED pages (monotone in both modes). The
         generator cleans up after itself when closed early — breaking out of
-        the loop cancels queued pages."""
-        from .pdf import pdf_page_count, render_pdf
+        the loop cancels queued pages. Argument validation happens at CALL
+        time (this returns an already-validated generator), so a bad ``mode``
+        raises here, not at the first ``next()`` on some other thread.
 
-        if pages is not None:
-            total = min(len(pages), max_pages) if max_pages else len(pages)
-        else:
-            total = pdf_page_count(pdf) if progress else 0
+        ``on_error`` works as in :meth:`read_pdf`: ``"skip"`` turns a failing
+        page — OCR failures AND page render/extract failures — into an empty
+        result with a ``page_failed`` warning instead of ending the stream.
+
+        Concurrency: every stream of one engine shares a single pool of
+        ``replicas`` page-worker threads, so any number of concurrent
+        documents — gathered, interleaved (``zip(a_stream, b_stream)``), or
+        nested inside each other's loops, sync or async — always make
+        progress and never stack threads. Each OPEN stream still holds its
+        own bounded look-ahead window (at most ``replicas + 1`` rendered
+        pages), so raster memory scales with concurrently-open streams;
+        close or exhaust streams you are done with. ``mode="text"`` streams
+        use no workers at all.
+
+        ``autorotate`` works as in :meth:`read`: ``None`` inherits the
+        engine-level setting, ``True``/``False`` overrides per call. A rotated
+        scan is detected per page (0/90/180/270), rotated upright before OCR,
+        and the applied angle lands in ``PageResult.orientation``. Text-layer
+        pages (``mode="text"``/``"auto"``) are inherently upright — the layer
+        stores logical text — so only OCR'd pages are ever rotated."""
+        # EAGER validation: everything below raises at the CALL, not at the
+        # first next() (which may run on another thread via the async
+        # wrapper, detaching the traceback from the caller).
+        if mode not in ("ocr", "text", "auto"):
+            raise ValueError(
+                f"mode must be 'ocr', 'text' or 'auto', got {mode!r}"
+            )
+        _check_on_error(on_error)
+        from .options import check_max_pages
+
+        check_max_pages(max_pages)
+        if dpi < 1:
+            # dpi=0/-100 died deep inside pdfium as "Crop exceeds page
+            # dimensions" — or SUCCEEDED for text-layer pages, so the
+            # failure depended on document content.
+            raise ValueError(f"dpi must be >= 1, got {dpi!r}")
+        # PDF reads default to DROPPING page rasters — see read_pdf's note.
+        keep_image = self._keep(keep_image, False)
+        do_auto = self.autorotate if autorotate is None else autorotate
+        pipe0 = self._live_pipe()
+        # mode="text" never rotates, so the model is not required there.
+        if do_auto and mode != "text":
+            self._require_doc_ori(pipe0)
+        return self._stream_pdf_pages(
+            pdf, dpi=dpi, pages=pages, drop_score=drop_score,
+            max_pages=max_pages, text_source=mode, ordered=ordered,
+            progress=progress, keep_image=keep_image, on_error=on_error,
+            do_auto=do_auto, password=password,
+        )
+
+    def _stream_pdf_pages(
+        self, pdf, *, dpi, pages, drop_score, max_pages, text_source, ordered,
+        progress, keep_image, on_error, do_auto, password,
+    ) -> Generator[PageResult, None, None]:
+        """The generator behind :meth:`read_pdf_stream` — arguments arrive
+        pre-validated and pre-resolved (keep_image and do_auto are concrete
+        bools). The public ``mode=`` keyword becomes ``text_source`` at this
+        boundary: "mode" already means the ENGINE execution path
+        (OCR(mode=)/info()["mode"]), and one word carrying both meanings is
+        how pdf_to_searchable earned a six-line disambiguation comment."""
+        from .pdf import iter_pdf_pages, pdf_page_count
+
+        if progress:
+            # Totals consult the document so a pages= list with out-of-range
+            # entries cannot overshoot (a bar that never completes).
+            n_doc = pdf_page_count(pdf, password=password)
+            if pages is not None:
+                total = len([p for p in pages if 1 <= p <= n_doc])
+            else:
+                total = n_doc
             if max_pages:
                 total = min(total, max_pages)
+        else:
+            total = 0
         report = _make_progress(progress, total, "pages")
 
-        def _ocr_page(item):
-            page_no, arr = item
-            pr = self._read_array(
-                arr, drop_score=drop_score, page=page_no, keep_image=keep_image
-            )
+        def _text_page(page_no, w, h, lines) -> PageResult:
+            pr = PageResult(width=w, height=h, page=page_no)
+            for text, quad in lines:
+                pr.lines.append(
+                    TextLine(text=text, confidence=1.0, box=quad, source="pdf")
+                )
             pr.dpi = dpi
             return pr
 
-        for i, pr in enumerate(
-            _parallel_map(
-                render_pdf(pdf, dpi=dpi, pages=pages, max_pages=max_pages),
-                _ocr_page, self.replicas, ordered=ordered,
-            ),
-            1,
-        ):
-            yield pr
-            report(i)
+        if text_source == "text":
+            # Embedded text layer only — no rendering, no OCR, no engine
+            # work; serialized behind the process-wide PDFium lock (held per
+            # page, so concurrent callers interleave). Routed through
+            # iter_pdf_pages so on_error="skip" contains a failing page here
+            # too (it used to end a 500-page extraction at page one), and a
+            # layer-less page carries a no_text_layer warning instead of
+            # being indistinguishable from a blank page.
+            for i, item in enumerate(
+                iter_pdf_pages(pdf, dpi=dpi, pages=pages, max_pages=max_pages,
+                               mode="text", password=password,
+                               on_error=on_error), 1
+            ):
+                kind, page_no, *rest = item
+                if kind == "error":
+                    pr = PageResult(page=page_no)
+                    pr.warnings.append(f"page_failed: {rest[0]}")
+                    pr.dpi = dpi
+                else:
+                    w, h, lines, _arr, page_warns = rest
+                    pr = _text_page(page_no, w, h, lines)
+                    pr.warnings.extend(page_warns)
+                yield pr
+                report(i)
+            return
+
+        # Text-layer pages carry no raster by default; render one anyway when
+        # the engine runs structure stages (they need pixels) or the caller
+        # asked to keep page images (draw()/save_searchable_pdf afterwards).
+        structure_wanted = self.has_layout or self.has_tables or self.has_formulas
+        text_with_raster = structure_wanted or keep_image
+
+        def _process(item):
+            kind, page_no, *rest = item
+            try:
+                if kind == "error":
+                    # Producer-side containment (on_error="skip"): the page
+                    # failed to load/extract/render inside iter_pdf_pages.
+                    pr = PageResult(page=page_no)
+                    pr.warnings.append(f"page_failed: {rest[0]}")
+                    pr.dpi = dpi
+                    return pr
+                if kind == "text":
+                    w, h, lines, arr, page_warns = rest
+                    pr = _text_page(page_no, w, h, lines)
+                    pr.warnings.extend(page_warns)
+                    if arr is not None:
+                        if keep_image:
+                            pr.image = np.ascontiguousarray(arr, dtype=np.uint8)
+                        if structure_wanted:
+                            # Server parity (Geometric + layout): the page's
+                            # TEXT stays byte-exact from the layer while the
+                            # structure stages run on the rendered raster —
+                            # want_text=False goes through the shared request
+                            # gate as a layout-only run. Without this, the
+                            # auto default silently returned zero layout/
+                            # tables/formulas for every born-digital page.
+                            sr = self._read_array(
+                                arr, drop_score=drop_score, page=page_no,
+                                keep_image=False, want_text=False,
+                            )
+                            pr.layout = sr.layout
+                            pr.tables = sr.tables
+                            pr.formulas = sr.formulas
+                            pr.warnings.extend(sr.warnings)
+                    return pr
+                arr = rest[0]
+                angle = 0
+                if do_auto:
+                    # Per-page, exactly like read(): detect on the raster,
+                    # rotate upright, then OCR. _read_array records the angle
+                    # as PageResult.orientation via rotate=.
+                    arr = np.ascontiguousarray(arr, dtype=np.uint8)
+                    with self._checkout() as pipe:
+                        angle = int(pipe.detect_orientation(arr))
+                    if angle:
+                        arr = rotate_bound(arr, angle)
+                pr = self._read_array(
+                    arr, drop_score=drop_score, page=page_no,
+                    keep_image=keep_image, rotate=angle,
+                )
+                pr.dpi = dpi
+                return pr
+            except Exception as exc:
+                if on_error == "raise":
+                    raise
+                w = h = 0
+                if kind == "img" and rest and hasattr(rest[0], "shape"):
+                    h, w = rest[0].shape[:2]
+                pr = _failed_page(exc, page=page_no, width=w, height=h)
+                pr.dpi = dpi
+                return pr
+
+        # Page work rides the engine's SHARED executor, so any number of
+        # concurrent streams (sync, async, nested inside each other's loops)
+        # share `replicas` worker threads and always make progress — workers
+        # never wait on consumers. Memory note: each open stream still keeps
+        # its own bounded look-ahead window of at most replicas+1 rendered
+        # pages, so raster memory scales with the streams a caller holds
+        # open concurrently; threads do not.
+        executor = self._stream_executor() if self.replicas > 1 else None
+        try:
+            for i, pr in enumerate(
+                _parallel_map(
+                    iter_pdf_pages(pdf, dpi=dpi, pages=pages,
+                                   max_pages=max_pages, mode=text_source,
+                                   password=password,
+                                   text_with_raster=text_with_raster,
+                                   on_error=on_error),
+                    _process, self.replicas, ordered=ordered,
+                    executor=executor,
+                ),
+                1,
+            ):
+                yield pr
+                report(i)
+        except RuntimeError as exc:
+            if "cannot schedule new futures" in str(exc):
+                # close() shut the shared executor mid-stream: name the real
+                # cause, not the executor mechanics.
+                raise RuntimeError(
+                    "this OCR engine was closed — construct a new OCR()"
+                ) from exc
+            raise
 
     def pdf_to_searchable(
         self,
         input_pdf: ImageInput,
         output_pdf: str,
         *,
-        dpi: int = 150,
+        dpi: int = DEFAULT_DPI,
         pages: Optional[List[int]] = None,
         max_pages: Optional[int] = None,
         drop_score: float = DROP_SCORE,
         progress=None,
+        on_error: str = "raise",
+        autorotate: Optional[bool] = None,
+        password: Optional[str] = None,
     ) -> str:
         """Stream a PDF through OCR into a SEARCHABLE PDF (page image + invisible
         text layer), writing ``output_pdf``. This is :meth:`read_pdf_stream`
@@ -834,14 +1434,19 @@ class OCR:
         but the output is written strictly in page order, holding at most
         ``replicas + 1`` page rasters at a time — so it scales to large scans.
         ``keep_image=True`` is forced: the output embeds each page's raster,
-        regardless of the engine-level ``keep_image`` default. Requires the
-        ``pdf`` extra (pypdfium2 + reportlab)."""
+        regardless of the engine-level ``keep_image`` default.
+        ``on_error="skip"`` writes a failed page as an empty (image-less)
+        placeholder page instead of aborting the whole document."""
         from .searchable_pdf import build_searchable_pdf
 
         build_searchable_pdf(
             self.read_pdf_stream(
                 input_pdf, dpi=dpi, pages=pages, drop_score=drop_score,
                 max_pages=max_pages, progress=progress, keep_image=True,
+                on_error=on_error, autorotate=autorotate, password=password,
+                # Pinned page-text source: the output EMBEDS rasters, so
+                # every page must render.
+                mode="ocr",
             ),
             out_path=output_pdf,
         )
@@ -894,36 +1499,78 @@ class OCR:
         """Async :meth:`read_pdf_stream` — ``async for page in
         ocr.aread_pdf_stream(pdf)`` yields each :class:`PageResult` as it is
         ready (``ordered=False`` for completion order), without blocking the
-        event loop: each step of the underlying generator runs in a worker
-        thread, while the replica pool keeps OCR-ing the queued pages between
-        steps. Breaking out of the loop cleans up the queued work."""
+        event loop. Breaking out of the loop cleans up the queued work.
+
+        Every step of one stream runs on its OWN dedicated thread, not
+        asyncio's shared default executor. Two hangs required that:
+        gathering more streams than the shared executor had threads parked
+        every thread in ``_doc_gate.acquire()`` and wedged the whole loop
+        (the permit-holding stream could never get a thread to advance); and
+        cancelling a task mid-``next()`` had the cleanup close the generator
+        from a second thread while it was still executing — ``ValueError:
+        generator already executing`` instead of ``CancelledError``. One
+        single-thread executor per stream gives gate waiters their own
+        threads and serializes close() AFTER any in-flight step."""
         import asyncio
+        from concurrent.futures import ThreadPoolExecutor
 
         gen = self.read_pdf_stream(pdf, **kwargs)
         sentinel = object()
+        loop = asyncio.get_running_loop()
+        ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aread_pdf_stream")
         try:
             while True:
-                item = await asyncio.to_thread(next, gen, sentinel)
+                item = await loop.run_in_executor(ex, next, gen, sentinel)
                 if item is sentinel:
                     return
-                yield item
+                # mypy sees `object` through run_in_executor's erasure; the
+                # generator yields PageResult by its own annotation.
+                yield item  # type: ignore[misc]
         finally:
-            # Close the sync generator off-loop: closing triggers its cleanup
-            # (cancel queued pages, drain the executor), which can block
-            # briefly on in-flight OCR.
-            await asyncio.to_thread(gen.close)
+            # Close on the SAME single worker: queued behind any in-flight
+            # next(), so the generator is never entered from two threads.
+            # Shielded so a second cancellation cannot orphan the close —
+            # and even if the await itself is cancelled, the close call is
+            # already queued on the executor and WILL run.
+            close_fut = loop.run_in_executor(ex, gen.close)
+            try:
+                await asyncio.shield(close_fut)
+            except asyncio.CancelledError:
+                pass
+            finally:
+                ex.shutdown(wait=False)
 
     def close(self) -> None:
         """Release the native ONNX sessions. The engine is unusable afterward.
         Optional — fine to rely on GC for the common one-engine-per-process
         case; use this (or the context manager) when churning many engines.
-        Waits for in-flight reads: every replica is reclaimed from the pool
-        before any is dropped, so a concurrent read() finishes rather than
-        racing a teardown."""
-        for _ in range(len(self._pipes)):
-            self._pool.get()
+        A read that already CHECKED OUT a replica finishes before its pipe
+        is dropped (every replica is reclaimed from the pool first); a read
+        that has not yet checked out raises the closed error instead.
+        Idempotent and race-safe: two threads closing concurrently used to
+        each try to drain `replicas` pipes from a pool holding only
+        `replicas` — both hung forever."""
+        with self._close_mu:
+            if self._closed:
+                return  # second closer returns; the first is draining
+            self._closed = True  # checked by _checkout: raise, never hang
+            n = len(self._pipes)
+            ex = self._pdf_executor
+            self._pdf_executor = None
+        if ex is not None:
+            # Queued page work is cancelled; running pages finish. A stream
+            # still pumping surfaces the closed error (the submit-after-
+            # shutdown RuntimeError is translated in _stream_pdf_pages).
+            ex.shutdown(wait=False, cancel_futures=True)
+        for _ in range(n):
+            pipe = self._pool.get()
+            if pipe is _POOL_CLOSED:  # cannot happen before our sentinel; belt
+                self._pool.put(pipe)
+                break
         self._pipes = []
         self._pipe = None
+        # Wake any reader that raced past the _closed check into Queue.get().
+        self._pool.put(_POOL_CLOSED)
 
     def __enter__(self) -> "OCR":
         return self
@@ -937,6 +1584,9 @@ class OCR:
             "backend": self.backend,
             "engine": self.engine,
             "mode": getattr(self, "mode", None),
+            # what the caller ASKED for, next to what they got — the pair
+            # that answers "did native actually come up?" at a glance.
+            "requested_mode": getattr(self, "requested_mode", None),
             "replicas": self.replicas,
             "fp16": self.fp16,
             "provider_summary": self.provider_summary,

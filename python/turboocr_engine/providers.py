@@ -23,13 +23,13 @@ below, so "which package do I install for my GPU" has a single source of truth.
 
 from __future__ import annotations
 
-import os
 import platform
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
+import contextlib
 
 ProviderSpec = Tuple[str, Dict[str, object]]  # (ep_name, provider_options)
 
@@ -231,10 +231,8 @@ def _detect_hardware_cached() -> HardwareInfo:
             for ln in drv.splitlines():
                 ln = ln.strip()
                 if ln and ln[0].isdigit():
-                    try:
+                    with contextlib.suppress(ValueError):
                         hw.nvidia_driver_major = int(ln.split(".")[0])
-                    except ValueError:
-                        pass
                     break
 
     # AMD — rocminfo / rocm-smi.

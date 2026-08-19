@@ -4,6 +4,11 @@ Mirrors the C++ ``OCRResultItem`` / ``OcrPipelineResult`` so the Python
 bindings and the C++ engine describe a page the same way. Everything here is a
 plain dataclass with ``to_dict`` / ``to_json`` helpers — no numpy in the public
 surface, so results pickle and JSON-serialize cleanly.
+
+Key-name note: this library's ``to_dict`` uses ``box``/``label``/``score``;
+the HTTP server's JSON spells the same fields ``bounding_box``/``class``/
+``confidence``. Every ``from_dict`` here accepts BOTH spellings, so a server
+response parses into these types directly.
 """
 
 from __future__ import annotations
@@ -11,7 +16,7 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterator, List, Optional, Tuple
 
 # A detection quad, always ordered [top-left, top-right, bottom-right, bottom-left].
 Quad = Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int], Tuple[int, int]]
@@ -70,12 +75,29 @@ def _html_table_to_markdown(html: str) -> str:
         cells = re.findall(r"<t[hd][^>]*>(.*?)</t[hd]>", r, re.S | re.I)
         parsed.append([_htmlmod.unescape(re.sub(r"<[^>]+>", "", c)).strip() for c in cells])
     if not parsed or any(len(r) != len(parsed[0]) for r in parsed) or not parsed[0]:
-        return html  # ragged / empty -> raw HTML is still valid Markdown
+        # Ragged (colspan/rowspan) tables pass through as raw HTML — valid
+        # in Markdown. TRUST NOTE: the native pipeline entity-escapes cell
+        # text at the source (html_reconstruct.cpp), so engine-produced HTML
+        # is safe; a TableRegion built from UNTRUSTED JSON carries whatever
+        # its author wrote — sanitize `html` yourself before rendering.
+        return html
     ncol = len(parsed[0])
 
+    def _cell(c: str) -> str:
+        # Cell text was UNescaped above (to strip markup cleanly), so it must
+        # be re-entity-escaped before landing in Markdown — a scanned cell
+        # reading "<img onerror=...>" is untrusted text, and CommonMark/GFM
+        # pass inline HTML through. This is the same hole _md_escape closes
+        # for every other text sink. A literal | additionally breaks the grid.
+        c = c.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        # Backslash FIRST: escaping | on text that contains \| would emit
+        # \\| — an escaped backslash followed by an ACTIVE separator.
+        # Newlines inside a cell would split the Markdown row outright.
+        c = c.replace("\\", "\\\\").replace("|", "\\|")
+        return c.replace("\n", " ").replace("\r", " ")
+
     def _row(cells: List[str]) -> str:
-        # A literal | in ANY cell (header included) breaks the column grid.
-        return "| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |"
+        return "| " + " | ".join(_cell(c) for c in cells) + " |"
 
     out = [_row(parsed[0]), "| " + " | ".join(["---"] * ncol) + " |"]
     out.extend(_row(r) for r in parsed[1:])
@@ -91,13 +113,82 @@ def _hocr_document(page_divs: List[str]) -> str:
         '<html xmlns="http://www.w3.org/1999/xhtml">\n<head>\n'
         '  <meta charset="utf-8" />\n'
         '  <meta name="ocr-system" content="turboocr" />\n'
-        '  <meta name="ocr-capabilities" content="ocr_page ocr_line ocrx_word" />\n'
+        '  <meta name="ocr-capabilities" content="ocr_page ocr_line" />\n'
         "</head>\n<body>\n" + body + "\n</body>\n</html>"
     )
 
 
+# Distinct BGR colors for layout-region overlays, assigned per label via a
+# stable crc32 (see PageResult.draw).
+_LAYOUT_PALETTE = [
+    (255, 120, 0), (0, 120, 255), (0, 200, 255), (255, 0, 200),
+    (120, 220, 0), (200, 0, 255), (0, 255, 160), (0, 80, 255),
+]
+
+
+# Shared by every pandas entry point — the hint and the parse-failure
+# message exist once (they were spelled three times each).
+_PANDAS_HINT = (
+    "to_pandas() needs pandas — `pip install \"turboocr[cpu,pandas]\"`."
+)
+_NO_TABLE_MSG = "no table could be parsed from this region's HTML"
+
+
+def _require_pandas():
+    try:
+        import pandas as pd
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(_PANDAS_HINT) from exc
+    return pd
+
+
+def _line_row(ln: "TextLine", page=None) -> dict:
+    """One TextLine as the flat row both to_pandas() shapes share (the page
+    column leads only when a page number applies)."""
+    row = {} if page is None else {"page": page}
+    x0, y0, x1, y1 = ln.bbox
+    row.update({
+        "text": ln.text, "confidence": ln.confidence,
+        "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+        "box": [list(pt) for pt in ln.box],
+    })
+    return row
+
+
+def _tsv_row(ln: "TextLine", index: int, page=None) -> str:
+    x0, y0, x1, y1 = ln.bbox
+    text = ln.text.replace("\t", " ").replace("\n", " ")
+    lead = f"{page}\t" if page is not None else ""
+    return f"{lead}{index}\t{ln.confidence:.4f}\t{x0}\t{y0}\t{x1}\t{y1}\t{text}"
+
+
 def _quad_to_list(box: Quad) -> List[List[int]]:
     return [[int(x), int(y)] for (x, y) in box]
+
+
+def _quad_from_dict(d: dict) -> Quad:
+    """Read a quad under either spelling: this library serializes ``box``;
+    the C++ server emits ``bounding_box`` (serialization_items.h). from_dict
+    must accept both, or PageResult.from_dict(server_response) dies on a
+    KeyError — the parity these types exist to provide. Malformed shapes
+    fail HERE with a message naming the field, not three calls later as
+    ``min() arg is an empty sequence``."""
+    pts = d.get("box")
+    if pts is None:
+        pts = d.get("bounding_box")
+    if pts is None:
+        raise ValueError("missing 'box'/'bounding_box' in region dict")
+    try:
+        quad = tuple((int(p[0]), int(p[1])) for p in pts)
+    except (TypeError, IndexError, ValueError) as exc:
+        raise ValueError(
+            f"'box'/'bounding_box' must be four [x, y] points, got {pts!r}"
+        ) from exc
+    if len(quad) != 4:
+        raise ValueError(
+            f"'box'/'bounding_box' must have exactly 4 points, got {len(quad)}"
+        )
+    return quad  # type: ignore[return-value]
 
 
 @dataclass
@@ -158,10 +249,10 @@ class TextLine:
 
     @classmethod
     def from_dict(cls, d: dict) -> "TextLine":
-        box = tuple((int(p[0]), int(p[1])) for p in d["box"])
+        box = _quad_from_dict(d)
         return cls(
             text=d.get("text", ""),
-            confidence=float(d.get("confidence", 0.0)),
+            confidence=float(d.get("confidence", d.get("score", 0.0))),
             box=box,  # type: ignore
             source=d.get("source", ""),
             id=int(d.get("id", -1)),
@@ -177,23 +268,32 @@ class LayoutBox:
     confidence: float
     box: Quad
     id: int = -1
+    #: Containing region's id (nested regions), -1 for a top-level region.
+    parent_id: int = -1
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "label": self.label,
             "confidence": round(float(self.confidence), 4),
             "box": _quad_to_list(self.box),
             "id": self.id,
         }
+        if self.parent_id >= 0:
+            d["parent_id"] = self.parent_id
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "LayoutBox":
-        box = tuple((int(p[0]), int(p[1])) for p in d["box"])
+        box = _quad_from_dict(d)
         return cls(
-            label=d.get("label", ""),
-            confidence=float(d.get("confidence", 0.0)),
+            # The server spells the label "class" (layout regions) — accept
+            # both, same rationale as _quad_from_dict. `or`-chained so an
+            # explicit null under one key falls through to the other.
+            label=d.get("label") or d.get("class") or "",
+            confidence=float(d.get("confidence", d.get("score", 0.0))),
             box=box,  # type: ignore
             id=int(d.get("id", -1)),
+            parent_id=int(d.get("parent_id", -1)),
         )
 
 
@@ -205,20 +305,88 @@ class TableRegion:
     score: float
     box: Quad
     layout_id: int = -1
+    #: Server-shape passthrough: the HTTP API also emits per-cell geometry
+    #: (``cells: [{text, bounding_box, row, col, rowspan, colspan}]``) — the
+    #: only machine-usable form of a merged-cell table. Kept as plain dicts,
+    #: populated by from_dict, re-emitted by to_dict; the native pipeline
+    #: does not fill it (its cell geometry lives in the HTML).
+    cells: Optional[List[dict]] = None
+
+    @property
+    def confidence(self) -> float:
+        """Alias for ``score`` — TextLine/LayoutBox call the same number
+        ``confidence``, so both spellings work everywhere. ``score`` stays
+        canonical in this library's ``to_dict()``; the SERVER's own JSON
+        spells it ``confidence`` (from_dict accepts both)."""
+        return self.score
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "html": self.html,
             "score": round(float(self.score), 4),
             "box": _quad_to_list(self.box),
             "layout_id": self.layout_id,
         }
+        if self.cells is not None:
+            d["cells"] = self.cells
+        return d
+
+    def to_pandas(self):
+        """The table as a pandas DataFrame, parsed from the reconstructed
+        HTML (needs the ``[pandas]`` extra, which includes the lxml parser
+        ``pandas.read_html`` uses). Merged cells expand the way read_html
+        expands them: the spanned value repeats into each covered cell. A
+        ``<thead>`` row becomes the column header; without one, columns are
+        numbered. If the region's HTML holds several ``<table>`` elements,
+        the FIRST one is returned.
+
+        >>> page = ocr.read("invoice.png", tables=True)
+        >>> dfs = [t.to_pandas() for t in page.tables]
+        """
+        pd = _require_pandas()
+        from io import StringIO
+
+        try:
+            # keep_default_na/na_values: recognized CELL TEXT is data, not
+            # missing-value markers — "NA"/"None" in an invoice must stay the
+            # strings the engine read, and "1,234" must not be silently
+            # rewritten (no thousands parsing).
+            frames = pd.read_html(
+                StringIO(self.html), keep_default_na=False, na_values=[],
+                thousands=None,
+            )
+        except ImportError as exc:
+            try:
+                import lxml  # noqa: F401
+            except ImportError:
+                raise  # genuinely missing parser dependency ([pandas] extra)
+            # lxml IS installed: pandas only reaches its html5lib-fallback
+            # ImportError when lxml parsed the HTML and found no table — the
+            # no-table case wearing a dependency error's clothes.
+            raise ValueError(_NO_TABLE_MSG) from exc
+        except Exception as exc:
+            # read_html raises different types per failure (XMLSyntaxError on
+            # empty input, its own ValueError, even ImportError fallbacks on
+            # tables lxml can't see). One stable, documented type instead.
+            raise ValueError(
+                f"{_NO_TABLE_MSG} ({type(exc).__name__}: {exc})"
+            ) from exc
+        if not frames:  # belt and braces
+            raise ValueError(_NO_TABLE_MSG)
+        df = frames[0]
+        # Provenance rides in pandas' metadata slot, not in data columns.
+        df.attrs.update({"score": float(self.score), "box": _quad_to_list(self.box)})
+        return df
 
     @classmethod
     def from_dict(cls, d: dict) -> "TableRegion":
-        box = tuple((int(p[0]), int(p[1])) for p in d["box"])
-        return cls(html=d.get("html", ""), score=float(d.get("score", 0.0)),
-                   box=box, layout_id=int(d.get("layout_id", -1)))  # type: ignore
+        box = _quad_from_dict(d)
+        # This library serializes "score"; the server emits "confidence" for
+        # structure regions — accept both (score wins when both appear).
+        score = float(d.get("score", d.get("confidence", 0.0)))
+        return cls(html=d.get("html", ""), score=score,
+                   box=box, layout_id=int(d.get("layout_id", -1)),
+                   cells=d.get("cells"))  # type: ignore
 
 
 @dataclass
@@ -230,6 +398,11 @@ class FormulaRegion:
     box: Quad
     layout_id: int = -1
 
+    @property
+    def confidence(self) -> float:
+        """Alias for ``score`` (see :attr:`TableRegion.confidence`)."""
+        return self.score
+
     def to_dict(self) -> dict:
         return {
             "latex": self.latex,
@@ -240,8 +413,9 @@ class FormulaRegion:
 
     @classmethod
     def from_dict(cls, d: dict) -> "FormulaRegion":
-        box = tuple((int(p[0]), int(p[1])) for p in d["box"])
-        return cls(latex=d.get("latex", ""), score=float(d.get("score", 0.0)),
+        box = _quad_from_dict(d)
+        score = float(d.get("score", d.get("confidence", 0.0)))
+        return cls(latex=d.get("latex", ""), score=score,
                    box=box, layout_id=int(d.get("layout_id", -1)))  # type: ignore
 
 
@@ -268,8 +442,9 @@ class PageResult:
     reading_order: List[int] = field(default_factory=list)
     #: Additive degradation warnings (recognition produced boxes but no text, etc.).
     warnings: List[str] = field(default_factory=list)
-    #: The BGR source image this page was read from (kept for draw()/crop();
-    #: set by the pipeline unless keep_image=False). Not serialized.
+    #: The BGR source image this page was read from (kept for draw()/crop()).
+    #: read() stores it by default; read_pdf/read_batch drop it unless
+    #: keep_image=True. Not serialized.
     image: Any = field(default=None, repr=False, compare=False)
 
     # -- convenience -------------------------------------------------------
@@ -333,30 +508,51 @@ class PageResult:
         color: Tuple[int, int, int] = (0, 200, 0),
         thickness: int = 2,
         show_text: bool = False,
+        layout: bool = False,
+        lines: bool = True,
     ) -> Any:
         """Return a copy of the source image with detected quads drawn on it.
 
         ``image`` defaults to the page's stored source image (BGR numpy). Set
         ``show_text=True`` to also render the recognized text above each box.
-        Returns a **BGR** array (OpenCV order); convert with ``arr[..., ::-1]``
-        before handing it to PIL/matplotlib."""
+        ``layout=True`` additionally draws the LAYOUT REGIONS (run with
+        ``layout=True`` at read time): each region in a stable per-label color
+        with a ``label score`` caption — pass ``lines=False`` for a
+        layout-only overlay. Returns a **BGR** array (OpenCV order); convert
+        with ``arr[..., ::-1]`` before handing it to PIL/matplotlib."""
         import cv2
         import numpy as np
 
         base = image if image is not None else self.image
         if base is None:
             raise ValueError(
-                "no image to draw on — pass image=..., or construct the OCR with "
-                "keep_image=True (the default)."
+                "no image to draw on — pass image=..., or read with "
+                "keep_image=True (read() keeps rasters by default; "
+                "read_pdf/read_batch drop them)."
             )
         canvas = base.copy()
-        for ln in self.lines:
-            pts = np.array(ln.box, dtype=np.int32).reshape(-1, 1, 2)
-            cv2.polylines(canvas, [pts], True, color, thickness)
-            if show_text:
-                x, y = ln.box[0]
-                cv2.putText(canvas, ln.text, (int(x), int(y) - 4),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+        if lines:
+            for ln in self.lines:
+                pts = np.array(ln.box, dtype=np.int32).reshape(-1, 1, 2)
+                cv2.polylines(canvas, [pts], True, color, thickness)
+                if show_text:
+                    x, y = ln.box[0]
+                    cv2.putText(canvas, ln.text, (int(x), int(y) - 4),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+        if layout:
+            import zlib
+
+            # Stable per-label colors: crc32, not hash() — hash() is salted
+            # per process, and a label changing color between two runs of the
+            # same script reads as a different detection.
+            for lb in self.layout:
+                c = _LAYOUT_PALETTE[zlib.crc32(lb.label.encode()) % len(_LAYOUT_PALETTE)]
+                pts = np.array(lb.box, dtype=np.int32).reshape(-1, 1, 2)
+                cv2.polylines(canvas, [pts], True, c, thickness + 1)
+                x, y = lb.box[0]
+                caption = f"{lb.label} {lb.confidence:.2f}"
+                cv2.putText(canvas, caption, (int(x) + 2, max(int(y) - 6, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, c, 2, cv2.LINE_AA)
         return canvas
 
     def save_overlay(self, path: str, *, image: Any = None, **kw: Any) -> str:
@@ -368,7 +564,8 @@ class PageResult:
 
     def save_searchable_pdf(self, path: str) -> str:
         """Write a single-page searchable PDF (image + invisible OCR text layer).
-        Needs the page image (``keep_image=True``, the default) and reportlab."""
+        Needs the page image — read() keeps it by default; on the PDF/batch
+        paths pass ``keep_image=True``."""
         from .searchable_pdf import build_searchable_pdf
 
         build_searchable_pdf([self], out_path=path)
@@ -376,7 +573,8 @@ class PageResult:
 
     def to_pdf_bytes(self) -> bytes:
         """Return this page as a searchable PDF (bytes) — e.g. for a web
-        response. Needs the page image (``keep_image=True``) and reportlab."""
+        response. Needs the page image (``keep_image=True`` on the PDF/batch
+        paths)."""
         from .searchable_pdf import build_searchable_pdf
 
         return build_searchable_pdf([self])  # type: ignore[return-value]
@@ -385,24 +583,32 @@ class PageResult:
     def to_tsv(self) -> str:
         """Tab-separated: index, confidence, x0, y0, x1, y1, text (bbox coords)."""
         rows = ["index\tconfidence\tx0\ty0\tx1\ty1\ttext"]
-        for i, ln in enumerate(self.lines):
-            x0, y0, x1, y1 = ln.bbox
-            text = ln.text.replace("\t", " ").replace("\n", " ")
-            rows.append(f"{i}\t{ln.confidence:.4f}\t{x0}\t{y0}\t{x1}\t{y1}\t{text}")
+        rows.extend(_tsv_row(ln, i) for i, ln in enumerate(self.lines))
         return "\n".join(rows)
 
     def _hocr_page_div(self, page_id: int = 1) -> str:
         import html
+        import re as _re
 
+        # XML 1.0 forbids C0 controls (except \t \n \r): one stray control
+        # glyph from a PDF text layer or recognizer output would make the
+        # whole hOCR document unparseable to every consumer.
+        _ctrl = _re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+        # LINE granularity, honestly: the engine recognizes whole lines, so
+        # there are no word boxes to report. The old output wrapped each full
+        # line in a fake single ocrx_word span, which made word-level
+        # consumers (hocr-pdf word highlighting, layout analysis) treat every
+        # line as one giant word. x_wconf on the line is a common extension;
+        # the capabilities meta above claims only ocr_page/ocr_line.
         lines = []
         for i, ln in enumerate(self.lines):
             x0, y0, x1, y1 = ln.bbox
-            conf = int(round(ln.confidence * 100))
+            conf = round(ln.confidence * 100)
             lines.append(
                 f'   <span class="ocr_line" id="line_{page_id}_{i}" '
-                f'title="bbox {x0} {y0} {x1} {y1}">'
-                f'<span class="ocrx_word" title="bbox {x0} {y0} {x1} {y1}; '
-                f'x_wconf {conf}">{html.escape(ln.text)}</span></span>'
+                f'title="bbox {x0} {y0} {x1} {y1}; x_wconf {conf}">'
+                f'{html.escape(_ctrl.sub("", ln.text))}</span>'
             )
         body = "\n".join(lines)
         return (
@@ -417,28 +623,31 @@ class PageResult:
         div = self._hocr_page_div(page_id)
         return _hocr_document([div]) if full else div
 
-    def to_pandas(self):
-        """Return a pandas DataFrame of the lines (requires ``pip install
-        "turboocr[cpu,pandas]"``)."""
-        try:
-            import pandas as pd
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                "to_pandas() needs pandas — `pip install \"turboocr[cpu,pandas]\"`."
-            ) from exc
+    def tables_to_pandas(self):
+        """The RECOGNIZED TABLES as DataFrames — one per table region, in
+        region order (run with ``tables=True``; needs the ``[pandas]``
+        extra). This — not :meth:`to_pandas` — is the tabular view of the
+        page's tables: :meth:`to_pandas` is the page's text LINES as one
+        tidy frame. Each frame carries provenance in ``DataFrame.attrs``:
+        ``box``, ``score``, and ``page`` when known.
 
-        return pd.DataFrame(
-            [
-                {
-                    "text": ln.text,
-                    "confidence": ln.confidence,
-                    "x0": ln.bbox[0], "y0": ln.bbox[1],
-                    "x1": ln.bbox[2], "y1": ln.bbox[3],
-                    "box": [list(p) for p in ln.box],
-                }
-                for ln in self.lines
-            ]
-        )
+        >>> page = ocr.read("invoice.png", tables=True)
+        >>> for df in page.tables_to_pandas():
+        ...     print(df.attrs["box"], df.shape)
+        """
+        frames = [t.to_pandas() for t in self.tables]
+        if self.page is not None:
+            for df in frames:
+                df.attrs["page"] = self.page
+        return frames
+
+    def to_pandas(self):
+        """The page's text LINES as one tidy DataFrame — text, confidence and
+        geometry per row (requires ``pip install "turboocr[cpu,pandas]"``).
+        For the recognized tables themselves use :meth:`tables_to_pandas`,
+        which turns each table region into its own DataFrame."""
+        pd = _require_pandas()
+        return pd.DataFrame([_line_row(ln) for ln in self.lines])
 
     def to_dict(self) -> dict:
         d: dict = {
@@ -448,6 +657,11 @@ class PageResult:
         }
         if self.page is not None:
             d["page"] = self.page
+        if self.dpi is not None:
+            # Without this, a page serialized and restored lost its render
+            # DPI, and a searchable PDF built from the restored page came out
+            # at the wrong physical size (dpi=None means "treat as 72 DPI").
+            d["dpi"] = self.dpi
         if self.orientation:
             d["orientation"] = self.orientation
         if self.layout:
@@ -467,17 +681,35 @@ class PageResult:
 
     @classmethod
     def from_dict(cls, d: dict) -> "PageResult":
+        # Server-key acceptance, same rationale as _quad_from_dict:
+        # * lines live under "results" (this library AND the server); a
+        #   hand-built {"lines": [...]} used to parse SILENTLY into an
+        #   empty page — accepted as an alias instead;
+        # * the server spells orientation "orientation_deg";
+        # * the server reports degradation as flags + message pairs
+        #   (text_/table_/formula_degraded), which the native path turns
+        #   into warnings strings — do the same here, or a degraded server
+        #   page parses as clean.
+        warnings_ = list(d.get("warnings", []))
+        for kind in ("text", "table", "formula"):
+            if d.get(f"{kind}_degraded"):
+                msg = f"{kind}_degraded: {d.get(f'{kind}_warning') or 'no detail'}"
+                if msg not in warnings_:  # flags + a warnings array: no dupes
+                    warnings_.append(msg)
         return cls(
-            lines=[TextLine.from_dict(x) for x in d.get("results", [])],
+            lines=[TextLine.from_dict(x)
+                   for x in (d.get("results") or d.get("lines") or [])],
             width=int(d.get("width", 0)),
             height=int(d.get("height", 0)),
             page=d.get("page"),
-            orientation=int(d.get("orientation", 0)),
+            dpi=d.get("dpi"),
+            orientation=int(d.get("orientation",
+                                  d.get("orientation_deg", 0)) or 0),
             layout=[LayoutBox.from_dict(x) for x in d.get("layout", [])],
             tables=[TableRegion.from_dict(x) for x in d.get("tables", [])],
             formulas=[FormulaRegion.from_dict(x) for x in d.get("formulas", [])],
             reading_order=list(d.get("reading_order", [])),
-            warnings=list(d.get("warnings", [])),
+            warnings=warnings_,
         )
 
     @classmethod
@@ -620,8 +852,20 @@ class DocumentResult:
 
     @classmethod
     def from_dict(cls, d: dict) -> "DocumentResult":
+        # The PDF route wraps pages in {"pages": [...]}; the /ocr/batch route
+        # uses {"batch_results": [...]} — accept both. A dict with NEITHER
+        # used to return a silently empty document; refuse it instead.
+        pages = d.get("pages")
+        if pages is None:
+            pages = d.get("batch_results")
+        if pages is None and d:
+            raise ValueError(
+                "not a serialized DocumentResult: expected 'pages' (PDF "
+                f"route) or 'batch_results' (/ocr/batch), got keys "
+                f"{sorted(d.keys())[:8]}"
+            )
         return cls(
-            pages=[PageResult.from_dict(p) for p in d.get("pages", [])],
+            pages=[PageResult.from_dict(x) for x in (pages or [])],
             source=d.get("source", ""),
         )
 
@@ -629,12 +873,12 @@ class DocumentResult:
     def from_json(cls, s: str) -> "DocumentResult":
         return cls.from_dict(json.loads(s))
 
-    def to_markdown(self) -> str:
+    def to_markdown(self, *, structured: Optional[bool] = None) -> str:
         parts: List[str] = []
         for p in self.pages:
             if p.page is not None:
                 parts.append(f"<!-- page {p.page} -->")
-            parts.append(p.to_markdown())
+            parts.append(p.to_markdown(structured=structured))
         return "\n\n".join(x for x in parts if x)
 
     def to_tsv(self) -> str:
@@ -642,12 +886,8 @@ class DocumentResult:
         rows = ["page\tindex\tconfidence\tx0\ty0\tx1\ty1\ttext"]
         for p in self.pages:
             pg = p.page if p.page is not None else 0
-            for i, ln in enumerate(p.lines):
-                x0, y0, x1, y1 = ln.bbox
-                text = ln.text.replace("\t", " ").replace("\n", " ")
-                rows.append(
-                    f"{pg}\t{i}\t{ln.confidence:.4f}\t{x0}\t{y0}\t{x1}\t{y1}\t{text}"
-                )
+            rows.extend(_tsv_row(ln, i, page=pg)
+                        for i, ln in enumerate(p.lines))
         return "\n".join(rows)
 
     def to_hocr(self) -> str:
@@ -655,28 +895,24 @@ class DocumentResult:
         divs = [p._hocr_page_div(page_id=(p.page or i + 1)) for i, p in enumerate(self.pages)]
         return _hocr_document(divs)
 
+    def tables_to_pandas(self):
+        """Every recognized table in the document as its own DataFrame, in
+        page order (see :meth:`PageResult.tables_to_pandas`); each frame's
+        ``attrs["page"]`` says which page it came from."""
+        return [df for p in self.pages for df in p.tables_to_pandas()]
+
     def to_pandas(self):
-        """One DataFrame across all pages, with a ``page`` column (needs pandas)."""
-        try:
-            import pandas as pd
-        except ImportError as exc:  # pragma: no cover
-            raise ImportError(
-                "to_pandas() needs pandas — `pip install \"turboocr[cpu,pandas]\"`."
-            ) from exc
+        """The text LINES of all pages as one DataFrame with a ``page`` column
+        (needs pandas). For the recognized tables use
+        :meth:`tables_to_pandas`."""
+        pd = _require_pandas()
 
         # Build the rows once and hand pandas a single list, instead of
         # constructing a DataFrame per page and concatenating: for a
         # several-hundred-page scan that was N frame allocations plus an N-way
         # concat to produce exactly the same table.
         rows = [
-            {
-                "page": p.page if p.page is not None else 0,
-                "text": ln.text,
-                "confidence": ln.confidence,
-                "x0": ln.bbox[0], "y0": ln.bbox[1],
-                "x1": ln.bbox[2], "y1": ln.bbox[3],
-                "box": [list(pt) for pt in ln.box],
-            }
+            _line_row(ln, page=p.page if p.page is not None else 0)
             for p in self.pages
             for ln in p.lines
         ]
@@ -711,7 +947,8 @@ class DocumentResult:
 
     def save_searchable_pdf(self, path: str) -> str:
         """Write a searchable PDF (image + invisible OCR text layer) to ``path``.
-        Needs page images (``keep_image=True``, the default) and reportlab."""
+        Needs page images — pass ``keep_image=True`` to read_pdf/read_batch
+        (they drop rasters by default), or use ``pdf_to_searchable()``."""
         from .searchable_pdf import build_searchable_pdf
 
         build_searchable_pdf(self.pages, out_path=path)

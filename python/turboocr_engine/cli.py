@@ -4,6 +4,7 @@
     turboocr ocr image.png          # OCR an image
     turboocr pdf doc.pdf --markdown # OCR a PDF to Markdown
     turboocr models                 # list available models
+    turboocr info                   # build the engine, print its resolved config
 """
 
 from __future__ import annotations
@@ -12,6 +13,8 @@ import argparse
 import os
 import sys
 from typing import List, Optional
+
+from .options import DEFAULT_DPI, DROP_SCORE, OUTPUT_FORMATS
 
 
 def _parse_pages(s: Optional[str]) -> Optional[List[int]]:
@@ -35,8 +38,17 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--backend", default="auto", help="auto|fast|cpu | vendor backends: nvidia(turbo/tensorrt)|intel|amd|apple(metal) | ORT EPs: cuda|openvino|coreml|... (default: auto)")
     p.add_argument("--models-dir", default=None, help="directory of ONNX models (else auto/download)")
     p.add_argument("--device", default=None, help="device hint for OpenVINO (CPU|GPU|NPU|AUTO)")
+    p.add_argument("--replicas", type=int, default=1,
+                    help="engine replicas — parallel pages/images (default 1)")
     p.add_argument("--cls", action="store_true", help="enable 180° angle classification")
-    p.add_argument("--drop-score", type=float, default=0.5, help="min confidence to keep (default 0.5)")
+    p.add_argument("--tables", action="store_true",
+                   help="recognize tables (HTML) inside layout regions")
+    p.add_argument("--formulas", action="store_true",
+                   help="recognize formulas (LaTeX) inside layout regions")
+    p.add_argument("--autorotate", action="store_true",
+                   help="detect and correct 0/90/180/270 page rotation")
+    p.add_argument("--drop-score", type=float, default=DROP_SCORE,
+                   help=f"min confidence to keep (default {DROP_SCORE})")
 
 
 def _build_ocr(args):
@@ -51,6 +63,10 @@ def _build_ocr(args):
         device=args.device,
         use_cls=args.cls,
         layout=getattr(args, "layout", False),
+        tables=getattr(args, "tables", False),
+        formulas=getattr(args, "formulas", False),
+        autorotate=getattr(args, "autorotate", False),
+        replicas=max(1, getattr(args, "replicas", 1)),
     )
     if args.verbose:
         print(f"[turboocr] {ocr.provider_summary} | model={ocr.model_name}", file=sys.stderr)
@@ -59,18 +75,21 @@ def _build_ocr(args):
 
 def _emit(page_or_doc, fmt: str, out) -> None:
     """Write a PageResult/DocumentResult in the requested format to `out`."""
+    is_doc = hasattr(page_or_doc, "pages")
     if fmt == "json":
         out.write(page_or_doc.to_json(indent=2) + "\n")
     elif fmt == "markdown":
         out.write(page_or_doc.to_markdown() + "\n")
     elif fmt == "tsv":
-        pages = getattr(page_or_doc, "pages", [page_or_doc])
-        for p in pages:
-            out.write(p.to_tsv() + "\n")
+        # DocumentResult.to_tsv: ONE header + a page column. Looping per-page
+        # to_tsv repeated the header and lost page identity.
+        out.write(page_or_doc.to_tsv() + "\n")
     elif fmt == "hocr":
-        pages = getattr(page_or_doc, "pages", [page_or_doc])
-        for i, p in enumerate(pages, 1):
-            out.write(p.to_hocr(page_id=i) + "\n")
+        # A COMPLETE hOCR document (html/head/ocr-system meta, real page
+        # numbers) — bare sibling ocr_page divs are not parseable XML, so
+        # hocr-tools rejected the old multi-page output.
+        text = page_or_doc.to_hocr() if is_doc else page_or_doc.to_hocr(full=True)
+        out.write(text + "\n")
     else:  # text
         out.write(page_or_doc.text + "\n")
 
@@ -124,29 +143,86 @@ def cmd_ocr(args: argparse.Namespace) -> int:
     ocr = _build_ocr(args)
     fmt = _resolve_fmt(args)
     multi = len(paths) > 1
+    # json/tsv/hocr ALWAYS emit the document shape ({"pages":[...]} / page
+    # column / one hOCR doc), single input included: the shape used to
+    # depend on how many files the GLOB matched, so `... | jq '.pages'`
+    # worked until a directory happened to contain one file.
+    accumulate = fmt in ("json", "tsv", "hocr")
+    json_pages = []
+    doc_pages = []
+    skipped = 0
     with _open_out(args.output) as out:
         for i, path in enumerate(paths):
-            res = ocr.read(path, drop_score=args.drop_score, layout=args.layout or None)
-            if multi and fmt in ("text", "markdown"):
-                out.write(f"===== {path} =====\n")
-            _emit(res, fmt, out)
+            try:
+                res = ocr.read(path, drop_score=args.drop_score,
+                               layout=args.layout or None,
+                               tables=args.tables or None,
+                               formulas=args.formulas or None)
+            except Exception as exc:
+                if args.on_error == "raise":
+                    raise
+                # Best-effort mode: one corrupt file in a 500-scan glob must
+                # not discard every already-OCR'd result. Noted on stderr;
+                # the exit code still reports partial failure.
+                skipped += 1
+                print(f"turboocr: skipped {path}: {exc}", file=sys.stderr)
+                continue
             if args.overlay:
-                # For a single input use the path as-is; for many, suffix each
-                # so nothing is silently overwritten/ignored.
+                # Overlays need the raster — draw BEFORE the accumulators
+                # strip it. For a single input use the path as-is; for many,
+                # suffix each so nothing is silently overwritten.
                 dst = args.overlay
                 if multi:
                     stem, ext = os.path.splitext(args.overlay)
                     dst = f"{stem}_{i}{ext or '.png'}"
-                res.save_overlay(dst, show_text=False)
-    return 0
+                res.save_overlay(dst, show_text=False, layout=bool(args.layout))
+            if accumulate and fmt == "json":
+                d = res.to_dict()
+                d["source"] = path
+                d["page"] = i + 1
+                json_pages.append(d)
+            elif accumulate:
+                res.page = i + 1
+                # Accumulating whole PageResults kept every ~6 MB raster
+                # alive for the run; only the text/boxes are needed here.
+                res.image = None
+                doc_pages.append(res)
+            elif multi:
+                out.write(f"===== {path} =====\n")
+                _emit(res, fmt, out)
+            else:
+                _emit(res, fmt, out)
+        if accumulate and fmt == "json":
+            import json as _json
+
+            # ONE parseable document, same {"pages": [...]} envelope the pdf
+            # subcommand emits (concatenated JSON objects are unparseable; a
+            # bare array differed from the pdf shape for no reason).
+            out.write(_json.dumps({"pages": json_pages}, ensure_ascii=False,
+                                  indent=2) + "\n")
+        elif accumulate:
+            from .result import DocumentResult
+
+            # tsv: one header + page column. hocr: ONE complete document —
+            # per-image emission stacked N <html> documents (unparseable).
+            _emit(DocumentResult(pages=doc_pages), fmt, out)
+    return 1 if skipped else 0
 
 
 def cmd_pdf(args: argparse.Namespace) -> int:
-    ocr = _build_ocr(args)
+    # Argument contradictions fail BEFORE the engine builds — constructing a
+    # model pipeline just to print a usage error wastes seconds and downloads.
     if args.searchable:
         if not args.output:
             print("turboocr: --searchable requires -o/--output <file.pdf>", file=sys.stderr)
             return 2
+        if args.mode == "text":
+            print("turboocr: --searchable always renders and OCRs (its output "
+                  "embeds page images) — it cannot run with --mode text",
+                  file=sys.stderr)
+            return 2
+    ocr = _build_ocr(args)
+    if args.searchable:
         # Stream page-by-page (constant memory) straight to the searchable PDF.
         ocr.pdf_to_searchable(
             args.file,
@@ -155,6 +231,7 @@ def cmd_pdf(args: argparse.Namespace) -> int:
             pages=_parse_pages(args.pages),
             max_pages=args.max_pages,
             drop_score=args.drop_score,
+            password=args.password,
             progress=True if args.verbose else None,
         )
         return 0
@@ -163,7 +240,9 @@ def cmd_pdf(args: argparse.Namespace) -> int:
         dpi=args.dpi,
         pages=_parse_pages(args.pages),
         max_pages=args.max_pages,
+        mode=args.mode,
         drop_score=args.drop_score,
+        password=args.password,
         progress=True if args.verbose else None,
     )
     fmt = _resolve_fmt(args)
@@ -174,6 +253,14 @@ def cmd_pdf(args: argparse.Namespace) -> int:
                 out.write(page.text + "\n")
         else:
             _emit(doc, fmt, out)
+    return 0
+
+
+def cmd_info(args: argparse.Namespace) -> int:
+    import json
+
+    ocr = _build_ocr(args)
+    print(json.dumps(ocr.info(), indent=2))
     return 0
 
 
@@ -205,26 +292,48 @@ def build_parser() -> argparse.ArgumentParser:
     o = sub.add_parser("ocr", help="OCR one or more images")
     o.add_argument("images", nargs="+", help="image path(s) or glob(s)")
     _add_common(o)
-    o.add_argument("-f", "--format", choices=["text", "json", "markdown", "tsv", "hocr"], default=None)
+    o.add_argument("-f", "--format", choices=list(OUTPUT_FORMATS), default=None)
     o.add_argument("-o", "--output", default=None, help="write to file instead of stdout")
     o.add_argument("--layout", action="store_true", help="also detect layout regions")
     o.add_argument("--overlay", default=None, help="save a boxes-overlay image to this path (single input)")
     o.add_argument("--json", action="store_true", help="shorthand for --format json")
+    o.add_argument("--on-error", choices=["raise", "skip"], default="raise",
+                   dest="on_error",
+                   help="skip = note unreadable images on stderr and keep "
+                        "going (exit 1 if any were skipped); raise = stop at "
+                        "the first failure (default)")
     o.set_defaults(func=cmd_ocr)
 
     pf = sub.add_parser("pdf", help="OCR a PDF")
     pf.add_argument("file")
     _add_common(pf)
-    pf.add_argument("--dpi", type=int, default=150, help="render DPI (default 150)")
+    pf.add_argument("--mode", choices=["ocr", "text", "auto"], default="auto",
+                    help="auto = embedded text layer where present, OCR for "
+                         "scanned pages (default); ocr = render+OCR every page "
+                         "(force re-OCR); text = text layer only, no OCR")
+    pf.add_argument("--password", default=None,
+                    help="password for an encrypted PDF (user or owner)")
+    pf.add_argument("--dpi", type=int, default=DEFAULT_DPI,
+                    help=f"render DPI (default {DEFAULT_DPI})")
     pf.add_argument("--pages", default=None, help="1-based pages, e.g. 1,3,5-8")
     pf.add_argument("--max-pages", type=int, default=None, help="cap page count")
     pf.add_argument("--layout", action="store_true", help="also detect layout regions")
     pf.add_argument("--searchable", action="store_true", help="write a searchable PDF (needs -o out.pdf)")
-    pf.add_argument("-f", "--format", choices=["text", "json", "markdown", "tsv", "hocr"], default=None)
+    pf.add_argument("-f", "--format", choices=list(OUTPUT_FORMATS), default=None)
     pf.add_argument("-o", "--output", default=None, help="write to file instead of stdout")
     pf.add_argument("--json", action="store_true", help="shorthand for --format json")
     pf.add_argument("--markdown", action="store_true", help="shorthand for --format markdown")
     pf.set_defaults(func=cmd_pdf)
+
+    i = sub.add_parser(
+        "info",
+        help="build the engine and print its resolved configuration (JSON)",
+        description="Construct the engine with the given options and print "
+        "OCR.info() — resolved model, backend, mode, capabilities — as JSON.",
+    )
+    _add_common(i)
+    i.add_argument("--layout", action="store_true", help="also load the layout model")
+    i.set_defaults(func=cmd_info)
 
     v = sub.add_parser("version", help="print version")
     v.set_defaults(func=cmd_version)

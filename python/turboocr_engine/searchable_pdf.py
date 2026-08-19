@@ -1,17 +1,24 @@
-"""Build a searchable PDF: the rendered page image with an INVISIBLE OCR text
-layer on top, so the output looks identical to the scan but the text can be
-selected, searched, and copied — the ocrmypdf/Acrobat "OCR a PDF" deliverable.
+"""Build a searchable PDF. Two page forms, decided per page:
 
-v1 rasterizes each page (from the kept page image) and overlays invisible text
-(PDF text render mode 3), positioned by each line's bounding box and
-horizontally scaled to the box width so search highlights track the glyphs.
-The page media box is sized in real points from the render DPI. Assumes
-axis-aligned / near-horizontal lines (rotated lines use their AABB); a later
-upgrade can overlay onto the original vector page instead of a raster.
+* a page WITH a raster becomes the image with an INVISIBLE OCR text layer on
+  top (render mode 3) — looks identical to the scan, text selectable and
+  searchable: the ocrmypdf/Acrobat "OCR a PDF" deliverable;
+* a page WITHOUT a raster (a text-layer page from ``mode="auto"``/``"text"``,
+  or an OCR'd page read with ``keep_image=False``) becomes a VISIBLE
+  text-only page — a re-typeset rendering, NOT a facsimile of the source.
+  For guaranteed image+invisible-text output use ``pdf_to_searchable()``
+  (which pins ``mode="ocr"`` and keeps rasters) or read with
+  ``keep_image=True`` and ``mode="ocr"``.
+
+Invisible runs are positioned by each line's bounding box and horizontally
+scaled to the box width so search highlights track the glyphs. The page media
+box is sized in real points from the render DPI. Assumes axis-aligned /
+near-horizontal lines (rotated lines use their AABB); a later upgrade can
+overlay onto the original vector page instead of a raster.
 
 Not PDF/A-safe: the text layer uses reportlab's non-embedded ``STSong-Light``
 CID font (viewer-substituted). For archival/PDF-A conformance, embed a glyphless
-Unicode font instead. Requires reportlab (``pip install "turboocr[cpu,pdf]"``).
+Unicode font instead. reportlab ships with the engine wheel (4.0.0a6+).
 """
 
 from __future__ import annotations
@@ -33,8 +40,9 @@ def _reportlab():
         return canvas, ImageReader
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(
-            "searchable PDF needs reportlab — `pip install \"turboocr[cpu,pdf]\"` "
-            "(or `pip install reportlab`)."
+            "searchable PDF needs reportlab — it ships with the engine wheel "
+            "since 4.0.0a6, so this environment is missing it unusually: "
+            "`pip install reportlab` restores it."
         ) from exc
 
 
@@ -70,7 +78,13 @@ def build_searchable_pdf(pages: Iterable, out_path: Optional[str] = None) -> Opt
     ``pages`` may be a list OR a lazy generator — pages are consumed one at a
     time, so a streaming OCR run never has to hold every page raster at once.
     Writes to ``out_path`` if given (returns None), else returns the PDF bytes.
-    Each page should carry its source image (``keep_image=True``, the default)."""
+
+    A page WITH a raster becomes image + invisible text; a page WITHOUT one
+    (a text-layer page from ``mode="auto"``/``"text"``, or a page contained
+    by ``on_error="skip"``) becomes a visible text-only page. Only when NO
+    page carries a raster while OCR-sourced lines exist — the signature of a
+    read that dropped its rasters (``keep_image=False`` is the PDF/batch
+    default) — does this refuse, naming the fix."""
     canvas, ImageReader = _reportlab()
     font = _text_font()
 
@@ -88,13 +102,22 @@ def build_searchable_pdf(pages: Iterable, out_path: Optional[str] = None) -> Opt
 
     c = None
     n = 0
+    saw_image = False
+    saw_ocr_lines = False
+    any_lines = False
     warned_blank = False
+    last_size_px = None  # (w, h): fallback for degenerate (failed-page) dims
     try:
         for page in pages:
             if getattr(page, "lines", None) is None:
                 continue
             n += 1
             img = getattr(page, "image", None)
+            saw_image = saw_image or img is not None
+            saw_ocr_lines = saw_ocr_lines or any(
+                getattr(ln, "source", "") != "pdf" for ln in page.lines
+            )
+            any_lines = any_lines or bool(page.lines)
             # px -> pt using the page's render DPI (1pt = 1/72"), so a 150-DPI
             # letter scan makes an 8.5x11" page, not a 17x22" one.
             dpi = float(getattr(page, "dpi", None) or 72.0)
@@ -103,15 +126,31 @@ def build_searchable_pdf(pages: Iterable, out_path: Optional[str] = None) -> Opt
                 h_px, w_px = img.shape[:2]
                 raster = img
             else:
-                if not warned_blank:
+                if not warned_blank and any(
+                    getattr(ln, "source", "") != "pdf" for ln in page.lines
+                ):
+                    # Only OCR'd-but-rasterless pages get the warning; a
+                    # text-layer page never had a raster and a text-only page
+                    # is its correct rendering, not a degradation.
                     warnings.warn(
-                        "searchable PDF: a page has no image (build the OCR with "
-                        "keep_image=True). Emitting a text-only page.",
+                        "searchable PDF: an OCR'd page has no image (read "
+                        "with keep_image=True). Writing it as a text-only "
+                        "page.",
                         stacklevel=3,
                     )
                     warned_blank = True
-                h_px, w_px = int(page.height or 1), int(page.width or 1)
+                h_px, w_px = int(page.height or 0), int(page.width or 0)
+                if h_px <= 1 or w_px <= 1:
+                    # A page contained by on_error="skip" carries 0x0 dims —
+                    # rendered literally that was a 0.48pt speck of a page.
+                    # Reuse the document's running page size, else US-letter.
+                    if last_size_px is not None:
+                        w_px, h_px = last_size_px
+                    else:
+                        w_px = round(612 * dpi / 72.0)
+                        h_px = round(792 * dpi / 72.0)
                 raster = None
+            last_size_px = (w_px, h_px)
 
             w_pt, h_pt = w_px * s, h_px * s
             if c is None:
@@ -135,14 +174,13 @@ def build_searchable_pdf(pages: Iterable, out_path: Optional[str] = None) -> Opt
                 text = ln.text
                 if not text.strip():
                     continue
-                # Same keep-predicate as the C++ writer
-                # (pdf_searchable_encoding.cpp keep()): a line whose source is
-                # the PDF's OWN text layer must NOT be stamped again — the
-                # original text is already selectable, so re-stamping doubled
-                # every search hit and copy-pasted every word twice on any PDF
-                # that arrived with a text layer.
-                if getattr(ln, "source", "") == "pdf":
-                    continue
+                # UNLIKE the C++ writer (pdf_searchable_encoding.cpp keep()),
+                # source=="pdf" lines are NOT skipped here: the C++ path
+                # overlays onto the ORIGINAL page, whose own text layer stays
+                # selectable — this writer builds a NEW document from rasters
+                # (or text-only pages), so the original layer is gone and
+                # skipping its lines silently produced BLANK pages for every
+                # text-layer page of a mode="auto" document.
                 x0, y0, x1, y1 = ln.bbox
                 box_w_pt = max(1.0, (x1 - x0) * s)
                 font_size = max(1.0, (y1 - y0) * s * 0.85)
@@ -164,6 +202,28 @@ def build_searchable_pdf(pages: Iterable, out_path: Optional[str] = None) -> Opt
 
         if c is None or n == 0:
             raise ValueError("no pages to write")
+        if not saw_image and not any_lines:
+            # No rasters AND no text anywhere: N blank white pages would be
+            # the output — a failed/blank scan read with the keep_image=False
+            # default. Nothing meaningful to write; say why.
+            raise ValueError(
+                f"searchable PDF: nothing to write — none of the {n} pages "
+                "carries a raster or any recognized text. Check "
+                "PageResult.warnings, and read with keep_image=True if you "
+                "want the page images embedded regardless."
+            )
+        if not saw_image and saw_ocr_lines:
+            # The dropped-raster signature: OCR produced lines but no page
+            # kept its pixels — since 4.0.0a6 read_pdf/read_batch default to
+            # keep_image=False. (An all-text-layer document is NOT an error:
+            # it was written above as text-only pages — there never were
+            # rasters to embed.)
+            raise ValueError(
+                f"searchable PDF: none of the {n} pages carries its raster — "
+                "re-read with keep_image=True AND mode=\"ocr\" (mode=\"auto\" "
+                "serves text-layer pages without rendering), or use "
+                "pdf_to_searchable(), which does both automatically."
+            )
         c.save()
     except Exception:
         if tmp_path and os.path.exists(tmp_path):

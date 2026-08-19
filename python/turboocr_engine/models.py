@@ -28,6 +28,7 @@ from typing import Dict, Optional
 # path — resolving models from a local dir or the cache never needs it.
 
 from .catalog import ModelEntry
+import contextlib
 
 DEFAULT_RELEASE = "models-v3.0.0-ppocrv6"
 RELEASE_BASE = (
@@ -165,7 +166,11 @@ class ModelStore:
         for medium) while reporting the bundle as absent."""
         if os.path.isfile(os.path.join(det_export, "graph.json")):
             return True
-        return bool(glob.glob(os.path.join(det_export, "det_c*", "graph.json")))
+        # glob.escape: a cache path containing [, ? or * (a home dir like
+        # /Users/user[1]/) silently never matched, so every construction
+        # re-extracted the whole bundle.
+        return bool(glob.glob(os.path.join(glob.escape(det_export),
+                                           "det_c*", "graph.json")))
 
     def ensure_apple_native(self, entry: ModelEntry, resolved: "ResolvedModel") -> bool:
         """Best-effort: provision the Apple NATIVE-mode export bundle next to
@@ -204,17 +209,112 @@ class ModelStore:
                 return False
             rel = f"apple_native_{entry.name}.tar.gz"
             archive = os.path.join(self.cache_dir, rel)
-            if not os.path.exists(archive):
-                self._download_apple_bundle(rel, archive)
-            with tarfile.open(archive) as tf:
-                # 'data' filter (Python 3.12+): refuses absolute paths,
-                # traversal and special files from the archive.
-                tf.extractall(self.cache_dir, filter="data")
+            # Serialize competing provisioners (two processes constructing
+            # OCR(backend="apple") at once used to both download and extract
+            # straight into the cache, interleaving partial files). flock is
+            # advisory but every provisioner comes through here; darwin-only
+            # path, so fcntl is always available.
+            import fcntl
+
+            os.makedirs(self.cache_dir, exist_ok=True)
+            lock_path = os.path.join(
+                self.cache_dir, f".apple_native_{entry.name}.lock")
+            with open(lock_path, "w") as lk:
+                fcntl.flock(lk, fcntl.LOCK_EX)
+                try:
+                    # A racer may have provisioned while we waited on the lock.
+                    if self._det_export_present(det_export):
+                        return True
+                    if not os.path.exists(archive):
+                        self._download_apple_bundle(rel, archive)
+                    try:
+                        self._extract_apple_bundle(archive)
+                    except tarfile.TarError:
+                        # A truncated/corrupt cached archive would otherwise
+                        # fail identically on every construction forever —
+                        # drop it so the next attempt re-downloads (the
+                        # download path re-verifies the pinned SHA256).
+                        # SCOPED to archive-shaped failures: an OSError
+                        # (disk full, read-only cache) means the archive was
+                        # fine and the re-download would fail too — deleting
+                        # the SHA-verified copy would only make it worse.
+                        with contextlib.suppress(OSError):
+                            os.unlink(archive)
+                        raise
+                finally:
+                    fcntl.flock(lk, fcntl.LOCK_UN)
             return self._det_export_present(det_export)
         except Exception as exc:  # pragma: no cover - network/broken archive
             print(f"[turboocr] apple native bundle unavailable ({exc}); "
                   "backend='apple' uses the CoreML fallback.", file=sys.stderr)
             return False
+
+    def _extract_apple_bundle(self, archive: str) -> None:
+        """Extract ``archive`` via a private tempdir INSIDE the cache (same
+        filesystem, so every move is an atomic ``os.replace``), then place
+        files with the provisioned-probe files (``graph.json``) LAST: a
+        reader that does not take the provision lock can never observe the
+        bundle as provisioned while it is half-extracted. Files merge into
+        existing directories (``coreml/`` is shared between tiers — never
+        replace a directory wholesale)."""
+        with tempfile.TemporaryDirectory(
+            dir=self.cache_dir, prefix=".apple_native_tmp"
+        ) as tmp:
+            with tarfile.open(archive) as tf:
+                try:
+                    # 'data' filter: refuses absolute paths, traversal and
+                    # special files from the archive.
+                    tf.extractall(tmp, filter="data")
+                except TypeError:
+                    # PEP 706 filters landed in 3.12 and the 3.9.17/3.10.12/
+                    # 3.11.4 backports; older micros raise TypeError. Apply
+                    # the same safety checks by hand there.
+                    members = []
+                    for m in tf.getmembers():
+                        name = m.name
+                        # Both separators and drive-absolute Windows shapes:
+                        # tarfile rewrites "/" to os.sep on extraction, so
+                        # "C:/evil" and "a\\..\\b" escape on Windows even
+                        # though tar itself always stores "/". Unreachable
+                        # today (darwin-only caller, SHA-pinned archive) —
+                        # defense in depth for the day either changes.
+                        parts = name.replace("\\", "/").split("/")
+                        if (name.startswith(("/", "\\"))
+                                or ".." in parts
+                                or (len(name) > 1 and name[1] == ":")
+                                or not (m.isreg() or m.isdir())):
+                            raise RuntimeError(
+                                f"refusing unsafe archive member {name!r}"
+                            ) from None
+                        members.append(m)
+                    tf.extractall(tmp, members=members)
+            # Move files into place with the PROBE file — the DET export's
+            # graph.json, what _det_export_present checks — strictly LAST.
+            # "all graph.json last" was not enough: os.walk order put the det
+            # one FIRST among them on some tiers (APFS name hash), so a
+            # concurrent unlocked reader could see "provisioned" while every
+            # recognizer export was still in the tempdir — and an interrupted
+            # extraction left the cache permanently in that state (the probe
+            # short-circuits every later repair).
+            deferred = []
+            det_probe = []
+            for root, _dirs, files in os.walk(tmp):
+                for fn in files:
+                    src = os.path.join(root, fn)
+                    rel_p = os.path.relpath(src, tmp)
+                    dst = os.path.join(self.cache_dir, rel_p)
+                    if fn == "graph.json":
+                        top = rel_p.split(os.sep, 1)[0]
+                        if top.startswith("det"):
+                            det_probe.append((src, dst))
+                        else:
+                            deferred.append((src, dst))
+                        continue
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    os.replace(src, dst)
+            for src, dst in deferred + det_probe:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                os.replace(src, dst)
 
     def _download_apple_bundle(self, rel: str, dest: str) -> str:
         """Fetch one apple_native_* asset with its code-pinned SHA256.
@@ -304,7 +404,7 @@ class ModelStore:
         import urllib.request
 
         req = urllib.request.Request(url, headers={"User-Agent": "turboocr-python"})
-        with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=60) as r:
             return r.read()
 
     @staticmethod
@@ -312,7 +412,7 @@ class ModelStore:
         import urllib.request
 
         req = urllib.request.Request(url, headers={"User-Agent": "turboocr-python"})
-        with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as fh:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=120) as r, open(path, "wb") as fh:
             while True:
                 chunk = r.read(1 << 20)
                 if not chunk:

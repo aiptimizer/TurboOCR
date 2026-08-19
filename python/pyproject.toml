@@ -28,14 +28,23 @@ classifiers = [
 dependencies = [
     "numpy>=1.21",
     "opencv-python-headless>=4.6",
+    # PDF is a headline feature (the C++ server ships PDFium built in), so the
+    # wheel must not throw on read_pdf out of the box. pypdfium2 renders input
+    # PDFs (~3 MB); reportlab writes searchable output PDFs (~5 MB with its
+    # pillow dependency) — trivial next to the engine + models, and far
+    # cheaper than every "why doesn't read_pdf work" report the extra caused.
+    "pypdfium2>=4",
+    "reportlab>=3.6",
 ]
 
 [project.optional-dependencies]
-# pypdfium2 renders input PDFs; reportlab writes searchable output PDFs.
+# BACK-COMPAT alias: PDF deps are base dependencies now (see above), but
+# every published install line up to 4.0.0a5 says `turboocr[cpu,pdf]` — the
+# extra must keep resolving. Harmless: a subset of the base requirements.
 pdf = ["pypdfium2>=4", "reportlab>=3.6"]
 rich = ["rich>=13"]           # prettier `doctor` panel
-pandas = ["pandas>=1.3"]      # PageResult.to_pandas()
-all = ["pypdfium2>=4", "reportlab>=3.6", "rich>=13", "pandas>=1.3"]
+pandas = ["pandas>=1.3", "lxml>=4.9"]  # to_pandas()/tables_to_pandas(); lxml = the read_html parser
+all = ["pypdfium2>=4", "reportlab>=3.6", "rich>=13", "pandas>=1.3", "lxml>=4.9"]
 
 [project.scripts]
 turboocr = "turboocr_engine.cli:main"
@@ -136,3 +145,28 @@ skip = "*-musllinux*"
 
 [tool.cibuildwheel.macos]
 repair-wheel-command = "delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
+
+[tool.ruff]
+target-version = "py39"
+line-length = 200
+
+[tool.ruff.lint]
+# The bug rules only — the volume rules (PLC0415 lazy imports, T201 CLI
+# prints, ARG* dispatch signatures) fired 470 findings and zero bugs.
+select = ["F", "B", "PLE", "RUF", "SIM105", "SIM117", "RET504", "C4"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# Deliberate importable-but-not-in-__all__ plumbing (see the comment there).
+"turboocr_engine/__init__.py" = ["F401"]
+
+[tool.mypy]
+check_untyped_defs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Tests monkeypatch bound methods and hand-build quads — the type discipline
+# that protects the package would only fight the test style (same relief the
+# SDK's config grants its tests).
+module = ["tests.*", "test_smoke", "test_packaging", "conftest"]
+disable_error_code = ["method-assign", "assignment", "arg-type", "attr-defined", "union-attr", "index", "misc", "func-returns-value", "return-value", "var-annotated", "override"]
