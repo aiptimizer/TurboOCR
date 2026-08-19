@@ -42,9 +42,10 @@ APPLE_NATIVE_RELEASE = "apple-native-v2"
 APPLE_NATIVE_BASE = (
     "https://github.com/aiptimizer/TurboOCR/releases/download/" + APPLE_NATIVE_RELEASE
 )
-# v2 = the multi-canvas detection bundles (4 det canvases per tier, picked
-# per page by the shared aspect policy). v1 (single 992x768 canvas) stays
-# published and untouched — the 4.0.0a2 wheels have ITS url+hashes baked in.
+# v2 = the dynamic-detection bundles: ONE det export per tier (det_c992x768),
+# re-specialized per page shape by the engine at runtime. v1 (fixed-canvas
+# mode) stays published and untouched — the 4.0.0a2 wheels have ITS
+# url+hashes baked in.
 APPLE_NATIVE_SHA256 = {
     # Single det export per tier (det_c992x768): the runtime specializes the
     # detector per page shape from it (fully-convolutional graph, shared
