@@ -152,6 +152,12 @@ cmake --build build -j"$(sysctl -n hw.ncpu)"
 <details>
 <summary><strong>Intel CPU / 核显 / Arc</strong> &nbsp;·&nbsp; 测试中</summary>
 
+一个后端，两个名字：服务器侧叫 `intel`（厂商名，`--backend intel`），Python
+侧叫 `openvino`（Intel 的推理运行时 — `turboocr[openvino]`、
+`backend="openvino"`；`"intel"` 在带原生 intel 引擎的 wheel 上同样可用，在其它 wheel 上会抛出 BackendUnavailable）；`OV_DEVICE`/`device=` 再选择
+CPU、核显/Arc 或 NPU。其 CPU 设备同时也是任意 x86 CPU 上运行 TurboOCR
+最快的方式。
+
 两条路径运行的是同一个 OpenVINO 后端，区别只在两步由谁完成：Docker 镜像
 已把两步都固化进去（内部设置了 `TURBO_BACKEND=intel` — 所以它的运行命令
 不需要传 `--backend`）；从源码则由你自己传。
@@ -265,11 +271,12 @@ pip install "turboocr[rocm]"      # + AMD 引擎
 
 `turboocr doctor` 会为你的机器打印正确的安装命令 — 在 NVIDIA 上还会根据
 驱动版本在 `cuda12` 与 `cuda13` 之间选择。功能 extras 可组合：
-`"turboocr[cuda12,pdf]"`。由于 `4.0.0a5` 是预发布版本，即使发布后 pip
+`"turboocr[cuda12,pandas]"`（PDF 支持自 `4.0.0a6` 起已内置，无需 extra）。
+由于 `4.0.0a6` 是预发布版本，即使发布后 pip
 默认也不会选它 — 需要显式指定：
 
 ```bash
-pip install --pre "turboocr[cpu]"        # 或固定版本：turboocr[cpu]==4.0.0a5
+pip install --pre "turboocr[cpu]"        # 或固定版本：turboocr[cpu]==4.0.0a6
 ```
 
 在 NVIDIA 上，引擎 wheel 只需要 NVIDIA **驱动**（不需要 CUDA 工具包）。
@@ -372,7 +379,7 @@ RTX 5090 上测得：所有引擎使用完全相同的页面，计时窗口 ≥1
 PyPI 的文件大小审批 — 在那之前它们的 extras 无法解析，需从本仓库构建；
 `-rocm` 刻意未发布。某个引擎名下的 `0.0.0` 版本只是 PyPI 项目初始化用的
 空占位，不是可用的软件。裸 `pip install turboocr` 仍会解析到旧的
-**0.3.0 客户端**（无引擎）：`4.0.0a5` 是预发布版本，需要加 `--pre`：
+**0.3.0 客户端**（无引擎）：`4.0.0a6` 是预发布版本，需要加 `--pre`：
 
 ```bash
 pip install --pre "turboocr[cpu]"     # 或 [apple] | [cuda12] | [cuda13] | [openvino] | [rocm]
@@ -401,14 +408,27 @@ import turboocr
 ocr = turboocr.OCR(tier="tiny", replicas=3)   # 内置副本池
 page = ocr.read("invoice.png")                # 单图 → PageResult
 doc = ocr.read_batch(images)                  # 自动分发到各副本
-ocr.read_pdf("report.pdf")                    # PDF → DocumentResult
+doc = ocr.read_pdf("report.pdf")              # PDF → DocumentResult（页面同样并行分发）
+
+for page in ocr.read_pdf_stream("report.pdf"):    # 逐页流式返回，就绪即产出
+    ...                                            # ordered=False → 按完成顺序
+
+page = await ocr.aread("invoice.png")         # 异步孪生：aread / aread_batch /
+async for page in ocr.aread_pdf_stream(pdf):  #   aread_pdf / aread_pdf_stream
+    ...
 ```
 
 一个 `OCR(replicas=3)` 对象即可达到服务器多副本吞吐（Apple 芯片上实测为其 94%），
-无需自行管理线程。`backend=` 可选 `"cuda"`、`"apple"`、`"openvino"`、`"cpu"` 等 —
-与服务器共用同一套后端抽象。
+无需自行管理线程；多页 PDF 在加速器后端上约快 2.4×。`backend=` 可选
+`"cuda"`、`"apple"`、`"openvino"`、`"cpu"` 等 — 与服务器共用同一套后端抽象。
+自 4.0.0a6 起：`read_pdf`/`read_batch` 默认不再保留页面位图（需要
+`save_searchable_pdf()`/`draw()` 时传 `keep_image=True`）；`on_error="skip"`
+把单页失败收敛为 `page_failed` 警告而不是中断整个文档；`autorotate=True`
+同样作用于 PDF 页面；`password=` 可打开加密 PDF；`read_pdf` 默认 `mode="auto"` —
+有内嵌文本层的页面直接读取（原生数字 PDF 可达每秒数百页），
+无文本层的页面才走 OCR（`mode="ocr"` 强制全部重新识别）。
 
-→ [python/README.md](python/README.md) · [设计文档](python/DESIGN.md)
+→ [Python 库参考](docs/reference/python.md) · [python/README.md](python/README.md) · [设计文档](python/DESIGN.md)
 
 ---
 

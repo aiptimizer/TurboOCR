@@ -153,6 +153,14 @@ pip install build-wheels/cpu/fixed/*.whl
 <details class="phc-static" markdown="1">
 <summary><b>Intel CPU / iGPU / Arc</b> — testing</summary>
 
+**Naming, once:** *Intel* is the vendor and the server's backend name
+(`--backend intel`); *OpenVINO* is Intel's inference runtime and the
+Python-side name (`turboocr[openvino]`, `backend="openvino"` — `"intel"` is
+accepted as an alias). They are **one backend** — the native OpenVINO
+engine — and `OV_DEVICE` / `device=` picks which silicon runs it: `CPU`
+(any x86, measured faster than the plain CPU wheel on the same cores),
+`GPU` (iGPU/Arc), `NPU`.
+
 **Docker** — built from this repo, no published Intel image yet. The image
 pins `--backend intel` for you (via `TURBO_BACKEND=intel`) and defaults to
 OpenVINO's **CPU** device, which needs no device passthrough:
@@ -464,10 +472,11 @@ There is no Apple engine wheel: the macOS arm64 `turboocr-engine-cpu` wheel is
 built with the Apple backend and bundles the Metal shader library.
 `turboocr doctor` inspects the machine and prints the right line for it.
 
-Feature extras — `[pdf]` (read PDFs, write searchable PDFs), `[rich]` (prettier
-`doctor` panel), `[pandas]` (`PageResult.to_pandas()`), `[all]` — combine with
-any backend: `pip install "turboocr[cuda12,pdf]"`, or on a bare engine wheel,
-`pip install "turboocr-engine-cpu[all]"`.
+PDF support (read PDFs, write searchable PDFs) is built in — no extra
+needed (`[pdf]` still resolves for backwards compatibility). Feature extras —
+`[rich]` (prettier `doctor` panel), `[pandas]` (`PageResult.to_pandas()`),
+`[all]` — combine with any backend: `pip install "turboocr[cuda12,pandas]"`, or
+on a bare engine wheel, `pip install "turboocr-engine-cpu[all]"`.
 
 > **Published: cpu + openvino. Not yet: the NVIDIA wheels.**
 >
@@ -492,14 +501,14 @@ any backend: `pip install "turboocr[cuda12,pdf]"`, or on a bare engine wheel,
 > A bare `pip wheel python/` is **not** enough on its own — see
 > [why the helper script](#why-the-helper-script-not-pip-wheel) below.
 
-> **`4.0.0a5` is a pre-release — pip skips it by default.**
+> **`4.0.0a6` is a pre-release — pip skips it by default.**
 >
 > Once the wheels are published, a plain `pip install "turboocr[cpu]"` still
 > resolves to the newest *stable* release, not the alpha. Ask for it:
 >
 > ```bash
 > pip install --pre "turboocr[cpu]"
-> pip install "turboocr[cpu]==4.0.0a5"    # equivalent, explicit
+> pip install "turboocr[cpu]==4.0.0a6"    # equivalent, explicit
 > ```
 >
 > Verify what you got: `pip show turboocr-engine-cpu` (or your variant) and

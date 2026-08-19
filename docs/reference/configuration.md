@@ -358,6 +358,12 @@ See the *Apple Silicon* section of the README for why there is no Docker image.
 | `OV_REC_MAX_PREBUILD_WIDTH` | — | Widest pre-built recognizer width. |
 | `TURBO_INTEL_DEBUG` | off | Intel backend debug logging. |
 
+## Python library (turboocr-engine wheels)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TURBO_MAX_IMAGE_MP` | `96` | Decode safety ceiling in megapixels for `read()`/`read_batch` FILE/BYTES inputs. PNG, JPEG and BMP headers are sniffed BEFORE decoding, so a corrupt or hostile header claiming absurd dimensions fails in microseconds instead of OOMing; other encoded formats are checked after decode. NumPy/PIL inputs are deliberately exempt (their memory is already committed; the engine's DET_MAX_SIDE_LIMIT bounds what detection allocates). On the apple backend a separate hard axis cap of 16384 px applies (Metal's texture limit). Raise for legitimately huge scans, `0` disables. |
+
 ## Miscellaneous
 
 | Variable | Default | Meaning |

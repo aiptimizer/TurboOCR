@@ -23,7 +23,7 @@ print(page.text)                              # lines joined in reading order
 
 ocr = turboocr.OCR("medium", backend="cuda", replicas=3)
 doc = ocr.read_batch(images)                  # fans out across the replica pool
-doc = ocr.read_pdf("report.pdf", dpi=150)     # needs the `pdf` extra
+doc = ocr.read_pdf("report.pdf", dpi=150)     # PDF support is built in
 print(doc.to_markdown())
 ```
 
@@ -33,7 +33,7 @@ print(doc.to_markdown())
 OCR(model=None, backend="auto", *, lang=None, tier=None, models_dir=None,
     device=None, device_id=0, use_cls=False, mode="auto", replicas=1,
     fp16=True, allow_download=True, layout=False, tables=False,
-    formulas=False, autorotate=False, verbose=False, keep_image=True)
+    formulas=False, autorotate=False, verbose=False, keep_image=None)
 ```
 
 **Model selection** — explicit `model=` wins; else `lang` (+ `tier`); else
@@ -56,8 +56,8 @@ Japanese ([model selection](../models/selection.md)).
 | `mode` | `"native"`/`"ultra"` = the vendor graph engine (TensorRT / MPSGraph / OpenVINO blob — fastest, needs a one-time build); `"onnx"`/`"fast"` = the ONNX model on that vendor's ORT provider, no graph build; `"auto"` takes native when its artefact exists. Resolved value: `info()["mode"]` |
 | `replicas` | Independent native pipelines behind a checkout queue — one pipeline is single-flight, so this is where concurrency comes from. Each replica holds its own model copy in memory. `replicas=3` measured ~2.4× one replica (94% of the server's multi-replica throughput) on Apple silicon |
 | `layout` / `tables` / `formulas` | Load the optional stage models at construction (tables/formulas imply layout). Per-call opt-in still applies at `read()` |
-| `autorotate` | Load the page-orientation model (0/90/180/270) |
-| `keep_image` | Keep each page's raster on the result (needed for `save_overlay` / `save_searchable_pdf`); pass `False` for large PDFs — a raster is ~6 MB per page at 150 DPI |
+| `autorotate` | Load the page-orientation model (0/90/180/270). Applies to `read()` **and** the PDF paths: each rendered page is detected, rotated upright before OCR, and the angle lands in `PageResult.orientation`. Deliberately **opt-in**: measured on the fixture corpus, the classifier false-fires (180°) on 2 of 19 upright images (a menu photo and a multi-language page) even through its confidence gate — rotating a correct page is worse than leaving a rotated one — and costs roughly +3 ms/page (cpu tiny) to +11 ms/page (apple tiny). Scanned-document corpora measure clean (0 false positives on rendered PDF pages) |
+| `keep_image` | Keep each page's raster on the result (needed for `save_overlay` / `save_searchable_pdf` / `draw`). Default is per path: `read()` keeps it, `read_pdf`/`read_batch` **drop** it (a raster is ~6 MB per page at 150 DPI — long documents retained GBs). Set it here to override both, or per call |
 
 ## Backends
 
@@ -70,8 +70,9 @@ what the installed wheel carries.
 | `"auto"` *(default)* | The installed wheel's best default | On the NVIDIA wheels this resolves to **`"turbo"`** — the first run builds and caches a TensorRT engine (one-time; `TRT_ENGINE_CACHE`, default `~/.cache/turbo-ocr`). Elsewhere: the CPU path |
 | `"cpu"` | ONNX Runtime, MLAS | Works on every wheel |
 | `"cuda"` | ORT CUDA execution provider | NVIDIA wheels; instant start, no engine build |
-| `"turbo"` (`"tensorrt"`, `"trt"`) | Native TensorRT engine | NVIDIA wheels; peak throughput, one-time cached engine build |
-| `"openvino"` (`"ov"`, `"intel"`) | **Native OpenVINO engine** on the openvino wheel; the ORT OpenVINO EP on builds that carry it | `device=` picks `CPU`/`GPU`/`NPU`; the OpenVINO runtime arrives as the wheel's own pip dependency, found automatically |
+| `"turbo"` (`"tensorrt"`, `"trt"`) | Native TensorRT engine | NVIDIA wheels; peak throughput, one-time cached engine build. On wheels without the nvidia engine it raises `BackendUnavailable` (it used to silently run on CPU) |
+| `"openvino"` (`"ov"`) | **Native OpenVINO engine** on the openvino wheel; the ORT OpenVINO EP on builds that carry it | `device=` picks `CPU`/`GPU`/`NPU`; the OpenVINO runtime arrives as the wheel's own pip dependency, found automatically |
+| `"intel"` | The native intel engine ONLY | Unlike `"openvino"` it has no EP fallback: on wheels without the engine it raises `BackendUnavailable` naming turboocr-engine-openvino |
 | `"apple"` | The Apple backend, in one of two modes — see below | macOS builds of the cpu wheel only |
 | `"rocm"` / `"migraphx"` | ORT ROCm / MIGraphX EPs | rocm wheel (not yet hardware-verified) |
 
@@ -104,27 +105,65 @@ page = ocr.read(image, *, drop_score=0.5, rotate=0, layout=None,
 
 `image` is a path, bytes, NumPy array, or PIL image. `layout=True` adds
 layout regions; `tables=True` / `formulas=True` return HTML / LaTeX regions
-(the matching `OCR(...)` flag must have loaded the model); `text=False` is a
+(the matching `OCR(...)` flag must have loaded the model);
+`reading_order=True` needs the layout model too (`OCR(layout=True)` — the
+shared gate rejects it otherwise); `text=False` is a
 layout-only run — validated by the same shared option gate as the HTTP
 `?text=0`, so unsupported combinations raise the exact server error message.
 `drop_score` below the engine's 0.5 floor is rejected rather than silently
 ignored.
 
 ```python
-doc = ocr.read_batch(images, *, batch_size=8, progress=None, ...)
+doc = ocr.read_batch(images, *, batch_size=8, progress=None,
+                     on_error="raise", keep_image=None, ...)
 ```
 
 Images go through the native whole-batch submission in groups of
 `batch_size` (the server's `/ocr/batch` chunking), so the detector sees a
 real batch. Requests needing per-image stages (layout, tables, formulas,
 autorotate) fall back to one-at-a-time. `progress=True` logs to stderr, or
-pass a callable `progress(done, total)`.
+pass a callable `progress(done, total)`. `on_error="skip"` contains a
+failing image to its own page — an empty `PageResult` with a
+`page_failed: ...` warning — instead of aborting the batch; the default
+`"raise"` propagates the first failure and cancels the images not yet
+started.
 
 ```python
-doc = ocr.read_pdf(pdf, *, dpi=150, pages=None, max_pages=None, ...)
+doc = ocr.read_pdf(pdf, *, dpi=150, pages=None, max_pages=None,
+                   mode="auto", on_error="raise", autorotate=None,
+                   keep_image=None, password=None, ...)
 ```
 
-Renders with PDFium (the `pdf` extra: `pip install "turboocr[cpu,pdf]"`) and
+`mode` picks how each page's text is obtained: `"auto"` (default since
+4.0.0a6) — per page, the embedded text layer where the page has one AND a
+quality gate trusts it, OCR for everything else. The gate shares the
+server's structure (garbled/`U+FFFD`-heavy, control-character-ridden, and
+**thin** layers are refused — a Bates stamp or fax header on a scan must
+not hijack the page) with a deliberately stricter trust threshold: pages
+under ~50 visible layer chars simply OCR, where the server accepts 10.
+`/Rotate`d pages serve their layers like any other (the rotation transform
+is ink-verified; boxes land where the render puts the glyphs). Throughput
+is density-dependent: ~2700 pages/s on sparse digital pages, ~260 on
+typical body text, ~100 on very dense 7k-char pages (the char-accurate
+extractor costs ~2x the old run-based one on dense pages — the old one
+fragmented and duplicated lines, so this is correctness bought at a fair
+price; lines carry `source="pdf"`, byte-exact). Engines built with
+layout/tables/formulas still run those **structure stages** on text-layer
+pages (the page renders for the structure pass). `reading_order` is never
+computed on PDF pages — neither text-layer nor OCR'd (the PDF entry points
+expose no reading_order parameter today). The remaining caveat: a scan
+whose text layer came from earlier (possibly worse) OCR software and
+passes the gate is served as-is — `mode="ocr"` forces re-OCR of every
+page. `"text"` is the layer only, no OCR and NO gate (close to the
+server's `geometric` mode, which does apply its gate; the server's
+`auto_verified` mode is currently aliased to `auto` there and has no
+Python spelling). `pdf_to_searchable()` always renders (its output embeds
+the page rasters). Note the HTTP server's `/ocr/pdf`
+keeps `mode=ocr` as ITS default — the library default changed because a
+library call sees the whole document result at once; a service default is a
+separate decision.
+Renders with PDFium — built in, no extra needed (pypdfium2 and reportlab
+ship with the engine wheel since 4.0.0a6) — and
 OCRs each page. Pages fan out across the replica pool: with
 `OCR(replicas=3)`, a 24-page scan measured **2.41×** faster than the
 sequential read (24.5 → 59 pages/s on Apple silicon, tiny tier),
@@ -132,7 +171,26 @@ byte-identical output — results are assembled strictly in page order, and at
 most `replicas + 1` page rasters are in flight, so memory stays bounded on
 large documents. `replicas=1` is exactly the sequential read.
 `pdf_to_searchable(...)` uses the same fan-out while still writing pages in
-order. Pass `keep_image=False` for long documents.
+order. Page rasters are **dropped by default** on the PDF paths (since
+4.0.0a6) — pass `keep_image=True` when you need `doc.save_searchable_pdf()`
+or `draw()` afterwards (`pdf_to_searchable()` keeps them automatically).
+`on_error="skip"` turns a failing page — OCR failures AND page
+render/extract failures — into an empty result carrying a
+`page_failed: ...` warning instead of aborting the document;
+`autorotate=True` (or engine-level `OCR(autorotate=True)`) straightens
+rotated scans per page. Honest scaling note: the
+fan-out pays on **accelerator** backends (Apple measured 2.41×, CUDA
+similar), where one replica underuses the device; on the plain CPU backend a
+single replica already spreads across the cores, so extra replicas buy only
+~1.2× there (measured on a 20-core Linux box).
+
+`password=` opens an encrypted PDF (user or owner password) — accepted by
+`read_pdf`, `read_pdf_stream`, and `pdf_to_searchable`. Input guards: a PDF
+handed to `read()` (or an image handed to `read_pdf()`) is refused with a
+pointer to the right method; a **multi-page TIFF** is refused with its page
+count instead of silently decoding only page 1; and a PNG/JPEG header
+claiming absurd dimensions fails fast under the `TURBO_MAX_IMAGE_MP` ceiling
+(default 96 MP) instead of OOMing.
 
 ```python
 for page in ocr.read_pdf_stream(pdf, ordered=False):   # generator of PageResult
@@ -148,7 +206,17 @@ first page after 57 ms where the full 24-page document takes ~400 ms), with
 the same replica fan-out and bounded memory. `ordered=True` (default) yields
 strictly in page order; `ordered=False` yields in completion order — no
 finished page waits on a slower earlier one; reassemble by `PageResult.page`.
-Breaking out of either loop cancels the queued pages.
+Breaking out of either loop cancels the queued pages. Concurrency: all of
+an engine's streams share ONE pool of `replicas` page-worker threads, so
+any number of concurrent documents — gathered, interleaved
+(`zip(stream_a, stream_b)`), or nested inside each other's loops, sync or
+async — make progress without stacking threads (workers never wait on
+consumers, so there is no deadlock class). Each OPEN stream still holds its
+own bounded look-ahead window of at most `replicas + 1` rendered pages, so
+raster memory scales with the streams you hold open concurrently — close
+or exhaust what you are done with. `mode="text"` streams use no workers,
+and each async stream pumps on its own dedicated thread (never asyncio's
+shared executor).
 
 ## Async
 
@@ -182,7 +250,9 @@ rather than being silently ignored. `ocr.info()` reports what a constructed
 engine actually resolved to — backend, engine, `mode` (`native` vs `onnx`),
 model paths, capabilities. `ocr.close()` releases the native pipelines. The
 Python twins of the CLI's doctor are `turboocr_engine.doctor()` (prints the
-panel) and `available_backends()`.
+panel and returns a dict — `doctor()["native_backends"]` lists the seam
+engines such as `apple`) and `available_backends()` (ORT execution
+providers only; it does NOT list seam backends).
 
 ## Results
 
@@ -207,8 +277,12 @@ doc.to_pandas()                                  # one DataFrame, `page` column
 | Attribute | Meaning |
 |---|---|
 | `text` | The transcript |
-| `confidence` | Recognition confidence, 0–1 |
+| `confidence` | Recognition confidence, 0–1 (1.0 for text-layer lines) |
 | `box` | The four corner points it was read from, in original-image pixel coordinates |
+| `bbox` | Axis-aligned `(x0, y0, x1, y1)` over the corners |
+| `source` | `""` for OCR, `"pdf"` for a PDF's embedded text layer |
+| `id` / `layout_id` | Reading-order index / owning layout region (−1 when not requested) |
+| `crop(image)` | The rectified pixel strip of this line from the source image |
 
 ### `PageResult` — one image or PDF page
 
@@ -221,17 +295,26 @@ The page behaves as a sequence of its lines: `for line in page`, `page[0]`,
 | `text` | All lines joined with newlines |
 | `width`, `height` | Source image size in pixels |
 | `page` | 1-based page number for PDF pages; `None` for standalone images |
+| `dpi` | Render DPI for PDF pages (serialized, so a restored page still sizes its searchable PDF correctly) |
 | `orientation` | Rotation applied before OCR (0/90/180/270) when autorotate ran |
-| `layout` | `LayoutBox` regions (`label`, `confidence`, `box`) — with `layout=True` |
-| `tables` | `TableRegion`s (`html`, `score`, `box`) — with `tables=True` |
-| `formulas` | `FormulaRegion`s (`latex`, `score`, `box`) — with `formulas=True` |
-| `warnings` | Degradation notes (e.g. recognition produced boxes but no text) |
+| `layout` | `LayoutBox` regions (`label`, `confidence`, `box`, `id`, `parent_id` for nesting) — with `layout=True`. NOTE: under the umbrella package, top-level `turboocr.LayoutBox` is the HTTP CLIENT's model; the engine's dataclass lives at `turboocr.engine.LayoutBox` |
+| `tables` | `TableRegion`s (`html`, `score`, `box`; `confidence` aliases `score`) — with `tables=True` |
+| `formulas` | `FormulaRegion`s (`latex`, `score`, `box`; `confidence` aliases `score`) — with `formulas=True` |
+| `reading_order` | Engine reading-order indices (with `read(reading_order=True)`; empty on PDF pages) |
+| `image` | The source raster when kept (see `keep_image`); not serialized |
+| `warnings` | Degradation notes (e.g. recognition produced boxes but no text; `page_failed: ...` marks a page contained by `on_error="skip"`; `no_text_layer:` marks an empty `mode="text"` page) |
 | `filter(min_confidence=…, contains=…, predicate=…)` | A new `PageResult` keeping only matching lines (page context carried over) |
 | `to_dict()` | JSON-shaped dict, same keys as the server's response |
-| `to_pandas()` | DataFrame of the lines (`[pandas]` extra) |
-| `to_hocr()` | hOCR markup for this page |
-| `save_overlay(path)` | The image with boxes drawn on it (needs `keep_image=True`, the default) |
-| `save_searchable_pdf(path)` | Image page + invisible text layer as a PDF (needs `keep_image=True` and reportlab, from the `[pdf]` extra) |
+| `to_pandas()` | The text LINES as one DataFrame (`[pandas]` extra) |
+| `tables_to_pandas()` | The RECOGNIZED TABLES, one DataFrame each (provenance in `df.attrs`); per region: `TableRegion.to_pandas()` |
+| `draw(layout=True)` / `save_overlay(path, layout=True)` | Overlay the layout regions (stable per-label colors + captions); `lines=False` for layout-only |
+| `to_hocr()` | hOCR markup for this page — **line-granular** (`ocr_page`/`ocr_line`; the engine recognizes whole lines, so no `ocrx_word` spans are fabricated) |
+| `to_markdown(structured=…)` / `to_json()` / `to_tsv()` | Markdown (layout-aware when regions exist) / JSON string / per-page TSV (no page column — the document form adds it) |
+| `save_overlay(path)` | The image with boxes drawn on it (needs the raster: `read()` keeps it by default, the PDF/batch paths need `keep_image=True`) |
+| `save_searchable_pdf(path)` | Searchable PDF. A page WITH its raster becomes image + invisible text (the facsimile deliverable); a page WITHOUT one (text-layer pages under `mode="auto"`/`"text"`, or `keep_image=False` reads) becomes a VISIBLE re-typeset text-only page. For guaranteed facsimile output use `pdf_to_searchable()` or read with `keep_image=True, mode="ocr"` |
+| `to_pdf_bytes()` | The same searchable PDF as bytes (e.g. for a web response) |
+| `to_html()` | The page as structured HTML (layout-aware when layout ran) |
+| `from_dict(d)` / `from_json(s)` | Rebuild a `PageResult` from its serialized form (classmethods). Accepts BOTH key spellings: this library's `box`/`label`/`score` and the HTTP server's `bounding_box`/`class`/`confidence`, so a server response parses directly |
 
 ### `DocumentResult` — a PDF or an image batch
 
@@ -241,11 +324,15 @@ The document iterates as its pages.
 |---|---|
 | `pages` | One `PageResult` per page |
 | `text` | Whole-document text |
-| `source` | The path it was read from |
+| `source` | The path it was read from (`read_pdf`; empty for `read_batch` and byte inputs) |
 | `to_markdown(structured=…)` | Markdown export |
 | `to_dict()` | JSON-shaped dict |
-| `to_pandas()` | One DataFrame across all pages, with a `page` column |
+| `to_pandas()` | The lines of all pages as one DataFrame, with a `page` column |
+| `tables_to_pandas()` | Every table in the document as its own DataFrame (`attrs["page"]` = provenance) |
 | `to_hocr()` | A single multi-page hOCR document |
+| `to_html()` | The whole document as HTML (`full=True` wraps a complete page) |
+| `save_searchable_pdf(path)` / `to_pdf_bytes()` | Searchable PDF from the page rasters (`keep_image=True` on PDF/batch reads) |
+| `from_dict(d)` / `from_json(s)` | Rebuild a `DocumentResult` from its serialized form (classmethods) |
 
 ## CLI
 
@@ -256,16 +343,44 @@ turboocr doctor           # detect hardware, name the right wheel + install line
 turboocr models           # list available models/tiers
 turboocr ocr page.png     # OCR images
 turboocr pdf report.pdf   # OCR a PDF
+turboocr info             # build the engine, print its resolved config (JSON)
 turboocr version
 ```
 
+Shared engine flags on `ocr`/`pdf`/`info`: `--backend`, `--model`/`--lang`/
+`--tier`, `--replicas N` (parallel pages/images), `--layout`, `--tables`,
+`--formulas`, `--autorotate`, `--cls`. The `pdf` subcommand adds
+`--mode auto|ocr|text` (default `auto`; `ocr` forces re-OCR, `text` = embedded text layer only),
+`--searchable -o out.pdf`, `--dpi`, `--pages`, `--max-pages`;
+`ocr` adds `--overlay boxes.png` (with `--layout`, regions are drawn too)
+and `--on-error skip` (note unreadable images on stderr, keep going, exit
+1 if any were skipped);
+`pdf` also takes `--password` for encrypted PDFs. `-f hocr` emits one
+complete hOCR document. Output shapes are STABLE regardless of how many
+files a glob matched: `-f json` is always `{"pages": [...]}` (per-image
+`source` on the `ocr` subcommand), `-f tsv` always carries a leading
+`page` column, and `-f hocr` is always one parseable document — same
+envelopes as the `pdf` subcommand.
+
 ## Errors
 
-All exceptions derive from `TurboOCRError`: `BackendUnavailable` (this build
-cannot run the requested backend — the message names the wheel that can),
-`ModelLoadError`, `NativeExtensionMissing` (the native extension failed to
+The `TurboOCRError` family covers ENGINE failures: `BackendUnavailable`
+(this build cannot run the requested backend — the message names the wheel
+that can, including seam-only names like `intel`/`amd`/`turbo` on wheels
+without that engine), `ModelLoadError` (model or stage assets failed to
+load or download; also raised at construction when a REQUESTED stage —
+`OCR(tables=True)` — cannot come up, instead of silently returning zero
+tables forever), and `NativeExtensionMissing` (the extension failed to
 import; on the NVIDIA/OpenVINO wheels the message includes the exact
 `pip install` line for the missing vendor runtime).
+
+INPUT problems deliberately raise the standard types instead: bad
+arguments and unreadable/hostile inputs are `ValueError` (wrong mode
+strings, the drop_score floor, PDFs handed to `read()`, multi-page TIFFs,
+the pixel ceiling, encrypted PDFs with a wrong/missing password), a
+missing file is `FileNotFoundError`, and using a closed engine is
+`RuntimeError`. Catch `(TurboOCRError, ValueError)` for "anything this
+library refuses".
 
 ## Threading and processes
 
