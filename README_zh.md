@@ -265,11 +265,11 @@ pip install "turboocr[rocm]"      # + AMD 引擎
 
 `turboocr doctor` 会为你的机器打印正确的安装命令 — 在 NVIDIA 上还会根据
 驱动版本在 `cuda12` 与 `cuda13` 之间选择。功能 extras 可组合：
-`"turboocr[cuda12,pdf]"`。由于 `4.0.0a4` 是预发布版本，即使发布后 pip
+`"turboocr[cuda12,pdf]"`。由于 `4.0.0a5` 是预发布版本，即使发布后 pip
 默认也不会选它 — 需要显式指定：
 
 ```bash
-pip install --pre "turboocr[cpu]"        # 或固定版本：turboocr[cpu]==4.0.0a4
+pip install --pre "turboocr[cpu]"        # 或固定版本：turboocr[cpu]==4.0.0a5
 ```
 
 在 NVIDIA 上，引擎 wheel 只需要 NVIDIA **驱动**（不需要 CUDA 工具包）。
@@ -372,7 +372,7 @@ RTX 5090 上测得：所有引擎使用完全相同的页面，计时窗口 ≥1
 PyPI 的文件大小审批 — 在那之前它们的 extras 无法解析，需从本仓库构建；
 `-rocm` 刻意未发布。某个引擎名下的 `0.0.0` 版本只是 PyPI 项目初始化用的
 空占位，不是可用的软件。裸 `pip install turboocr` 仍会解析到旧的
-**0.3.0 客户端**（无引擎）：`4.0.0a4` 是预发布版本，需要加 `--pre`：
+**0.3.0 客户端**（无引擎）：`4.0.0a5` 是预发布版本，需要加 `--pre`：
 
 ```bash
 pip install --pre "turboocr[cpu]"     # 或 [apple] | [cuda12] | [cuda13] | [openvino] | [rocm]

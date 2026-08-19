@@ -492,14 +492,14 @@ any backend: `pip install "turboocr[cuda12,pdf]"`, or on a bare engine wheel,
 > A bare `pip wheel python/` is **not** enough on its own — see
 > [why the helper script](#why-the-helper-script-not-pip-wheel) below.
 
-> **`4.0.0a4` is a pre-release — pip skips it by default.**
+> **`4.0.0a5` is a pre-release — pip skips it by default.**
 >
 > Once the wheels are published, a plain `pip install "turboocr[cpu]"` still
 > resolves to the newest *stable* release, not the alpha. Ask for it:
 >
 > ```bash
 > pip install --pre "turboocr[cpu]"
-> pip install "turboocr[cpu]==4.0.0a4"    # equivalent, explicit
+> pip install "turboocr[cpu]==4.0.0a5"    # equivalent, explicit
 > ```
 >
 > Verify what you got: `pip show turboocr-engine-cpu` (or your variant) and
