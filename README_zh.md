@@ -72,9 +72,9 @@ TurboOCR 是一个完整的 GPU 文档解析器。它把 PP-OCRv6 文本检测�
 
 ## 快速开始
 
-> **v4.0.0-alpha** — CPU（Linux/macOS/Windows，macOS 构建内含 Apple 后端）与
-> Intel/OpenVINO 的 Python wheel **已上线 PyPI**：`pip install --pre
-> "turboocr[cpu]"` / `[openvino]`。NVIDIA wheel 正在等待 PyPI 的文件大小
+> **v4.0.0-alpha** — CPU（Linux/macOS/Windows）、Apple Silicon（Metal GPU +
+> 神经网络引擎）与 Intel/OpenVINO 的 Python wheel **已上线 PyPI**：`pip install --pre
+> "turboocr[cpu]"` / `[apple]` / `[openvino]`。NVIDIA wheel 正在等待 PyPI 的文件大小
 > 审批；Docker 镜像**尚未发布** — 这些路径仍从本仓库构建。完整细节见
 > **[安装指南](docs/getting-started/install.md)**。
 
@@ -124,7 +124,20 @@ OpenCV 4.x、Drogon 1.9+、gRPC。
 
 无 Docker — macOS 容器不提供 GPU 直通。
 
-**从源码：**
+**Python 库**（最快的尝试方式 — 已上线 PyPI）：
+
+```bash
+pip install --pre "turboocr[apple]"
+python -c "import turboocr; print(turboocr.OCR(backend='apple').read('doc.png').text)"
+```
+
+macOS arm64 wheel 开箱即运行完整的原生模式：检测与识别在 **Metal GPU**
+上执行，较窄的识别分桶并行跑在**神经网络引擎**上 — 导出包首次使用时自动
+下载并做 SHA256 校验。检测可适配任意页面尺寸（引擎在运行时按页面形状
+特化），`aread`/`aread_batch`/`aread_pdf` 则基于内置副本池提供 asyncio
+并发。
+
+**服务器，从源码：**
 
 ```bash
 brew install cmake opencv drogon jsoncpp protobuf grpc c-ares jpeg-turbo
@@ -223,7 +236,7 @@ cmake --build build -j$(nproc)
 引擎门面。它的 extras 为你的硬件挑选引擎 wheel（每个环境只装一个后端；
 各引擎 wheel 互斥）：
 
-> **Alpha 状态：`[cpu]` 与 `[openvino]` 今天即可从 PyPI 安装**（需要
+> **Alpha 状态：`[cpu]`、`[apple]` 与 `[openvino]` 今天即可从 PyPI 安装**（需要
 > `--pre`，见下文）。NVIDIA 的 `[cuda12]` / `[cuda13]` extras 要等 PyPI
 > 批准这两个 wheel 的文件大小申请后才能解析；`[rocm]` 刻意未发布。
 > 对尚未上线的后端，可用的路径是：
@@ -242,7 +255,8 @@ wheel 发布后，伞包就是正门 — 每个后端一个 extra，彼此互斥
 
 ```bash
 pip install turboocr              # 仅客户端 — 连接运行中的服务器
-pip install "turboocr[cpu]"       # + 进程内引擎，CPU（含 Apple Silicon）
+pip install "turboocr[cpu]"       # + 进程内引擎，CPU
+pip install "turboocr[apple]"     # + Apple 引擎 — Metal GPU + 神经网络引擎（macOS arm64）
 pip install "turboocr[cuda12]"    # + NVIDIA 引擎，CUDA 12（驱动 R525+）
 pip install "turboocr[cuda13]"    # + NVIDIA 引擎，CUDA 13（驱动 R580+）
 pip install "turboocr[openvino]"  # + Intel 引擎（CPU / 核显 / Arc / NPU）
@@ -350,8 +364,10 @@ RTX 5090 上测得：所有引擎使用完全相同的页面，计时窗口 ≥1
 模型按档位自动下载（`tiny` 约 6 MB），带 SHA256 校验。它以 `turboocr` 伞包
 （客户端 + 引擎门面）加每后端一个引擎 wheel 的形式发布，由 extra 挑选。
 
-**PyPI 上现在有什么、没有什么。** `turboocr-engine-cpu`（Linux、含 Apple
-后端的 macOS、Windows）、`turboocr-engine-openvino` 与 `turboocr` 伞包
+**PyPI 上现在有什么、没有什么。** `turboocr-engine-cpu`（Linux、Windows，
+以及 macOS arm64 — 后者内含完整 **Apple 后端**：Metal GPU + 神经网络引擎
+原生模式，导出包自动下载，经 `[apple]` extra 安装）、
+`turboocr-engine-openvino` 与 `turboocr` 伞包
 **已上线**。NVIDIA wheel（`-cuda12` / `-cuda13`）已构建并验证，但在等待
 PyPI 的文件大小审批 — 在那之前它们的 extras 无法解析，需从本仓库构建；
 `-rocm` 刻意未发布。某个引擎名下的 `0.0.0` 版本只是 PyPI 项目初始化用的
@@ -359,7 +375,7 @@ PyPI 的文件大小审批 — 在那之前它们的 extras 无法解析，需�
 **0.3.0 客户端**（无引擎）：`4.0.0a4` 是预发布版本，需要加 `--pre`：
 
 ```bash
-pip install --pre "turboocr[cpu]"     # 或 [cuda12] | [cuda13] | [openvino] | [rocm]
+pip install --pre "turboocr[cpu]"     # 或 [apple] | [cuda12] | [cuda13] | [openvino] | [rocm]
 ```
 
 `turboocr doctor` 会为你的机器指出正确的那一个。

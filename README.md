@@ -77,9 +77,9 @@ Full documentation: **[docs/](docs/index.md)**
 
 ## Quick Start
 
-> **v4.0.0-alpha** — the Python wheels for CPU (Linux/macOS/Windows, with the
-> Apple backend in the macOS build) and Intel/OpenVINO are **live on PyPI**:
-> `pip install --pre "turboocr[cpu]"` / `[openvino]`. The NVIDIA wheels are
+> **v4.0.0-alpha** — the Python wheels for CPU (Linux/macOS/Windows), Apple
+> Silicon (Metal GPU + Neural Engine) and Intel/OpenVINO are **live on PyPI**:
+> `pip install --pre "turboocr[cpu]"` / `[apple]` / `[openvino]`. The NVIDIA wheels are
 > awaiting a PyPI file-size approval, and there is **no published Docker
 > image** — those paths build from this checkout. Full details in
 > **[the install guide](docs/getting-started/install.md)**.
@@ -131,7 +131,21 @@ CUDA + TensorRT 10.2+, OpenCV 4.x, Drogon 1.9+, gRPC.
 
 No Docker — macOS containers have no GPU passthrough.
 
-**From source:**
+**Python library** (the fastest way to try it — live on PyPI):
+
+```bash
+pip install --pre "turboocr[apple]"
+python -c "import turboocr; print(turboocr.OCR(backend='apple').read('doc.png').text)"
+```
+
+The macOS arm64 wheel runs the full native mode out of the box: detection and
+recognition on the **Metal GPU** with the narrow recognition buckets on the
+**Neural Engine** in parallel — the export bundles auto-download with SHA256
+verification on first use. Detection adapts to any page shape (the engine
+specializes per shape at runtime), and `aread`/`aread_batch`/`aread_pdf` give
+you asyncio concurrency across the built-in replica pool.
+
+**Server, from source:**
 
 ```bash
 brew install cmake opencv drogon jsoncpp protobuf grpc c-ares jpeg-turbo
@@ -233,8 +247,8 @@ plus the in-process engine facade. Its extras pick the engine wheel for your
 hardware (install exactly one backend; the engine wheels are mutually
 exclusive):
 
-> **Alpha status: `[cpu]` and `[openvino]` install from PyPI today** (with
-> `--pre` — see below). The NVIDIA `[cuda12]` / `[cuda13]` extras resolve once
+> **Alpha status: `[cpu]`, `[apple]` and `[openvino]` install from PyPI
+> today** (with `--pre` — see below). The NVIDIA `[cuda12]` / `[cuda13]` extras resolve once
 > PyPI approves the file-size requests for those wheels; `[rocm]` is
 > deliberately unpublished. For a backend that is not on PyPI yet, this is the
 > working path:
@@ -254,7 +268,8 @@ per backend, and they are mutually exclusive, so install exactly one:
 
 ```bash
 pip install turboocr              # client only — talk to a running server
-pip install "turboocr[cpu]"       # + in-process engine, CPU (and Apple Silicon)
+pip install "turboocr[cpu]"       # + in-process engine, CPU
+pip install "turboocr[apple]"     # + Apple engine — Metal GPU + Neural Engine (macOS arm64)
 pip install "turboocr[cuda12]"    # + NVIDIA engine, CUDA 12 (driver R525+)
 pip install "turboocr[cuda13]"    # + NVIDIA engine, CUDA 13 (driver R580+)
 pip install "turboocr[openvino]"  # + Intel engine (CPU / iGPU / Arc / NPU)
@@ -376,8 +391,10 @@ during inference) — not a reimplementation. Models auto-download per tier
 (client + engine facade) plus one engine wheel per backend, picked by an extra.
 
 **What is on PyPI today, and what is not.** `turboocr-engine-cpu` (Linux,
-macOS with the Apple backend, Windows), `turboocr-engine-openvino` and the
-`turboocr` umbrella are **live**. The NVIDIA wheels (`-cuda12` / `-cuda13`)
+Windows, and macOS arm64 — where it carries the full **Apple backend**: Metal
+GPU + Neural Engine native mode with auto-downloaded export bundles, installed
+via the `[apple]` extra), `turboocr-engine-openvino` and the `turboocr`
+umbrella are **live**. The NVIDIA wheels (`-cuda12` / `-cuda13`)
 are built and verified but await PyPI's file-size approval — until then their
 extras do not resolve and the working path is building from this checkout;
 `-rocm` is deliberately unpublished. A `0.0.0` release under an engine name
@@ -386,7 +403,7 @@ software. A plain `pip install turboocr` still resolves to the old **0.3.0
 client** (no engine): `--pre` is required because `4.0.0a4` is a pre-release:
 
 ```bash
-pip install --pre "turboocr[cpu]"     # or [cuda12] | [cuda13] | [openvino] | [rocm]
+pip install --pre "turboocr[cpu]"     # or [apple] | [cuda12] | [cuda13] | [openvino] | [rocm]
 ```
 
 `turboocr doctor` names the right one for your machine.

@@ -10,7 +10,7 @@ real speed.
 
 Most people install it through the pure-Python
 [`turboocr`](https://pypi.org/project/turboocr/) umbrella package, whose
-`[cpu]`/`[cuda]`/`[openvino]`/`[rocm]` extras pin the right engine wheel and
+`[cpu]`/`[apple]`/`[cuda]`/`[openvino]`/`[rocm]` extras pin the right engine wheel and
 re-export the same API — `import turboocr` and `import turboocr_engine` then
 both work.
 
@@ -33,7 +33,7 @@ in; the engine name on the right is what it pins:
 | Hardware | Install | Engine wheel |
 |---|---|---|
 | CPU — any x86-64 / ARM64 (**the default**) | `pip install "turboocr[cpu]"` | `turboocr-engine-cpu` |
-| Apple Silicon — Metal + Neural Engine | `pip install "turboocr[cpu]"` | `turboocr-engine-cpu` (its macOS arm64 build) |
+| Apple Silicon — Metal + Neural Engine | `pip install "turboocr[apple]"` | `turboocr-engine-cpu` (its macOS arm64 build carries the full Apple backend) |
 | NVIDIA GPU, driver R525+ | `pip install "turboocr[cuda12]"` | `turboocr-engine-cuda12` |
 | NVIDIA GPU, driver R580+ | `pip install "turboocr[cuda13]"` | `turboocr-engine-cuda13` |
 | Intel CPU / iGPU / Arc / NPU | `pip install "turboocr[openvino]"` | `turboocr-engine-openvino` |
@@ -64,7 +64,7 @@ umbrella are published; because `4.0.0a4` is a pre-release, pip needs `--pre`
 or an exact pin to select it:
 
 ```bash
-pip install --pre "turboocr[cpu]"       # or [openvino]
+pip install --pre "turboocr[cpu]"       # or [apple] | [openvino]
 pip install "turboocr[cpu]==4.0.0a4"    # equivalent, explicit
 ```
 

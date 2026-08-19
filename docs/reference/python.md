@@ -5,9 +5,10 @@ nanobind extension over `UnifiedOcrPipeline`, not a reimplementation. The GIL
 is released during inference, output is identical to the server's, and
 concurrency comes from a built-in replica pool.
 
-> **v4.0.0-alpha — `[cpu]` and `[openvino]` install from PyPI today:**
-> `pip install --pre "turboocr[cpu]"` (the `--pre` is required — it is a
-> pre-release; the macOS cpu wheel carries the Apple backend). The NVIDIA
+> **v4.0.0-alpha — `[cpu]`, `[apple]` and `[openvino]` install from PyPI
+> today:** `pip install --pre "turboocr[apple]"` on Apple silicon (Metal GPU +
+> Neural Engine, native mode out of the box), `"turboocr[cpu]"` elsewhere (the
+> `--pre` is required — it is a pre-release). The NVIDIA
 > `[cuda12]` / `[cuda13]` extras resolve once PyPI approves those wheels'
 > file-size requests — until then build them from the checkout
 > ([Install](../getting-started/install.md)). One engine wheel per

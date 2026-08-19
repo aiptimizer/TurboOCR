@@ -1,7 +1,7 @@
 # Install
 
 > **v4.0.0-alpha — the CPU and Intel/OpenVINO Python wheels are on PyPI:**
-> `pip install --pre "turboocr[cpu]"` / `[openvino]` works today (`--pre` is
+> `pip install --pre "turboocr[cpu]"` / `[apple]` / `[openvino]` works today (`--pre` is
 > required — pre-release). Everything else still builds from this checkout:
 > the NVIDIA wheels await a PyPI file-size approval, and there is **no
 > published Docker image** — use `docker build` / `cmake` / 
@@ -128,18 +128,25 @@ One-time prereqs: full Xcode + Metal toolchain
 MPSGraph; recognition is a GPU + Neural Engine hybrid (narrow crops go to the ANE
 via CoreML, in parallel). `TURBO_APPLE_ANE_MAXW` tunes the split (default 800).
 
-**Python library:**
+**Python library** — live on PyPI, no toolchain needed:
+
+```bash
+pip install --pre "turboocr[apple]"
+python -c "import turboocr; print(turboocr.OCR(backend='apple', replicas=3).read('doc.png'))"
+```
+
+The macOS arm64 wheel bundles the Metal shader library and runs the full
+native mode (Metal GPU + Neural Engine) out of the box; models and the native
+export bundles auto-download with SHA256 verification on first use.
+`replicas=3` measured at 94% of the server's multi-replica throughput.
+
+To build the same wheel from this checkout instead (needs the one-time macOS
+prereqs above — the wheel compiles the same C++ tree):
 
 ```bash
 scripts/python/build_backend_wheel.sh cpu
 pip install build-wheels/cpu/fixed/*.whl
-python -c "import turboocr_engine; print(turboocr_engine.OCR(backend='apple', replicas=3).read('doc.png'))"
 ```
-
-Needs the same one-time macOS prereqs as the source build — the wheel compiles
-the same C++ tree. The macOS arm64 build of `turboocr-engine-cpu` bundles the
-Metal shader library; models auto-download per tier (~6 MB for tiny).
-`replicas=3` measured at 94% of the server's multi-replica throughput.
 
 </details>
 
@@ -447,7 +454,7 @@ same native extension.
 |---|---|---|
 | *(none — client only)* | `pip install turboocr` | — |
 | CPU — any x86-64 / ARM64 (**the default**) | `pip install "turboocr[cpu]"` | `turboocr-engine-cpu` |
-| Apple Silicon — Metal + Neural Engine | `pip install "turboocr[cpu]"` | `turboocr-engine-cpu` (its macOS arm64 build) |
+| Apple Silicon — Metal + Neural Engine | `pip install "turboocr[apple]"` | `turboocr-engine-cpu` (its macOS arm64 build carries the full Apple backend) |
 | NVIDIA GPU — driver R525+ | `pip install "turboocr[cuda12]"` | `turboocr-engine-cuda12` |
 | NVIDIA GPU — driver R580+ | `pip install "turboocr[cuda13]"` | `turboocr-engine-cuda13` |
 | Intel CPU / iGPU / Arc / NPU | `pip install "turboocr[openvino]"` | `turboocr-engine-openvino` |

@@ -57,12 +57,11 @@
         },
         python: {
           command:
-            "scripts/python/build_backend_wheel.sh cpu\n" +
-            "pip install build-wheels/cpu/fixed/*.whl\n" +
-            'python -c "import turboocr_engine; print(turboocr_engine.OCR(backend=\'apple\', replicas=3).read(\'doc.png\'))"',
+            'pip install --pre "turboocr[apple]"\n' +
+            'python -c "import turboocr; print(turboocr.OCR(backend=\'apple\', replicas=3).read(\'doc.png\'))"',
           note:
-            "Needs the same one-time macOS prereqs as the source build (brew packages, Xcode + Metal toolchain, osx-arm64 ONNX Runtime — see Native build → macOS): the wheel compiles the same C++ tree. " +
-            "The macOS arm64 build of turboocr-engine-cpu bundles the Metal shader library; models auto-download per tier (~6 MB for tiny). replicas=3 measured at 94% of the server's multi-replica throughput. Published on PyPI: pip install --pre \"turboocr[cpu]\" works today (--pre required, pre-release).",
+            "Live on PyPI, no toolchain needed (--pre required, pre-release). The macOS arm64 wheel runs the full native mode out of the box — Metal GPU + Neural Engine, with the export bundles auto-downloaded and SHA256-verified on first use; detection adapts to any page shape at runtime, and aread/aread_batch/aread_pdf give asyncio concurrency over the replica pool (replicas=3 measured at 94% of the server's multi-replica throughput). " +
+            "To build the same wheel from this checkout instead: scripts/python/build_backend_wheel.sh cpu, then pip install build-wheels/cpu/fixed/*.whl (needs the macOS prereqs above — it compiles the same C++ tree).",
         },
       },
     },
