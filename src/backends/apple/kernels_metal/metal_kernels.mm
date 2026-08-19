@@ -21,7 +21,7 @@
 namespace turbo_ocr::apple {
 
 // RNParams — must match the Metal `struct RNParams` field order/size exactly
-// (shaders.metal): 4 uint + 6 float + 2 uint, tightly packed (48 bytes).
+// (shaders.metal): 4 uint + 6 float + 4 uint, tightly packed (56 bytes).
 namespace {
 struct RNParams {
   std::uint32_t dst_w, dst_h, src_w, src_h;
@@ -29,8 +29,10 @@ struct RNParams {
   float istd0, istd1, istd2;
   std::uint32_t order;     // 0 = BGR planes, 1 = RGB planes
   std::uint32_t letterbox; // 0 = stretch, 1 = preserve-AR + pad
+  // Snapped-canvas content region (0,0 = disabled) — see shaders.metal.
+  std::uint32_t content_w, content_h;
 };
-static_assert(sizeof(RNParams) == 48, "RNParams must match the Metal layout");
+static_assert(sizeof(RNParams) == 56, "RNParams must match the Metal layout");
 } // namespace
 
 MetalKernels::MetalKernels() = default;
@@ -124,6 +126,14 @@ void MetalKernels::resize_normalize(const backend::ImageView &src, float *dst_ch
                                     int dst_w, int dst_h,
                                     const backend::NormParams &params,
                                     backend::DeviceQueue &queue) {
+  resize_normalize_content(src, dst_chw, dst_w, dst_h, dst_w, dst_h, params, queue);
+}
+
+void MetalKernels::resize_normalize_content(const backend::ImageView &src,
+                                            float *dst_chw, int dst_w, int dst_h,
+                                            int content_w, int content_h,
+                                            const backend::NormParams &params,
+                                            backend::DeviceQueue &queue) {
   // On ANY failure blank the destination. IKernels::resize_normalize has no
   // return channel, and dst_chw is stage scratch reused for every page — an
   // early `return` would leave the PREVIOUS page's normalized canvas there for
@@ -165,6 +175,12 @@ void MetalKernels::resize_normalize(const backend::ImageView &src, float *dst_ch
     p.istd0 = params.inv_std[0]; p.istd1 = params.inv_std[1]; p.istd2 = params.inv_std[2];
     p.order = params.order == backend::ChannelOrder::BGR ? 0u : 1u;
     p.letterbox = params.letterbox ? 1u : 0u;
+    // Content == canvas degenerates to the plain stretch path in the shader
+    // (content mode disabled), so the pre-existing callers are bit-unchanged.
+    if (content_w != dst_w || content_h != dst_h) {
+      p.content_w = (std::uint32_t)content_w;
+      p.content_h = (std::uint32_t)content_h;
+    }
 
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
     [enc setComputePipelineState:mtl_pipeline("resize_normalize")];

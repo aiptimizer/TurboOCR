@@ -115,7 +115,12 @@ python tools/modelgen/mps_export_rec.py models/cls.onnx ~/.apple_ocr_ml/exports/
   `caps()` = {io_space Metal, async, caller-owns-outputs, static shapes, graph
   transparent}. `enable_argmax_head()` appends `reductionArgMaximum` +
   `reductionMaximum` (`tools/probes/apple/mps_ocr.mm:119-120`) so only `[B,T]` indices/scores
-  come back.
+  come back. Each executable is static-shape, but `load_shared()` re-specializes
+  one parsed export to a new input H×W (shared graph dict + weights, ARC refs) —
+  `MpsDetector` uses it to serve ANY page shape from one det export: per page it
+  runs the shared `compute_det_resize` → `snap_det_canvas_grid` policy,
+  letterboxes the content, and keeps an LRU-bounded cache of specialized engines
+  (`TURBO_APPLE_DET_JIT`, `TURBO_APPLE_DET_CANVAS_CACHE`).
 - **`IKernels`** — `MetalKernels`: `warp_crops` (the `tools/probes/apple/warp.metal` kernel),
   `resize_normalize`, `argmax`, `threshold` are **native**; `db_postprocess`
   (CCL + unclip — no MPS primitive) is a **host fallback** via

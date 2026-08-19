@@ -74,6 +74,12 @@ struct RNParams {
     float istd0, istd1, istd2;
     uint  order;                    // 0 = BGR planes, 1 = RGB planes
     uint  letterbox;                // 0 = stretch, 1 = preserve-AR + pad
+    // Snapped-canvas content region (0,0 = disabled): resize the page into the
+    // TOP-LEFT content_w x content_h rectangle and write 0 in NORMALIZED space
+    // (= the per-channel mean pixel, which DB scores as background) everywhere
+    // else — the shared detection::snap_det_canvas_grid letterbox policy the
+    // Intel backend repacks on the host; here it is one kernel.
+    uint  content_w, content_h;
 };
 
 kernel void resize_normalize(
@@ -87,7 +93,20 @@ kernel void resize_normalize(
     const uint idx   = gid.y * p.dst_w + gid.x;
 
     float3 rgb;
-    if (p.letterbox) {
+    if (p.content_w != 0u && p.content_h != 0u) {
+        // Content-region mode: pad pixels are 0 in NORMALIZED space, so they are
+        // written directly, BEFORE the mean/std normalization below.
+        if (gid.x >= p.content_w || gid.y >= p.content_h) {
+            dst[idx + 0u*plane] = 0.0f;
+            dst[idx + 1u*plane] = 0.0f;
+            dst[idx + 2u*plane] = 0.0f;
+            return;
+        }
+        constexpr sampler s(coord::normalized, filter::linear, address::clamp_to_edge);
+        const float u = (float(gid.x) + 0.5f) / float(p.content_w);
+        const float v = (float(gid.y) + 0.5f) / float(p.content_h);
+        rgb = src.sample(s, float2(u, v)).rgb;
+    } else if (p.letterbox) {
         // Preserve aspect ratio, center on a padded canvas (0-fill = black).
         const float scale = min(float(p.dst_w) / float(p.src_w),
                                 float(p.dst_h) / float(p.src_h));

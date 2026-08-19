@@ -22,6 +22,8 @@
 // builder does not yet handle it — load() returns false, so the backend reports
 // layout unavailable (see README TODOs).
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <utility>
@@ -99,12 +101,46 @@ private:
     int c = 3, h = 0, w = 0;
     backend::DeviceBuffer in_buf;  // [1,3,h,w] normalized input
     backend::DeviceBuffer out_buf; // [1,1,h,w] prob map
+    std::uint64_t last_use = 0;    // LRU tick (JIT mode)
   };
   std::vector<std::unique_ptr<DetCanvas>> canvases_;
   DetCanvas *active_ = nullptr; // canvas of the LAST select_canvas_()
   // Pick (and make active) the loaded canvas nearest the shared policy's
   // aspect for this page. No-op with a single canvas.
   void select_canvas_(int orig_h, int orig_w);
+  // JIT CANVAS MODE (default; TURBO_APPLE_DET_JIT=0 restores the fixed set):
+  // the det graph is fully convolutional, and MpsEngine builds its MPSGraph
+  // from the export AT RUNTIME anyway — so instead of serving only the shapes
+  // the exporter baked, select_canvas_() runs the SHARED per-page policy end to
+  // end (detection::compute_det_resize, then snap_det_canvas_grid — the same
+  // 128-grid ladder the Intel GPU backend letterboxes into) and specializes an
+  // engine for the snapped canvas ON DEMAND. MEASURED (M3 Max, det_tiny):
+  // graph build ~6 ms + one-time MPSGraph compile 50-400 ms per NEW canvas,
+  // then steady state is shape-independent (~4-5 ms/MPix) — the TensorRT cost
+  // model (engine per profile, cached). The grid snap is what keeps "many
+  // similar but unequal page sizes" from compiling forever: everything within
+  // a 128 px band shares one canvas. The LRU cap below is what keeps memory
+  // bounded regardless of corpus (each live canvas holds ~16 B/px of buffers
+  // plus its compiled executable); eviction never touches active_ or
+  // coreml_canvas_, and the single-slot async contract guarantees no evicted
+  // canvas has an uncollected future reading it.
+  //
+  // source_ holds the ONE parsed export every specialization shares (its
+  // graph.json dict + weights NSData, by ObjC reference — all det_c*/ dirs in
+  // a bundle carry byte-identical weights, so dirs[0] is the source). The
+  // page's CONTENT dims within the snapped canvas (letterbox, top-left,
+  // normalized-zero pad) are content_h_/content_w_ — canvas dims when
+  // stretching (fixed-canvas mode, or a fallback canvas smaller than the
+  // policy resize). Stable between enqueue() and collect() by the same
+  // single-slot rule as active_.
+  DetCanvas *jit_canvas_(int h, int w);
+  MpsEngine source_;
+  bool jit_ = false;
+  std::uint64_t use_tick_ = 0;
+  std::size_t cache_cap_ = 6;  // TURBO_APPLE_DET_CANVAS_CACHE, clamped [2,32]
+  int content_h_ = 0, content_w_ = 0;
+  turbo_ocr::detection::DetResizeParams resize_{
+      turbo_ocr::detection::kDetResizeDefault};
   // SHARED DB thresholds, resolved ONCE at load() from the per-tier base plus
   // the DET_DB_THRESH / DET_BOX_THRESH / DET_UNCLIP env overrides
   // (detection::read_db_params). These were hardcoded in db_postprocess_(),

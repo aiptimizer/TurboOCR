@@ -13,12 +13,14 @@
 #import <dispatch/dispatch.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <tuple>
 
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -156,6 +158,9 @@ bool MpsDetector::load(const std::string &model_path) {
   // unified merge dropped, and wrong for any custom-named model file; the
   // installed base carries the registry's pairing for every backend.
   db_ = turbo_ocr::detection::read_db_params();
+  // SHARED resize policy, same resolution point — the JIT canvas mode runs it
+  // per page (fixed-canvas mode consults it only for the aspect warning).
+  resize_ = turbo_ocr::detection::read_det_resize();
 
   // CANVAS DISCOVERY, mirroring the recognizer's bucket discovery one class
   // below: a flat export (graph.json directly in model_path — the
@@ -187,6 +192,34 @@ bool MpsDetector::load(const std::string &model_path) {
           model_path.c_str());
     return false;
   }
+
+  // JIT CANVAS MODE (default — see the header): the SHARED per-page policy
+  // (compute_det_resize -> snap_det_canvas_grid) picks the canvas and an engine
+  // is specialized for it on demand from ONE shared parsed export; the exported
+  // det_c*/ dirs carry byte-identical weights, so dirs[0] is the source and the
+  // other dirs are simply not instantiated. TURBO_APPLE_DET_JIT=0 restores the
+  // fixed exported-canvas set; the CoreML A/B knob implies it (the package is
+  // baked at ONE shape, so its canvas must be a fixed exported one).
+  const bool coreml_ab = !env::env_or("TURBO_APPLE_DET_COREML", "").empty();
+  jit_ = !coreml_ab && env::env_or("TURBO_APPLE_DET_JIT", "1") != "0";
+  cache_cap_ = (std::size_t)env::env_int("TURBO_APPLE_DET_CANVAS_CACHE", 6, 2, 32);
+  if (jit_) {
+    if (source_.load(dirs[0])) {
+      const auto chw = source_.input_chw();
+      NSLog(@"[apple] det: JIT canvas mode (shared 128-grid snap per page; "
+            @"template %dx%d from %s; cache cap %zu). One-time compile per new "
+            @"canvas, then shape-independent speed. TURBO_APPLE_DET_JIT=0 "
+            @"restores the fixed canvas set.",
+            chw.size() == 3 ? chw[1] : 0, chw.size() == 3 ? chw[2] : 0,
+            dirs[0].c_str(), cache_cap_);
+      ready_ = true;
+      return true; // canvases_ fills lazily via jit_canvas_()
+    }
+    NSLog(@"[apple] det: JIT source %s failed to load — falling back to the "
+          @"fixed canvas set", dirs[0].c_str());
+    jit_ = false;
+  }
+
   for (const auto &d : dirs) {
     auto cv = std::make_unique<DetCanvas>();
     if (!cv->engine.load(d)) {
@@ -233,17 +266,116 @@ bool MpsDetector::load(const std::string &model_path) {
   return ready_;
 }
 
+MpsDetector::DetCanvas *MpsDetector::jit_canvas_(int h, int w) {
+  for (auto &cv : canvases_)
+    if (cv->h == h && cv->w == w) { cv->last_use = ++use_tick_; return cv.get(); }
+
+  // Make room BEFORE building: evict the least-recently-used canvas. active_ is
+  // never evicted (enqueue()'s future reads through it until collect(); the
+  // single-slot contract means no OTHER canvas can have an uncollected future),
+  // and neither is the CoreML-bound canvas (unreachable in JIT mode, guarded
+  // anyway). This cap is the bound that keeps a pathological corpus from
+  // growing device memory without limit; the 128-grid snap upstream is the
+  // bound that keeps it from COMPILING without limit.
+  while (canvases_.size() >= cache_cap_) {
+    std::size_t victim = canvases_.size();
+    std::uint64_t oldest = UINT64_MAX;
+    for (std::size_t i = 0; i < canvases_.size(); ++i) {
+      DetCanvas *p = canvases_[i].get();
+      if (p == active_ || p == coreml_canvas_) continue;
+      if (p->last_use < oldest) { oldest = p->last_use; victim = i; }
+    }
+    if (victim == canvases_.size()) break; // only protected canvases left
+    NSLog(@"[apple] det canvas cache full (%zu/%zu): evicting %dx%d "
+          @"(TURBO_APPLE_DET_CANVAS_CACHE raises the cap)",
+          canvases_.size(), cache_cap_, canvases_[victim]->h, canvases_[victim]->w);
+    canvases_.erase(canvases_.begin() + (std::ptrdiff_t)victim);
+  }
+
+  auto cv = std::make_unique<DetCanvas>();
+  if (!cv->engine.load_shared(source_, h, w)) return nullptr;
+  const auto t0 = std::chrono::steady_clock::now();
+  // Compile NOW so a translation/compile failure surfaces here (and falls back
+  // to the template canvas in select_canvas_) instead of dropping the page.
+  if (!cv->engine.prepare(1)) {
+    NSLog(@"[apple] det canvas %dx%d failed to specialize", h, w);
+    return nullptr;
+  }
+  const double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+  const auto chw = cv->engine.input_chw();
+  if (chw.size() == 3) { cv->c = chw[0]; cv->h = chw[1]; cv->w = chw[2]; }
+  else { cv->h = h; cv->w = w; }
+  cv->in_buf = alloc_->allocate_buffer((size_t)cv->c * cv->h * cv->w * sizeof(float));
+  cv->out_buf = alloc_->allocate_buffer((size_t)cv->h * cv->w * sizeof(float));
+  if (!cv->in_buf || !cv->out_buf) {
+    NSLog(@"[apple] det canvas %dx%d: buffer allocation failed", h, w);
+    return nullptr;
+  }
+  NSLog(@"[apple] det canvas %dx%d specialized in %.0f ms (one-time; cache %zu/%zu)",
+        cv->h, cv->w, ms, canvases_.size() + 1, cache_cap_);
+  cv->last_use = ++use_tick_;
+  canvases_.push_back(std::move(cv));
+  return canvases_.back().get();
+}
+
 void MpsDetector::select_canvas_(int orig_h, int orig_w) {
-  if (canvases_.size() <= 1) return;
-  // Warmup/thumbnail inputs have no meaningful aspect — keep whatever canvas
-  // is active rather than flapping on a 32x32 synthetic image.
-  if (orig_h < 128 || orig_w < 128) return;
-  std::vector<std::pair<int, int>> avail;
-  avail.reserve(canvases_.size());
-  for (const auto &cv : canvases_) avail.emplace_back(cv->h, cv->w);
-  const auto [h, w] = turbo_ocr::detection::pick_det_canvas(orig_h, orig_w, avail);
-  for (const auto &cv : canvases_)
-    if (cv->h == h && cv->w == w) { active_ = cv.get(); return; }
+  if (!jit_) {
+    // FIXED-CANVAS mode: nearest exported aspect; the page is stretched onto
+    // the canvas, so content == canvas.
+    // Warmup/thumbnail inputs have no meaningful aspect — keep whatever canvas
+    // is active rather than flapping on a 32x32 synthetic image.
+    if (canvases_.size() > 1 && orig_h >= 128 && orig_w >= 128) {
+      std::vector<std::pair<int, int>> avail;
+      avail.reserve(canvases_.size());
+      for (const auto &cv : canvases_) avail.emplace_back(cv->h, cv->w);
+      const auto [h, w] =
+          turbo_ocr::detection::pick_det_canvas(orig_h, orig_w, avail);
+      for (const auto &cv : canvases_)
+        if (cv->h == h && cv->w == w) { active_ = cv.get(); break; }
+    }
+    if (active_) { content_h_ = active_->h; content_w_ = active_->w; }
+    return;
+  }
+
+  // JIT mode: run the SHARED policy end to end. compute_det_resize gives the
+  // aspect-true /32 content dims; snap_det_canvas_grid closes the shape set
+  // onto the 128 grid (many similar-but-unequal page sizes -> ONE canvas); the
+  // content is letterboxed top-left into the snapped canvas and the box
+  // rescale at the end uses the CONTENT dims, so detection geometry matches
+  // the dynamic-shape CPU reference exactly (pad region is normalized-zero =
+  // mean pixel = DB background).
+  if (orig_h < 128 || orig_w < 128) {
+    // Warmup/thumbnail: no meaningful aspect. Keep the active canvas
+    // (stretched, boxes are discarded by warmup anyway); with none yet,
+    // specialize the export's template shape — a known-validated canvas, and
+    // compiling it warms the Metal shader caches so later canvases build
+    // faster.
+    if (!active_) {
+      const auto chw = source_.input_chw();
+      if (chw.size() == 3) active_ = jit_canvas_(chw[1], chw[2]);
+    }
+    if (active_) { content_h_ = active_->h; content_w_ = active_->w; }
+    return;
+  }
+  const auto [rh, rw] =
+      turbo_ocr::detection::compute_det_resize(orig_h, orig_w, resize_);
+  const auto [ch, cw] =
+      turbo_ocr::detection::snap_det_canvas_grid(rh, rw, resize_);
+  DetCanvas *cv = jit_canvas_(ch, cw);
+  if (!cv) {
+    // Specialization failed (compile or buffers): fall back to the export's
+    // template canvas, which every shipped bundle has validated.
+    const auto chw = source_.input_chw();
+    if (chw.size() == 3) cv = jit_canvas_(chw[1], chw[2]);
+    if (!cv) return; // run()/enqueue() fail closed on a null active_
+  }
+  active_ = cv;
+  if (rh <= cv->h && rw <= cv->w) {
+    content_h_ = rh; content_w_ = rw;         // letterbox: content at true aspect
+  } else {
+    content_h_ = cv->h; content_w_ = cv->w;   // fallback smaller than policy: stretch
+  }
 }
 
 bool MpsDetector::submit_forward_(const backend::ImageView &img,
@@ -260,8 +392,14 @@ bool MpsDetector::submit_forward_(const backend::ImageView &img,
   bool fwd_ok = false;
   {
     backend::BatchScope batch(queue); // fuse resize + forward in one command buffer
-    kernels_.resize_normalize(img, static_cast<float *>(cv.in_buf.data()), cv.w,
-                              cv.h, det, queue);
+    // content == canvas (fixed-canvas mode) degenerates to the plain stretch —
+    // bit-identical to the pre-JIT call; the JIT letterbox writes the content
+    // top-left and normalized-zero pad in the same single dispatch.
+    kernels_.resize_normalize_content(img, static_cast<float *>(cv.in_buf.data()),
+                                      cv.w, cv.h,
+                                      content_w_ > 0 ? content_w_ : cv.w,
+                                      content_h_ > 0 ? content_h_ : cv.h,
+                                      det, queue);
     backend::DeviceTensor in{
         .name = cv.engine.input_names().empty() ? std::string{} : cv.engine.input_names()[0],
         .data = cv.in_buf.data(), .space = backend::DeviceKind::Metal,
@@ -282,7 +420,18 @@ std::vector<turbo_ocr::Box> MpsDetector::db_postprocess_(int orig_h, int orig_w)
   // map through unified memory. Boxes come back in ORIGINAL coordinates.
   const DetCanvas &cvs = *active_;
   const float *map = static_cast<const float *>(cvs.out_buf.data());
-  cv::Mat pred(cvs.h, cvs.w, CV_32F, const_cast<float *>(map));
+  cv::Mat pred_full(cvs.h, cvs.w, CV_32F, const_cast<float *>(map));
+  // Post-process ONLY the content region. The model needs the padded canvas
+  // (static shape), but the pad must not exist downstream of it: cropping the
+  // prob map here means contours, scores and the rescale all see exactly the
+  // dims the dynamic-shape CPU reference sees — the pad's influence shrinks to
+  // conv receptive-field bleed at the seam instead of whole spurious contours.
+  // The crop is a strided VIEW (no copy); threshold() below allocates a fresh
+  // (continuous) bitmap of the view's dims. Content == canvas (fixed-canvas
+  // mode) makes this the identity.
+  const int res_h = std::min(content_h_ > 0 ? content_h_ : cvs.h, cvs.h);
+  const int res_w = std::min(content_w_ > 0 ? content_w_ : cvs.w, cvs.w);
+  cv::Mat pred = pred_full(cv::Rect(0, 0, res_w, res_h));
   cv::Mat bitmap;
   // SHARED DB parameters (detection::read_db_params), resolved once at load().
   //
@@ -302,8 +451,10 @@ std::vector<turbo_ocr::Box> MpsDetector::db_postprocess_(int orig_h, int orig_w)
   cv::Mat mask_buf;
   std::vector<std::vector<cv::Point>> contours_buf;
   std::vector<cv::Vec4i> hier_buf;
+  // pred/bitmap ARE content-dimensioned now (the crop above), so this is the
+  // classic pipeline shape — map dims == resize dims — same as the CPU path.
   return turbo_ocr::detection::extract_boxes_from_bitmap(
-      pred, bitmap, orig_h, orig_w, cvs.h, cvs.w, db_.box_thresh, db_.unclip_ratio,
+      pred, bitmap, orig_h, orig_w, res_h, res_w, db_.box_thresh, db_.unclip_ratio,
       turbo_ocr::detection::kMinBoxSide,
       turbo_ocr::detection::kMinUnclippedSide,
       shifted_buf, mask_buf, contours_buf, hier_buf);
@@ -330,6 +481,9 @@ std::vector<turbo_ocr::Box> MpsDetector::db_postprocess_(int orig_h, int orig_w)
 // signal that a second export is needed. Exporting more canvases (and passing
 // them all here) is then a data change, not a code change.
 void MpsDetector::check_canvas_policy_(int orig_h, int orig_w) const {
+  // JIT mode tracks the policy by construction (the canvas IS the snapped
+  // policy resize) — there is nothing to warn about.
+  if (jit_) return;
   // Ignore warmup/thumbnail inputs: a synthetic 32x32 warmup image has no
   // meaningful aspect and would fire the warning on every process start.
   if (orig_h < 128 || orig_w < 128) return;
@@ -362,6 +516,11 @@ std::vector<turbo_ocr::Box> MpsDetector::run(const backend::ImageView &img,
                                              backend::DeviceQueue &queue) {
   if (!ready_ || img.empty()) return {};
   select_canvas_(orig_h, orig_w);
+  if (!active_) { // JIT specialization AND its template fallback both failed
+    NSLog(@"[apple] det: no usable canvas for %dx%d — returning no boxes",
+          orig_h, orig_w);
+    return {};
+  }
   check_canvas_policy_(orig_h, orig_w);
   // The CoreML package is bound to ONE canvas; other canvases use MPSGraph.
   if (coreml_ && active_ == coreml_canvas_) {
@@ -437,6 +596,11 @@ backend::BoxesFuture MpsDetector::enqueue(const backend::ImageView &img,
   if (!async_q_) async_q_ = std::make_unique<MetalDeviceQueue>();
 
   select_canvas_(orig_h, orig_w);
+  if (!active_) { // JIT specialization AND its template fallback both failed
+    NSLog(@"[apple] det: no usable canvas for %dx%d — returning no boxes",
+          orig_h, orig_w);
+    return backend::BoxesFuture::ready({});
+  }
   if (coreml_ && active_ == coreml_canvas_) {
     // Async shape of the CoreML path: the resize rides the private lane, the
     // predict runs on the CoreML serial lane so enqueue() returns without

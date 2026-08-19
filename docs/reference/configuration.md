@@ -330,7 +330,9 @@ See the *Apple Silicon* section of the README for why there is no Docker image.
 | `TURBO_APPLE_REC_TIER` | *(from model path)* | `tiny`/`small`/`medium`. Pins the ANE package tier; a wrong tier decodes against the wrong dictionary, so it is DISABLED rather than guessed when undeterminable. |
 | `TURBO_APPLE_REC_FP16` | on | fp16 recognizer weights. |
 | `TURBO_APPLE_DET_ASYNC` | on | Detector `enqueue`/`collect` overlap (its own private command queue). |
-| `TURBO_APPLE_DET_COREML` | off | Path to a fixed-canvas det `.mlpackage`; runs the det forward on CoreML(GPU) instead of MPSGraph. Measured +4–6% at 3 replicas on FUNSD (CoreML's conv kernels beat MPSGraph's for DBNet); the resize/normalize kernel and DB post-process are unchanged. The package's input shape must match the det canvas or it falls back, loudly. |
+| `TURBO_APPLE_DET_JIT` | on | Per-page detector specialization: the runtime compiles the det engine for each page's shape (shared resize policy, 128-px-grid snapped, one-time ~50–350 ms per new shape, then full speed). `0` pins detection to the exported canvas(es) instead. |
+| `TURBO_APPLE_DET_CANVAS_CACHE` | `6` | Live det engine specializations kept (LRU, clamped 2–32). Bounds detector memory on shape-diverse corpora. |
+| `TURBO_APPLE_DET_COREML` | off | Path to a fixed-canvas det `.mlpackage`; runs the det forward on CoreML(GPU) instead of MPSGraph (implies `TURBO_APPLE_DET_JIT=0` — the package is baked at one shape). Measured +4–6% at 3 replicas on FUNSD (CoreML's conv kernels beat MPSGraph's for DBNet); the resize/normalize kernel and DB post-process are unchanged. The package's input shape must match the det canvas or it falls back, loudly. |
 | `TURBO_APPLE_ANE_WORKERS` | auto | ANE worker threads; `0` disables the ANE entirely. |
 | `TURBO_APPLE_ANE_MAXW` | `800` | Widest bucket routed to the ANE; wider falls back to MPSGraph. |
 | `TURBO_APPLE_ANE_TIMEOUT_MS` | — | Per-predict ANE timeout. |

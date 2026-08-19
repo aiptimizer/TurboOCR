@@ -48,6 +48,18 @@ public:
                         int dst_h, const backend::NormParams &params,
                         backend::DeviceQueue &queue) override;
 
+  // Apple-local (NOT on the IKernels seam): resize the page into the TOP-LEFT
+  // content_w x content_h region of the dst_w x dst_h canvas and zero-fill the
+  // rest in NORMALIZED space (= the per-channel mean pixel, which DB scores as
+  // background). This is the SHARED snapped-canvas letterbox policy
+  // (detection::snap_det_canvas_grid) that the Intel backend repacks on the
+  // host; here it is the same one-kernel dispatch as resize_normalize, of which
+  // content == canvas is the degenerate (bit-identical) case.
+  void resize_normalize_content(const backend::ImageView &src, float *dst_chw,
+                                int dst_w, int dst_h, int content_w, int content_h,
+                                const backend::NormParams &params,
+                                backend::DeviceQueue &queue);
+
   void warp_crops(const backend::ImageView &src, const float *d_M_invs,
                   const int *d_crop_widths, float *d_dst_batch, int batch_size,
                   int dst_h, int dst_w, const backend::NormParams &params,

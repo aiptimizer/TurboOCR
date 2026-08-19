@@ -125,6 +125,35 @@ bool MpsEngine::load(const std::string &model_path) {
   return true;
 }
 
+bool MpsEngine::load_shared(const MpsEngine &src, int input_h, int input_w) {
+  if (!src.p_ || !src.p_->graph_json || !src.p_->weights) return false;
+  if (src.p_->input_shape.size() < 4 || input_h <= 0 || input_w <= 0) return false;
+  @autoreleasepool {
+    // SHALLOW copy of the parsed export: the top-level dict is duplicated so
+    // input_shape can differ, but "nodes"/"initializers" (the big arrays) and
+    // the weights NSData stay the very same ObjC objects — ARC strong refs in
+    // both Impls keep them alive for as long as either engine (or any graph
+    // built from them: the constants are no-copy views into `weights`) exists.
+    NSMutableDictionary *G = [src.p_->graph_json mutableCopy];
+    std::vector<long> ishape = src.p_->input_shape;
+    ishape[ishape.size() - 2] = input_h;
+    ishape[ishape.size() - 1] = input_w;
+    G[@"input_shape"] = mrb_nums(ishape);
+    p_->graph_json = G;
+    p_->weights = src.p_->weights;
+    p_->input_name = src.p_->input_name;
+    p_->output_name = src.p_->output_name;
+    p_->input_shape = std::move(ishape);
+    p_->by_batch.clear();
+    input_names_ = {p_->input_name};
+    output_names_ = src.output_names_;
+    fp16_ = src.fp16_;
+    argmax_head_ = src.argmax_head_;
+    class_axis_ = src.class_axis_;
+  }
+  return true;
+}
+
 void MpsEngine::set_fp16(bool on) {
   if (fp16_ == on) return;
   fp16_ = on;

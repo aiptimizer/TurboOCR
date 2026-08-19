@@ -19,7 +19,7 @@ directory and native mode lights up — no configuration):
 
 | Artefact | What |
 |---|---|
-| `det_<tier>/det_c<H>x<W>/…` | MPSGraph detector, one static engine per canvas — 992×768 (portrait documents, the conformance-validated canvas), 800×1280 (landscape screens), 1280×800 (tall captures), 1024×1024 (near-square). The runtime picks per page via the shared `pick_det_canvas` policy; a flat `det_<tier>/graph.json` (the v1 layout) still loads as a single canvas |
+| `det_<tier>/det_c992x768/…` | MPSGraph detector export — ONE canvas. The det graph is fully convolutional, so the runtime re-specializes it per page shape (shared `compute_det_resize` → `snap_det_canvas_grid` 128-grid policy, letterboxed content, LRU-bounded engine cache; one-time ~50–350 ms compile per new canvas, then shape-independent speed). 992×768 is the conformance-validated template: warmup, the fallback canvas, and the fixed canvas under `TURBO_APPLE_DET_JIT=0`. A flat `det_<tier>/graph.json` (v1) or extra `det_c<H>x<W>/` dirs (the interim multi-canvas layout) still load |
 | `rec_<tier>/rec_b<W>/…` | MPSGraph recognizer, one static graph per width of the shared 9-bucket ladder (`recognition::kRecWidthBuckets`) |
 | `cls/…` | MPSGraph 0°/180° line classifier (cls.onnx is statically 80×160) |
 | `coreml/<tier>/rec_ane_<W>.mlpackage` | ANE-lane packages for W ∈ {320, 480, 800} — `--ane` only |
@@ -61,3 +61,9 @@ widths — `mlprogram` runs fp16 internally, hence not bit-equality).
   restricts discovery to `kRecWidthBuckets`; anything else is dead weight
   (an earlier directory-scan behaviour picked up 42 stray exports and ran at
   half throughput).
+- **`python/turboocr_engine/turbo_apple.metallib` is a tracked artifact** that
+  ships in the wheel (`pyproject.toml` packages `*.metallib`). Any change to
+  `shaders.metal` — especially a parameter-struct layout change — must be
+  followed by a CMake build and a copy of the fresh
+  `build-*/turbo_apple.metallib` over the tracked file, or wheels run new host
+  code against the old shader ABI (extra `setBytes` fields silently ignored).

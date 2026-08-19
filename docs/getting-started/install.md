@@ -619,9 +619,11 @@ release asset is available; for a source build — or to generate it
 yourself — run `tools/modelgen/apple/export_apple_native.py --tier small
 --models models --out models` and native mode engages on the next start
 (`mode` in the startup log / `info()` flips from `onnx` to `native`).
-Detection ships one compiled engine per canvas (portrait, landscape, tall,
-square) and the shared aspect policy picks per page, so varied page shapes
-detect undistorted. Without the bundle the Apple backend runs its
+Detection input is dynamic: the runtime specializes its compiled engine to
+each page's shape (shared resize policy, 128-px-grid snapped, LRU-bounded
+cache), so every page shape detects undistorted at full speed after a
+one-time sub-second compile per new shape. Without the bundle the Apple
+backend runs its
 ONNX-on-CoreML fallback — a normal, supported configuration, just not the
 fast one. Layout, tables, formulas and autorotate
 all work once their models are supplied (`--layout-onnx
@@ -631,6 +633,8 @@ models/layout.onnx`, `DOC_ORI_ONNX=…`, `TABLE_BACKEND=…`,
 | Knob | Meaning |
 |---|---|
 | `TURBO_APPLE_ANE_MAXW` | GPU/ANE split point (default 800; `0` = GPU only) |
+| `TURBO_APPLE_DET_CANVAS_CACHE` | Live det engine specializations kept (LRU, default 6) |
+| `TURBO_APPLE_DET_JIT` | `0` pins detection to the exported canvas instead of per-shape specialization |
 
 → `src/backends/apple/README.md`
 

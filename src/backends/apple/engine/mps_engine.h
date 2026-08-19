@@ -38,6 +38,17 @@ public:
 
   [[nodiscard]] bool load(const std::string &model_path) override;
 
+  // --- Apple extension: shared-source shape specialization -------------------
+  // Adopt `src`'s already-parsed export (graph.json dict + weights NSData, both
+  // shared by reference — ONE weights blob serves every specialization) with the
+  // input H/W overridden. The det graph is fully convolutional (zero Reshape
+  // ops; scale-based Resize), so any /32 canvas is a valid input shape; the
+  // actual MPSGraph build + compile happens lazily in prepare()/run(), exactly
+  // like load(). This is what makes a JIT det canvas cost ~no memory beyond its
+  // compiled executable: no re-read, no re-parse, no duplicate weights.
+  // `src` must outlive nothing — the ObjC refs keep the shared data alive.
+  [[nodiscard]] bool load_shared(const MpsEngine &src, int input_h, int input_w);
+
   [[nodiscard]] backend::EngineCaps caps() const override;
 
   [[nodiscard]] const std::vector<std::string> &input_names() const override {

@@ -46,12 +46,16 @@ APPLE_NATIVE_BASE = (
 # per page by the shared aspect policy). v1 (single 992x768 canvas) stays
 # published and untouched — the 4.0.0a2 wheels have ITS url+hashes baked in.
 APPLE_NATIVE_SHA256 = {
+    # Single det export per tier (det_c992x768): the runtime specializes the
+    # detector per page shape from it (fully-convolutional graph, shared
+    # 128-grid snap, bounded canvas cache), so shipping more canvases would be
+    # duplicate weights, not coverage.
     "apple_native_tiny.tar.gz":
-        "7967c9ecf3a8ae204922a58d9b36388b65a763c902e005d8ce8c41a04baecded",
+        "2cf2c2e7a7d8250572ae6b1bce13e5480d82c67dc96d1410d52db334c8853c21",
     "apple_native_small.tar.gz":
-        "178a5241c36db9f0d05faa5db65e6d7d5e292089d94a5f9bed61f99812fe76f6",
+        "32e1d3d119790e20d136ae2f768ae2afbb7b5eca9b9f94cd6b0e00d6ba8d2e62",
     "apple_native_medium.tar.gz":
-        "76f3883d84509d83d591c2f047425465f3ed178308d5163a14e7d356c9abd6d8",
+        "3595e38c97388a019135baab2193da5bd2a179fa79aed95fc314e4c48c985218",
 }
 
 
