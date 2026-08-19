@@ -64,7 +64,10 @@ void fill_from_text_layer_pt(PdfPageResult &pg,
 
 std::string_view text_layer_quality_for(const pdf::PdfPageText &text) {
   if (text.char_count == 0)                         return "absent";
-  if (text.rotation_deg != 0)                       return "rejected";
+  // rotation_deg is no longer rejected: the /Rotate transforms in
+  // pdf_text_internal.h are ink-verified for all four rotations (the old
+  // 90/270 cases were wrong, which is WHY this gate refused them — a
+  // geometric request on any rotated page returned zero text lines).
   if (text.char_count < 10)                         return "absent";
   if (text.fffd_count * 20 > text.char_count)       return "rejected";
   if (text.nonprint_count * 10 > text.char_count)   return "rejected";

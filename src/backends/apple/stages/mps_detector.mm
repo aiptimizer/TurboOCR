@@ -509,8 +509,13 @@ void MpsDetector::check_canvas_policy_(int orig_h, int orig_w) const {
   for (const auto &cv : canvases_) have.emplace_back(cv->h, cv->w);
   const auto [ch, cw] = turbo_ocr::detection::pick_det_canvas(
       orig_h, orig_w, have);
+  // resize_ (captured at load), NOT read_det_resize(): the global base slot
+  // belongs to whichever pipeline constructed LAST, so re-reading it here at
+  // run time judged this instance's canvases against another instance's
+  // policy. This was the only post-load read of the base in any backend —
+  // every stage otherwise captures its config at init.
   const auto [want_h, want_w] = turbo_ocr::detection::compute_det_resize(
-      orig_h, orig_w, turbo_ocr::detection::read_det_resize());
+      orig_h, orig_w, resize_);
   const double want_ar = (double)want_w / std::max(1, want_h);
   const double have_ar = (double)cw / std::max(1, ch);
   const double err = std::abs(std::log(have_ar / want_ar));

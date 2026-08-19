@@ -1,9 +1,10 @@
 #pragma once
 
 // In-process PDFium text-layer extraction for /ocr/pdf's extraction modes.
-// Uses PDFium's high-level FPDFText_* APIs (GetRect / GetBoundedText /
-// CountChars) instead of char-by-char grouping, so we inherit PDFium's own
-// reading-order, word/line grouping, and whitespace handling for free.
+// Walks the CHAR FLOW (FPDFText_GetUnicode/GetCharBox, splitting on
+// PDFium's generated \r\n) — NOT FPDFText_CountRects/GetRect: rects are
+// per same-font/style RUN, so a mid-line font change fragments one visual
+// line and nested run rects duplicate text (see pdf_text_extract.cpp).
 //
 // Coordinate convention: PDF points (1/72 inch), **top-left origin**
 // (matching turbo-ocr's convention for all other endpoints). PDFium's
@@ -19,9 +20,8 @@
 
 namespace turbo_ocr::pdf {
 
-// One "rectangle" as PDFium merges them via FPDFText_CountRects /
-// FPDFText_GetRect: a contiguous run of characters on the same baseline
-// with the same font settings. Treat it as a line fragment / phrase.
+// One VISUAL LINE from the char-flow walk (full line, not a same-font run):
+// its text plus the AABB of its glyph boxes, transformed to visual space.
 struct PdfTextLine {
   std::string text;   // utf-8
   float x0_pt = 0.0f; // top-left origin, PDF points
@@ -89,7 +89,8 @@ struct SanityVerdict {
 //   - empty string
 //   - too many U+FFFD / non-printable
 //   - implausible char count for the box width
-//   - rotated page (any non-zero rotation for v1)
+// (Page rotation is NOT its concern — this function never sees it; the
+// per-page gate lives in pdf_job_pages.cpp text_layer_quality_for.)
 [[nodiscard]] SanityVerdict passes_sanity_check(
     const std::string &text,
     float box_width_pt, float box_height_pt);

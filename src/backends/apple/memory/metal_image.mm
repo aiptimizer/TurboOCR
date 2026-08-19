@@ -11,12 +11,28 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "turbo_ocr/base/env_utils.h"
 
 namespace turbo_ocr::apple {
+
+// Metal caps each texture axis at 16384; exceeding it trips an UNCATCHABLE
+// MTLTextureDescriptor validation assertion that ABORTS the process — from a
+// plain oversized image or a PDF page rendered at high DPI. Refuse with a
+// normal exception instead: the server turns it into a failed request, the
+// Python wheel into a catchable error (its pipeline pre-checks too).
+static void check_metal_axis(int w, int h) {
+  constexpr int kMetalMaxAxis = 16384;
+  if (w > kMetalMaxAxis || h > kMetalMaxAxis) {
+    throw std::runtime_error(
+        "image " + std::to_string(w) + "x" + std::to_string(h) +
+        " exceeds Metal's 16384px texture axis limit — downscale the input "
+        "(or lower the PDF render DPI)");
+  }
+}
 
 // --- texture registry -------------------------------------------------------
 
@@ -156,6 +172,7 @@ MetalImage MetalImage::from_host_bgr(const cv::Mat &bgr) {
 
     // RGBA8 texture, B/R swapped (texture .rgb == R,G,B) — identical to the
     // proven upload in tools/probes/apple/mps_ocr.mm:63-69.
+    check_metal_axis(w, h);
     MTLTextureDescriptor *td =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                            width:w
@@ -248,6 +265,7 @@ id<MTLTexture> ensure_texture(const backend::ImageView &img,
   @autoreleasepool {
     if (!tex) {
       TURBO_APPLE_STAT(tex_new_texture);
+      check_metal_axis(img.cols, img.rows);
       MTLTextureDescriptor *td =
           [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                              width:img.cols

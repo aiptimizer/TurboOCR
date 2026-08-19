@@ -203,7 +203,7 @@ PdfDocument::text_in_rect_pt(int page_index,
   double left, right, top, bottom;
   if (ph->rotation_deg == 0 && ph->origin_x_pt == 0.0f &&
       ph->origin_y_pt == 0.0f) [[likely]] {
-    const float page_h = ph->visual_h_pt;
+    const float page_h = ph->media_h_pt;  // rot==0: equals visual_h_pt
     left   = x0_pt;
     right  = x1_pt;
     top    = page_h - y0_pt;

@@ -25,6 +25,9 @@ PdfPageText PdfDocument::extract_page(int page_index) const {
   // Report visual dimensions so downstream code (PdfRenderer, layout,
   // client coord conversions) sees a single post-rotation coordinate
   // system regardless of /Rotate.
+  // POST-/Rotate extents: what the renderer rasterizes and what clients'
+  // width/height must describe (a /Rotate 90 A4 used to report 595x842
+  // while the raster was 842x595 — served live on mode=geometric).
   out.page_width_pt  = ph->visual_w_pt;
   out.page_height_pt = ph->visual_h_pt;
   out.rotation_deg   = ph->rotation_deg;
@@ -79,7 +82,7 @@ PdfPageText PdfDocument::extract_page(int page_index) const {
     // no 4-corner transform. This is the shape of ~99% of real PDFs.
     if (ph->rotation_deg == 0 && ph->origin_x_pt == 0.0f &&
         ph->origin_y_pt == 0.0f) [[likely]] {
-      const float page_h = ph->visual_h_pt;
+      const float page_h = ph->media_h_pt;  // rot==0: equals visual_h_pt
       line.x0_pt = static_cast<float>(left);
       line.x1_pt = static_cast<float>(right);
       line.y0_pt = page_h - static_cast<float>(top);
@@ -134,9 +137,16 @@ PdfPageText PdfDocument::extract_page(int page_index) const {
       line_units.push_back(static_cast<unsigned short>(u));
     }
     double cl = 0, cr = 0, cb = 0, ct = 0;
-    // Generated chars (inserted spaces) return degenerate boxes — keep their
-    // text, skip them in the bbox union.
-    if (FPDFText_GetCharBox(ph->textpage, idx, &cl, &cr, &cb, &ct) &&
+    // Whitespace keeps its place in the TEXT but never joins the bbox
+    // union: the old degenerate-box test (cr>cl && ct>cb) filtered only
+    // PDFium's GENERATED spaces — a POSITIONED space run (tab leaders,
+    // empty right-hand table cells) has a real-width box and inflated the
+    // line box far past the ink (measured 9x on a padded cell; the
+    // searchable writer then stretched its invisible run to match).
+    // Codepoint rule mirrors the Python port (space/tab/NBSP).
+    const bool is_space = (u == 0x20 || u == 0x09 || u == 0xA0);
+    if (!is_space &&
+        FPDFText_GetCharBox(ph->textpage, idx, &cl, &cr, &cb, &ct) &&
         cr > cl && ct > cb) {
       if (!have_box) {
         lleft = cl; lright = cr; lbottom = cb; ltop = ct;
