@@ -14,7 +14,7 @@ import os
 import sys
 from typing import List, Optional
 
-from .options import DEFAULT_DPI, DROP_SCORE, OUTPUT_FORMATS
+from .options import DEFAULT_DPI, DROP_SCORE, OUTPUT_FORMATS, PDF_MODES
 
 
 def _parse_pages(s: Optional[str]) -> Optional[List[int]]:
@@ -307,10 +307,12 @@ def build_parser() -> argparse.ArgumentParser:
     pf = sub.add_parser("pdf", help="OCR a PDF")
     pf.add_argument("file")
     _add_common(pf)
-    pf.add_argument("--mode", choices=["ocr", "text", "auto"], default="auto",
-                    help="auto = embedded text layer where present, OCR for "
-                         "scanned pages (default); ocr = render+OCR every page "
-                         "(force re-OCR); text = text layer only, no OCR")
+    pf.add_argument("--mode", choices=list(PDF_MODES), default="ocr",
+                    help="ocr = render and OCR every page (default); auto = "
+                         "use a page's embedded text layer when one is there "
+                         "and passes the quality gate (much faster on "
+                         "born-digital PDFs), OCR the rest; text = embedded "
+                         "text layer only, never OCR")
     pf.add_argument("--password", default=None,
                     help="password for an encrypted PDF (user or owner)")
     pf.add_argument("--dpi", type=int, default=DEFAULT_DPI,

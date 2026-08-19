@@ -2369,9 +2369,13 @@ def test_stale_ort_ep_does_not_poison_cpu_load(monkeypatch):
     assert os.environ["ORT_EP"] == "cuda-from-someones-dotfile"
 
 
-def test_read_pdf_defaults_to_auto_mode(monkeypatch):
-    """The PDF default is mode='auto' (text layer where present, OCR
-    otherwise); pdf_to_searchable PINS mode='ocr' — its output embeds page
+def test_read_pdf_defaults_to_ocr_mode(monkeypatch):
+    """The PDF default is mode='ocr': this is an OCR library, so every page
+    goes through the recognizer unless the caller opts into 'auto'/'text'.
+    (mode= was introduced in 4.0.0a6 defaulting to 'auto', which silently
+    changed where a page's text came from — a document with a text layer
+    stopped being OCR'd at all. Reverted: the fast path is opt-in.)
+    pdf_to_searchable PINS mode='ocr' either way — its output embeds page
     rasters, which text-layer payloads don't carry."""
     P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
     import sys
@@ -2387,10 +2391,15 @@ def test_read_pdf_defaults_to_auto_mode(monkeypatch):
 
     fake.iter_pdf_pages = spy
     P.OCR.read_pdf(ocr, "f.pdf")
-    assert seen == ["auto"]
+    assert seen == ["ocr"]
 
     seen.clear()
     list(P.OCR.read_pdf_stream(ocr, "f.pdf"))
+    assert seen == ["ocr"]
+
+    # ...and 'auto' still reaches the extractor when asked for explicitly.
+    seen.clear()
+    P.OCR.read_pdf(ocr, "f.pdf", mode="auto")
     assert seen == ["auto"]
 
     seen.clear()

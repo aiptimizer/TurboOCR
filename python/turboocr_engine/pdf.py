@@ -11,8 +11,10 @@ grouping, control-character stripping, /Rotate + MediaBox-origin handling —
 src/pdf/text/pdf_text_extract.cpp + pdf_text_internal.h). Known, deliberate
 divergences from the server, all in the stricter direction here:
 
-* trust threshold ~50 visible chars vs the server's 10 (auto is the DEFAULT
-  in this library — _AUTO_TRUST_MIN_CHARS);
+* trust threshold ~50 visible chars vs the server's 10 — the gate here only
+  runs when a caller explicitly opts into mode="auto" (the default on both
+  sides is OCR), and a thin layer is exactly the case worth re-OCR'ing
+  (_AUTO_TRUST_MIN_CHARS);
 * char_count semantics: this side counts visible CODE POINTS (\r\n
   excluded, a surrogate pair = 1) where the server's gate still counts raw
   UTF-16 units — so the ratio gates bite slightly earlier here;
@@ -34,7 +36,7 @@ import numpy as np
 
 from .imaging import ImageInput, _PDF_SNIFF_WINDOW, looks_like_pdf
 from .options import DEFAULT_DPI as _PDF_DEFAULT_DPI
-from .options import check_max_pages, check_on_error
+from .options import OnError, PdfMode, check_max_pages, check_on_error, check_pdf_mode
 
 # PDFium is NOT thread-safe — not per document but GLOBALLY: concurrent calls
 # on DIFFERENT documents from different threads crash (reproduced: a
@@ -338,12 +340,13 @@ def _extract_page_text(
 
 # The server's gate trusts any page with >= 10 clean chars — enough for a
 # Bates stamp ("BATES 000123", 12 chars) on a SCANNED page to clear the bar
-# and silently replace the whole page's OCR with one stamp line. Since auto
-# is the DEFAULT here (the server defaults to ocr), the trust bar is higher:
-# below it the page renders and OCRs. For a genuinely sparse digital page
-# ("Exhibit A" separators, chapter titles) that costs one OCR pass and
-# returns the same text; for a stamped or fax-headed scan it saves the
-# document body.
+# and silently replace the whole page's OCR with one stamp line. The bar is
+# higher here: a caller who asked for mode="auto" wants the SPEED of a real
+# text layer, and a page carrying a dozen characters offers none of it while
+# risking the whole page body. Below the bar the page renders and OCRs. For
+# a genuinely sparse digital page ("Exhibit A" separators, chapter titles)
+# that costs one OCR pass and returns the same text; for a stamped or
+# fax-headed scan it saves the document body.
 _AUTO_TRUST_MIN_CHARS = 50
 
 
@@ -400,10 +403,10 @@ def iter_pdf_pages(
     dpi: int = _PDF_DEFAULT_DPI,
     pages: Optional[List[int]] = None,
     max_pages: Optional[int] = None,
-    mode: str = "ocr",
+    mode: PdfMode = "ocr",
     password: Optional[str] = None,
     text_with_raster: bool = False,
-    on_error: str = "raise",
+    on_error: OnError = "raise",
 ) -> Iterator[tuple]:
     """The per-page payload stream under ``read_pdf_stream``:
 
@@ -431,9 +434,7 @@ def iter_pdf_pages(
     holds the process-wide ``_PDFIUM_LOCK`` (released between pages) — this
     is the path under read_pdf/aread_pdf, so without it two concurrent
     documents would race pdfium and crash the interpreter."""
-    if mode not in ("ocr", "auto", "text"):
-        raise ValueError(
-            f"iter_pdf_pages mode must be 'ocr', 'auto' or 'text', got {mode!r}")
+    check_pdf_mode(mode)
     check_on_error(on_error)
     with _PDFIUM_LOCK:
         doc = _open_document(pdf, password)

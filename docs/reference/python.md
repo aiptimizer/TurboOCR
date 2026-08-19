@@ -130,38 +130,50 @@ started.
 
 ```python
 doc = ocr.read_pdf(pdf, *, dpi=150, pages=None, max_pages=None,
-                   mode="auto", on_error="raise", autorotate=None,
+                   mode="ocr", on_error="raise", autorotate=None,
                    keep_image=None, password=None, ...)
 ```
 
-`mode` picks how each page's text is obtained: `"auto"` (default since
-4.0.0a6) — per page, the embedded text layer where the page has one AND a
-quality gate trusts it, OCR for everything else. The gate shares the
+`mode` picks how each page's text is obtained, and is typed as a
+`Literal["ocr", "auto", "text"]` so editors offer the three values inline.
+
+**`"ocr"` (default)** — render every page and OCR it, ignoring any embedded
+text layer. This is an OCR engine: unless you say otherwise, every character
+in the result came from the recognizer, on every page.
+
+**`"auto"`** — per page, the embedded text layer where the page has one AND a
+quality gate trusts it, OCR for everything else. On born-digital PDFs this is
+roughly **10x faster and more accurate** (no recognizer, so no misreads —
+measured on a 2-page letter: 4.8 ms vs 58.5 ms, with OCR misreading the
+letterhead `UNIA` as `UN1A`). Two things to weigh before opting in: a scan
+whose text layer came from earlier, possibly worse, OCR software passes the
+gate and is served as-is; and text a PDF holds only as an **image** (a logo,
+a pasted screenshot) is invisible to the layer, so those lines are missing
+from the result. `line.source` is `"pdf"` for layer-sourced lines and `""`
+for OCR'd ones, so the two are always distinguishable.
+The gate shares the
 server's structure (garbled/`U+FFFD`-heavy, control-character-ridden, and
 **thin** layers are refused — a Bates stamp or fax header on a scan must
-not hijack the page) with a deliberately stricter trust threshold: pages
+not hijack the page) with a stricter trust threshold: pages
 under ~50 visible layer chars simply OCR, where the server accepts 10.
 `/Rotate`d pages serve their layers like any other (the rotation transform
 is ink-verified; boxes land where the render puts the glyphs). Throughput
 is density-dependent: ~2700 pages/s on sparse digital pages, ~260 on
-typical body text, ~100 on very dense 7k-char pages (the char-accurate
-extractor costs ~2x the old run-based one on dense pages — the old one
-fragmented and duplicated lines, so this is correctness bought at a fair
-price; lines carry `source="pdf"`, byte-exact). Engines built with
+typical body text, ~100 on very dense 7k-char pages. Engines built with
 layout/tables/formulas still run those **structure stages** on text-layer
 pages (the page renders for the structure pass). `reading_order` is never
 computed on PDF pages — neither text-layer nor OCR'd (the PDF entry points
-expose no reading_order parameter today). The remaining caveat: a scan
-whose text layer came from earlier (possibly worse) OCR software and
-passes the gate is served as-is — `mode="ocr"` forces re-OCR of every
-page. `"text"` is the layer only, no OCR and NO gate (close to the
-server's `geometric` mode, which does apply its gate; the server's
-`auto_verified` mode is currently aliased to `auto` there and has no
-Python spelling). `pdf_to_searchable()` always renders (its output embeds
-the page rasters). Note the HTTP server's `/ocr/pdf`
-keeps `mode=ocr` as ITS default — the library default changed because a
-library call sees the whole document result at once; a service default is a
-separate decision.
+expose no reading_order parameter today).
+
+**`"text"`** — the layer only, no OCR and NO gate (close to the server's
+`geometric` mode, which does apply its gate; the server's `auto_verified`
+mode is currently aliased to `auto` there and has no Python spelling).
+Because PDFium is globally single-threaded, `replicas` and async buy nothing
+in this mode — the speed comes from skipping rasterization and OCR.
+
+`pdf_to_searchable()` always renders regardless of `mode` (its output embeds
+the page rasters). The HTTP server's `/ocr/pdf` also defaults to `ocr`, so
+library and service agree.
 Renders with PDFium — built in, no extra needed (pypdfium2 and reportlab
 ship with the engine wheel since 4.0.0a6) — and
 OCRs each page. Pages fan out across the replica pool: with
@@ -350,7 +362,7 @@ turboocr version
 Shared engine flags on `ocr`/`pdf`/`info`: `--backend`, `--model`/`--lang`/
 `--tier`, `--replicas N` (parallel pages/images), `--layout`, `--tables`,
 `--formulas`, `--autorotate`, `--cls`. The `pdf` subcommand adds
-`--mode auto|ocr|text` (default `auto`; `ocr` forces re-OCR, `text` = embedded text layer only),
+`--mode ocr|auto|text` (default `ocr` — every page is OCR'd; `auto` uses a trusted embedded text layer where present, `text` = layer only, never OCR),
 `--searchable -o out.pdf`, `--dpi`, `--pages`, `--max-pages`;
 `ocr` adds `--overlay boxes.png` (with `--layout`, regions are drawn too)
 and `--on-error skip` (note unreadable images on stderr, keep going, exit

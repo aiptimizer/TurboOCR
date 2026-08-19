@@ -33,8 +33,16 @@ from .result import (
     TextLine,
 )
 
-from .options import DEFAULT_DPI, DROP_SCORE
+from .options import (
+    DEFAULT_DPI,
+    DROP_SCORE,
+    ENGINE_MODES,
+    EngineMode,
+    OnError,
+    PdfMode,
+)
 from .options import check_on_error as _check_on_error_impl
+from .options import check_pdf_mode as _check_pdf_mode
 
 # Placed into the replica pool by close(): a reader that raced past the
 # _closed flag and parked in Queue.get() receives this instead of blocking
@@ -370,7 +378,7 @@ class OCR:
         device: Optional[str] = None,
         device_id: int = 0,
         use_cls: bool = False,
-        mode: str = "auto",
+        mode: EngineMode = "auto",
         replicas: int = 1,
         fp16: bool = True,
         allow_download: bool = True,
@@ -393,11 +401,10 @@ class OCR:
         # provider with fp16 where supported and NO graph build; "auto" (the
         # default) takes native when its artefact exists and falls back
         # otherwise. The resolved value is reported by info()["mode"].
-        _MODES = ("auto", "native", "ultra", "onnx", "fast")
-        if mode not in _MODES:
+        if mode not in ENGINE_MODES:
             # read_pdf(mode=) and on_error= are validated; this one silently
             # accepted any string and behaved like "auto".
-            raise ValueError(f"mode must be one of {_MODES}, got {mode!r}")
+            raise ValueError(f"mode must be one of {ENGINE_MODES}, got {mode!r}")
         self.requested_mode = mode
         self.fp16 = fp16
         self.verbose = verbose
@@ -877,7 +884,7 @@ class OCR:
         progress=None,
         keep_image: Optional[bool] = None,
         batch_size: int = 8,
-        on_error: str = "raise",
+        on_error: OnError = "raise",
     ) -> DocumentResult:
         """OCR a list of images into a :class:`DocumentResult` (one page each).
 
@@ -1090,10 +1097,10 @@ class OCR:
         pages: Optional[List[int]] = None,
         drop_score: float = DROP_SCORE,
         max_pages: Optional[int] = None,
-        mode: str = "auto",
+        mode: PdfMode = "ocr",
         progress=None,
         keep_image: Optional[bool] = None,
-        on_error: str = "raise",
+        on_error: OnError = "raise",
         autorotate: Optional[bool] = None,
         password: Optional[str] = None,
     ) -> DocumentResult:
@@ -1103,20 +1110,26 @@ class OCR:
 
         ``mode`` picks how each page's text is obtained:
 
-        * ``"auto"`` (default) — per page: the embedded text layer when the
-          page has one (~0 ms, byte-exact), OCR only for the pages that
-          don't. Born-digital PDFs read at hundreds of pages/s; scans OCR
-          exactly as before. The one caveat: a scan that ALREADY carries a
-          text layer (from earlier, possibly worse, OCR software) is served
-          as-is — pass ``mode="ocr"`` to force re-OCR of every page;
-        * ``"ocr"`` — render every page and OCR it, ignoring any text layer;
+        * ``"ocr"`` (default) — render every page and OCR it, ignoring any
+          embedded text layer. This is an OCR engine: unless you say
+          otherwise, every character in the result came from the recognizer,
+          on every page, whatever the input was;
+        * ``"auto"`` — per page: the embedded text layer when the page has
+          one AND a quality gate trusts it (~0 ms, byte-exact), OCR for the
+          rest. Born-digital PDFs read ~10x faster and more accurately (no
+          recognizer means no misreads). Two things to know before opting
+          in: a scan that ALREADY carries a text layer from earlier,
+          possibly worse, OCR software is served as-is; and text a PDF only
+          contains as an IMAGE (a logo, a pasted screenshot) is invisible to
+          the layer, so those lines are missing. Check ``line.source`` to
+          see which path a line came from;
         * ``"text"`` — the EMBEDDED text layer only: no rendering, no OCR, no
           models. (PDFium itself is globally single-threaded — every pdfium
           call in this process serializes behind one lock, which is also what
           makes concurrent ``aread_pdf`` calls safe — so the speed here comes
-          from skipping rasterization and OCR, not from workers.) Lines carry
-          ``source="pdf"`` and confidence 1.0; a scanned page simply comes
-          back empty.
+          from skipping rasterization and OCR, not from workers, and
+          ``replicas``/async buy nothing.) Lines carry ``source="pdf"`` and
+          confidence 1.0; a scanned page simply comes back empty.
 
         Pages fan out across the replica pool: with ``OCR(replicas=N)``, up to
         N pages are OCR'd concurrently (rendering stays on the calling thread
@@ -1165,11 +1178,11 @@ class OCR:
         pages: Optional[List[int]] = None,
         drop_score: float = DROP_SCORE,
         max_pages: Optional[int] = None,
-        mode: str = "auto",
+        mode: PdfMode = "ocr",
         ordered: bool = True,
         progress=None,
         keep_image: Optional[bool] = None,
-        on_error: str = "raise",
+        on_error: OnError = "raise",
         autorotate: Optional[bool] = None,
         password: Optional[str] = None,
     ) -> Generator[PageResult, None, None]:
@@ -1190,9 +1203,10 @@ class OCR:
         use ``PageResult.page`` (1-based) to reassemble. Each page's result is
         independent, so both modes produce the same set of results.
 
-        ``mode`` works exactly as in :meth:`read_pdf` — ``"text"`` streams
-        the embedded text layer with no OCR at all, ``"auto"`` serves trusted
-        text layers and OCRs everything else. Under ``"auto"``, engines built
+        ``mode`` works exactly as in :meth:`read_pdf` — ``"ocr"`` (the
+        default) OCRs every page, ``"text"`` streams the embedded text layer
+        with no OCR at all, ``"auto"`` serves trusted text layers and OCRs
+        everything else. Under ``"auto"``, engines built
         with layout/tables/formulas still run those STRUCTURE stages on
         text-layer pages (the page is rendered for the structure pass while
         its text comes byte-exact from the layer — the server's Geometric
@@ -1227,10 +1241,7 @@ class OCR:
         # EAGER validation: everything below raises at the CALL, not at the
         # first next() (which may run on another thread via the async
         # wrapper, detaching the traceback from the caller).
-        if mode not in ("ocr", "text", "auto"):
-            raise ValueError(
-                f"mode must be 'ocr', 'text' or 'auto', got {mode!r}"
-            )
+        _check_pdf_mode(mode)
         _check_on_error(on_error)
         from .options import check_max_pages
 
@@ -1424,7 +1435,7 @@ class OCR:
         max_pages: Optional[int] = None,
         drop_score: float = DROP_SCORE,
         progress=None,
-        on_error: str = "raise",
+        on_error: OnError = "raise",
         autorotate: Optional[bool] = None,
         password: Optional[str] = None,
     ) -> str:

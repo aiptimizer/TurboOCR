@@ -424,9 +424,10 @@ async for page in ocr.aread_pdf_stream(pdf):  #   aread_pdf / aread_pdf_stream
 自 4.0.0a6 起：`read_pdf`/`read_batch` 默认不再保留页面位图（需要
 `save_searchable_pdf()`/`draw()` 时传 `keep_image=True`）；`on_error="skip"`
 把单页失败收敛为 `page_failed` 警告而不是中断整个文档；`autorotate=True`
-同样作用于 PDF 页面；`password=` 可打开加密 PDF；`read_pdf` 默认 `mode="auto"` —
-有内嵌文本层的页面直接读取（原生数字 PDF 可达每秒数百页），
-无文本层的页面才走 OCR（`mode="ocr"` 强制全部重新识别）。
+同样作用于 PDF 页面；`password=` 可打开加密 PDF。`read_pdf` 仍默认 `mode="ocr"` —
+这是 OCR 引擎，每一页都经过识别器；新增的 `mode="auto"` 为可选加速项：页面若带
+内嵌文本层且通过质量门限，则直接读取该文本层 — 在原生数字 PDF 上约快 10 倍且逐字
+精确（`mode="text"` 则完全不做 OCR）。
 
 → [Python 库参考](docs/reference/python.md) · [python/README.md](python/README.md) · [设计文档](python/DESIGN.md)
 

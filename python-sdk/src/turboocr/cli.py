@@ -86,7 +86,19 @@ def pdf(
     base_url: Annotated[str, typer.Option(envvar="TURBO_OCR_BASE_URL")] = DEFAULT_BASE_URL,
     api_key: Annotated[str | None, typer.Option(envvar="TURBO_OCR_API_KEY")] = None,
     dpi: int = 100,
-    mode: PdfMode = PdfMode.auto,
+    # OCR by default, matching the server's own default (ENABLE_PDF_MODE=ocr)
+    # and the engine library's read_pdf: this is an OCR tool, so every page
+    # goes through the recognizer unless the caller asks for a text-layer
+    # mode. `auto`/`geometric` read a page's embedded text layer instead —
+    # much faster on born-digital PDFs, but text the PDF holds only as an
+    # IMAGE (a logo, a pasted screenshot) is absent from that layer, and a
+    # scan already OCR'd by worse software is served from its stale layer.
+    mode: Annotated[
+        PdfMode,
+        typer.Option(help="ocr = recognize every page (default); auto/"
+                          "geometric = use the embedded text layer where "
+                          "present; auto_verified = layer + verification"),
+    ] = PdfMode.ocr,
     layout: bool = True,
     reading_order: bool = True,
     include_blocks: bool = True,

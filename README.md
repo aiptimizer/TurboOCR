@@ -454,9 +454,11 @@ Since 4.0.0a6: `read_pdf`/`read_batch` drop page rasters by default (pass
 `keep_image=True` when you need `save_searchable_pdf()`/`draw()`),
 `on_error="skip"` contains a failing page to a `page_failed` warning instead
 of aborting the document, `autorotate=True` also straightens PDF pages,
-`password=` opens encrypted PDFs, and `read_pdf` defaults to `mode="auto"` —
-the embedded text layer where a page has one (born-digital PDFs read at
-hundreds of pages/s), OCR for the pages without (`mode="ocr"` forces re-OCR).
+`password=` opens encrypted PDFs. `read_pdf` still defaults to `mode="ocr"` —
+it is an OCR engine, so every page goes through the recognizer — and the new
+opt-in `mode="auto"` reads a page's embedded text layer instead when one is
+there and passes a quality gate, which is ~10x faster and byte-exact on
+born-digital PDFs (`mode="text"` never OCRs at all).
 
 → [Python library reference](docs/reference/python.md) · [python/README.md](python/README.md) · [design](python/DESIGN.md)
 
