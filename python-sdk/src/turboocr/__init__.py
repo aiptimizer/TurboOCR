@@ -1,4 +1,4 @@
-__version__ = "4.0.0a6"
+__version__ = "4.0.0a7"
 SERVER_API_VERSION_MIN = "3.1.0"
 SERVER_API_VERSION_MAX_EXCLUSIVE = "5.0.0"
 

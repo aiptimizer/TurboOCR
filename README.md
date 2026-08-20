@@ -284,11 +284,11 @@ pip install "turboocr[rocm]"      # + AMD engine
 `turboocr doctor` prints the right line for your machine — on NVIDIA it also
 picks between `cuda12` and `cuda13` from your driver. Feature extras combine:
 `"turboocr[cuda12,pandas]"` (PDF support is built in since `4.0.0a6` — no
-extra needed). Because `4.0.0a6` is a pre-release, pip will
+extra needed). Because `4.0.0a7` is a pre-release, pip will
 not select it by default even after publication — ask for it explicitly:
 
 ```bash
-pip install --pre "turboocr[cpu]"        # or pin: turboocr[cpu]==4.0.0a6
+pip install --pre "turboocr[cpu]"        # or pin: turboocr[cpu]==4.0.0a7
 ```
 
 On NVIDIA, the engine wheel needs only an NVIDIA **driver** (no CUDA toolkit).
@@ -406,7 +406,7 @@ extras do not resolve and the working path is building from this checkout;
 `-rocm` is deliberately unpublished. A `0.0.0` release under an engine name
 is an empty placeholder from the PyPI project setup, not installable
 software. A plain `pip install turboocr` still resolves to the old **0.3.0
-client** (no engine): `--pre` is required because `4.0.0a6` is a pre-release:
+client** (no engine): `--pre` is required because `4.0.0a7` is a pre-release:
 
 ```bash
 pip install --pre "turboocr[cpu]"     # or [apple] | [cuda12] | [cuda13] | [openvino] | [rocm]
