@@ -248,7 +248,7 @@ them, so one knob selects the device on every vendor arm.
 | `TURBO_EP_PROVIDER` | vendor default | Override the ORT execution provider a vendor's ONNX path uses (see `src/backends/cpu/stages/cpu_stages.cpp`). |
 | `TURBO_EP_DEVICE` | unset | Device selector handed to that engine (e.g. the OpenVINO device string). This is the name the engine reads — `TURBO_DEVICE` is not read by anything. |
 | `TURBO_EP_FP16` | `1` | fp16 weights/activations where the engine supports it; set `0` to force fp32. |
-| `TURBO_ENGINE_MODE` | auto | `native` / `onnx` / `auto` — which engine path a vendor backend brings up (also `--engine-mode`). |
+| `TURBO_ENGINE_MODE` | auto | `native`/`ultra` (vendor graph engine — TensorRT / MPSGraph / OpenVINO blob; one-time cached build, fastest) / `onnx`/`fast` (the .onnx models on the vendor's ORT provider — instant start, no build, slower) / `auto` (native when its artefact exists). Also `--engine-mode`. |
 
 ### Structure stages (tables / formulas / VLM sidecar)
 
@@ -302,7 +302,7 @@ them, so one knob selects the device on every vendor arm.
 |---|---|---|
 | `TURBO_BACKEND` | *(empty = auto-detect)* | Which vendor backend to run: `cpu`, `apple`, `nvidia`, `intel`, `amd`. Also `--backend`. Empty auto-detects by priority among the backends compiled in (`TURBO_BACKENDS` at build time). **This is the single most important operator knob and was previously undocumented.** |
 | `OCR_BACKEND` | *(unset)* | Legacy alias retained for compatibility; prefer `TURBO_BACKEND`. |
-| `TURBO_ENGINE_MODE` | `auto` | `native` / `onnx` / `auto` — which engine path a vendor brings up. Also `--engine-mode`. |
+| `TURBO_ENGINE_MODE` | `auto` | `native`/`ultra` (graph engine, one-time cached build) / `onnx`/`fast` (instant start, no build) / `auto`. Also `--engine-mode`. |
 
 ## Pool / admission control
 
@@ -333,8 +333,8 @@ See the *Apple Silicon* section of the README for why there is no Docker image.
 | `TURBO_APPLE_DET_JIT` | on | Per-page detector specialization: the runtime compiles the det engine for each page's shape (shared resize policy, 128-px-grid snapped, one-time ~50–350 ms per new shape, then full speed). `0` pins detection to the exported canvas(es) instead. |
 | `TURBO_APPLE_DET_CANVAS_CACHE` | `6` | Live det engine specializations kept (LRU, clamped 2–32). Bounds detector memory on shape-diverse corpora. |
 | `TURBO_APPLE_DET_COREML` | off | Path to a fixed-canvas det `.mlpackage`; runs the det forward on CoreML(GPU) instead of MPSGraph (implies `TURBO_APPLE_DET_JIT=0` — the package is baked at one shape). Measured +4–6% at 3 replicas on FUNSD (CoreML's conv kernels beat MPSGraph's for DBNet); the resize/normalize kernel and DB post-process are unchanged. The package's input shape must match the det canvas or it falls back, loudly. |
-| `TURBO_APPLE_ANE_WORKERS` | auto | ANE worker threads; `0` disables the ANE entirely. |
-| `TURBO_APPLE_ANE_MAXW` | `800` | Widest bucket routed to the ANE; wider falls back to MPSGraph. |
+| `TURBO_APPLE_ANE_WORKERS` | `2` | ANE worker threads (clamped to 1–64). `0` does **not** disable the ANE — it clamps to 1. Measured flat: 2/4/6 workers gave 50.70/50.84/50.96 pages/s. |
+| `TURBO_APPLE_ANE_MAXW` | `800` | Widest recognizer bucket routed to the ANE; **`0` is what actually disables the ANE**, leaving recognition on the GPU. Worth trying at `replicas=1`, where the ANE hybrid measured 8–19% SLOWER than GPU-only (the hybrid's benefit needs a deep queue and only pays from `replicas>=2`). |
 | `TURBO_APPLE_ANE_TIMEOUT_MS` | — | Per-predict ANE timeout. |
 | `TURBO_APPLE_ANE_SHAPE_IDX` | — | Pin the ANE input shape index. |
 | `TURBO_APPLE_COREML_DIR` | `~/.apple_ocr_ml/coreml` | `rec_ane_<W>.mlpackage` location. |

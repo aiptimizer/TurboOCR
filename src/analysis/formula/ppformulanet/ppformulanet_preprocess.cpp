@@ -157,8 +157,15 @@ void formula_preprocess_one(const uint8_t *bgr, int w, int h, float *out) {
   if (nh > S) { nw = std::max(1, (int)std::lrint((double)nw * S / nh)); nh = S; }
   if (nw > S) { nh = std::max(1, (int)std::lrint((double)nh * S / nw)); nw = S; }
   const cv::Mat &resized = pil_resize(cropped, nw, nh, scratch);  // CV_8UC3, PIL-bicubic
+  // One convertTo, not a MatExpr: `bgrf = (bgrf - MEAN) / STD` made OpenCV
+  // warn "processing of multi-channel arrays might be changed in the future"
+  // (matrix_expressions.cpp) on stderr once per process — unsilenceable noise
+  // from a library. MEAN/STD are uniform scalars, so the whole chain is one
+  // affine map: raw/255 then (x-MEAN)/STD == x*(1/STD) + (-MEAN/STD).
+  // Verified bit-identical on the formula corpus, and it drops a full
+  // temporary pass over the image.
   resized.convertTo(bgrf, CV_32F, 1.0 / 255.0);
-  bgrf = (bgrf - MEAN) / STD;
+  bgrf.convertTo(bgrf, CV_32F, 1.0 / STD, -MEAN / STD);
   cv::cvtColor(bgrf, grayf, cv::COLOR_BGR2GRAY);
   int dh = S - nh, dw = S - nw, top = dh / 2, bot = dh - top, left = dw / 2, right = dw - left;
   cv::copyMakeBorder(grayf, padded, top, bot, left, right, cv::BORDER_CONSTANT, cv::Scalar(PAD_VAL));

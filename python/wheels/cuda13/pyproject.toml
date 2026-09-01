@@ -142,6 +142,7 @@ cmake.source-dir = ".."
 # scikit-build-core appends AFTER this list.
 cmake.args = [
     "-DBUILD_PYTHON=ON",
+    "-DBUILD_SERVER=OFF",
     "-DUSE_CPU_ONLY=OFF",
     "-DTURBO_BACKENDS=cpu;nvidia",
 ]

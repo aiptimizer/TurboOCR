@@ -1,13 +1,16 @@
+#include "turbo_ocr/base/log/logger.h"
 #include "turbo_ocr/analysis/layout/ort_paddle_layout.h"
 
 #include "turbo_ocr/analysis/layout/picodet_decode.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,7 +41,14 @@ namespace turbo_ocr::layout {
 struct OrtPaddleLayout::Impl {
   enum class InputRole { kImage, kImShape, kScaleFactor };
 
-  Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "CpuLayout"};
+  // ERROR, not WARNING: at WARNING the CoreML EP narrates every session with
+  // "GetCapability, number of partitions supported by CoreML: ..." and
+  // "VerifyEachNodeIsAssignedToAnEp", straight to the host application's
+  // stderr. Both are informational — a partially-CoreML graph is the NORMAL
+  // outcome — and neither is actionable. Real load failures are already
+  // reported by this file explicitly. (slanext/ppformulanet already use
+  // ERROR here for the same reason.)
+  Ort::Env env{ORT_LOGGING_LEVEL_ERROR, "CpuLayout"};
   std::unique_ptr<Ort::Session> session;
   Ort::AllocatorWithDefaultOptions allocator;
   Ort::MemoryInfo memory_info{
@@ -135,6 +145,34 @@ struct OrtPaddleLayout::Impl {
 OrtPaddleLayout::OrtPaddleLayout() = default;
 OrtPaddleLayout::~OrtPaddleLayout() noexcept = default;
 
+
+#ifdef __APPLE__
+namespace {
+// Pool-homogeneity latch. Replicas each build their own layout session, so a
+// contention blip during replica 3 of 4 would otherwise leave a pool that
+// answers the same page differently depending on which replica served it.
+// Once ANY layout session has had to drop CoreML, every later one in this
+// process skips it, making the pool uniform by construction.
+//
+// Process-scoped and one-way on purpose: an engine is built once and served
+// many times, and silently re-acquiring CoreML mid-pool is the very
+// inhomogeneity this exists to prevent. A long-lived process that wants the
+// accelerator back after a contention storm must construct a new process —
+// noted in docs/reference/python.md.
+std::atomic<bool> g_coreml_layout_wedged{false};
+}  // namespace
+
+bool coreml_layout_wedged() {
+  return g_coreml_layout_wedged.load(std::memory_order_relaxed);
+}
+void set_coreml_layout_wedged() {
+  g_coreml_layout_wedged.store(true, std::memory_order_relaxed);
+}
+#else
+bool coreml_layout_wedged() { return false; }
+void set_coreml_layout_wedged() {}
+#endif
+
 bool OrtPaddleLayout::load_model(const std::string &onnx_path) {
   impl_ = std::make_unique<Impl>();
 
@@ -146,11 +184,20 @@ bool OrtPaddleLayout::load_model(const std::string &onnx_path) {
   opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
 #ifdef __APPLE__
+  // Set when CoreML is actually attached below, holding an EXACT copy of the
+  // options taken BEFORE the append. SessionOptions cannot un-append an EP, so
+  // a fallback build needs its own object; Clone() makes it exact by
+  // construction rather than by a second builder that has to be kept in sync
+  // with the first (threads, graph-opt level, every config entry).
+  std::optional<Ort::SessionOptions> without_coreml;
+
   // Opt-in only (see set_use_coreml). DISABLE_COREML=1 forces it back off, so
   // a provider regression can be ruled out in the field without a rebuild.
+  // coreml_layout_wedged() is the pool-homogeneity latch: see below.
   if (use_coreml_) {
-    if (!engine::coreml_disabled_by_env()) {
+    if (!engine::coreml_disabled_by_env() && !coreml_layout_wedged()) {
       const uint32_t coreml_flags = engine::coreml_flags();
+      without_coreml = opts.Clone();
       // The append RETURNS a status and it is not decorative: discarding it
       // printed "CoreML enabled" for a session that had no CoreML on it, and
       // leaked the OrtStatus. Handled exactly as
@@ -161,32 +208,84 @@ bool OrtPaddleLayout::load_model(const std::string &onnx_path) {
       if (OrtStatus *st = OrtSessionOptionsAppendExecutionProvider_CoreML(
               opts, coreml_flags)) {
         const Ort::Status owned{st}; // takes ownership; releases on scope exit
-        std::cerr << "[cpu_layout] CoreML unavailable: "
-                  << owned.GetErrorMessage()
-                  << " — continuing on the default CPU provider\n";
+        without_coreml.reset();  // nothing attached: `opts` is already CPU-only
+        TOCR_LOG_WARN("layout: CoreML unavailable — continuing on the "
+                      "default CPU provider",
+                      "error", owned.GetErrorMessage());
       } else {
-        std::cout << "[cpu_layout] CoreML enabled (flags=0x" << std::hex
-                  << coreml_flags << std::dec << ")\n";
+        TOCR_LOG_INFO("layout: CoreML enabled", "flags", (long)coreml_flags);
       }
     }
   }
 #endif
 
+  const auto ort_model = turbo_ocr::onnx::ort_path(onnx_path);
   try {
     impl_->session = std::make_unique<Ort::Session>(
-        impl_->env, turbo_ocr::onnx::ort_path(onnx_path).c_str(), opts);
-  } catch (const Ort::Exception &e) {
-    std::cerr << "[cpu_layout] Failed to load " << onnx_path << ": "
-              << e.what() << '\n';
+        impl_->env, ort_model.c_str(), opts);
+  } catch (const std::bad_alloc &) {
+    // NEVER retried. An allocation failure is not transient contention, and
+    // the CPU-provider build below needs MORE host memory than the accelerated
+    // one — retrying would turn an honest load failure into a success that
+    // dies later, somewhere less debuggable.
+    TOCR_LOG_ERROR("layout: out of memory loading the model", "model", onnx_path);
+    impl_.reset();
+    return false;
+  } catch (const std::exception &e) {
+    // std::exception, not Ort::Exception: this site caught the narrower type
+    // while every sibling catches more, so a non-Ort throw escaped load_model()
+    // entirely instead of becoming a clean "layout unavailable".
+    const std::string first_error = e.what();
+#ifdef __APPLE__
+    // The accelerator is OPTIONAL for this stage — the append-failure branch
+    // above already says so and keeps going on the CPU provider. Until now the
+    // SESSION-BUILD failure path did not honour the same contract: it gave up,
+    // so a transient CoreML compile failure (contention on the GPU/ANE)
+    // permanently disabled layout on a live engine even though the identical
+    // session builds fine without the EP.
+    //
+    // Rebuild once from the pre-append clone. Report the FIRST error whatever
+    // happens — the fallback's error, if any, is a symptom of this one.
+    if (without_coreml) {
+      // Latch BEFORE the retry so every later stage in this process skips
+      // CoreML too. Replicas each load their own layout session, and a pool
+      // where some entries run CoreML and others the CPU provider would answer
+      // the same page differently depending on which replica served it —
+      // src/service/server/unified/backend_stages.cpp documents the opposite
+      // invariant ("All entries load identically, so the last wins").
+      set_coreml_layout_wedged();
+      try {
+        impl_->session = std::make_unique<Ort::Session>(
+            impl_->env, ort_model.c_str(), *without_coreml);
+        coreml_dropped_ = true;
+        TOCR_LOG_WARN(
+            "layout: CoreML session build failed — rebuilt on the CPU "
+            "provider, and every later layout load in this process will skip "
+            "CoreML so the replica pool stays homogeneous. Layout is SLOWER "
+            "but available; the alternative was no layout at all",
+            "model", onnx_path, "error", first_error);
+        impl_->resolve_io();
+        if (!impl_->inputs_resolved)
+          TOCR_LOG_WARN("layout: unexpected input names; run() will report a "
+                        "mismatch", "model", onnx_path);
+        TOCR_LOG_INFO("layout: loaded (CPU provider)", "model", onnx_path);
+        return true;
+      } catch (const std::exception &) {
+        // Fall through and report the ORIGINAL failure, not this one.
+      }
+    }
+#endif
+    TOCR_LOG_ERROR("layout: failed to load", "model", onnx_path,
+                   "error", first_error);
     impl_.reset();
     return false;
   }
 
   impl_->resolve_io();
   if (!impl_->inputs_resolved)
-    std::cerr << "[cpu_layout] " << onnx_path
-              << " has unexpected input names; run() will report a mismatch\n";
-  std::cout << "[cpu_layout] Loaded " << onnx_path << '\n';
+    TOCR_LOG_WARN("layout: unexpected input names; run() will report a "
+                  "mismatch", "model", onnx_path);
+  TOCR_LOG_INFO("layout: loaded", "model", onnx_path);
   return true;
 }
 

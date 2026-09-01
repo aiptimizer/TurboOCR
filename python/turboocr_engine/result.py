@@ -63,6 +63,17 @@ def _md_escape(s: str) -> str:
     return "\n".join(lines)
 
 
+def _table_element(html: str) -> str:
+    """The ``<table>...</table>`` element out of a table region's HTML.
+
+    Falls back to the input unchanged when no <table> is present, so a producer
+    that already returns a bare fragment is passed through untouched."""
+    import re as _re
+
+    m = _re.search(r"<table\b.*?</table\s*>", html, _re.S | _re.I)
+    return m.group(0) if m else html
+
+
 def _html_table_to_markdown(html: str) -> str:
     """Convert a simple ``<table>`` to a Markdown table; keep raw HTML (valid in
     Markdown) for ragged tables with colspan/rowspan."""
@@ -132,6 +143,16 @@ _PANDAS_HINT = (
     "to_pandas() needs pandas — `pip install \"turboocr[cpu,pandas]\"`."
 )
 _NO_TABLE_MSG = "no table could be parsed from this region's HTML"
+#: pandas.read_html needs an HTML parser, which pandas does NOT depend on.
+#: The `[pandas]` extra ships lxml for exactly this reason; installing bare
+#: pandas leaves TableRegion.to_pandas() one import short.
+_LXML_HINT = (
+    "TableRegion.to_pandas() needs an HTML parser for pandas.read_html, and "
+    "lxml is not installed (pandas does not require it on its own). Install "
+    "`pip install \"turboocr[cpu,pandas]\"`, which ships it, or "
+    "`pip install lxml`. The table HTML is available without any extra as "
+    "TableRegion.html."
+)
 
 
 def _require_pandas():
@@ -359,7 +380,11 @@ class TableRegion:
             try:
                 import lxml  # noqa: F401
             except ImportError:
-                raise  # genuinely missing parser dependency ([pandas] extra)
+                # Name the missing piece and the fix. Re-raising the original
+                # gave a bare "ModuleNotFoundError: No module named 'lxml'"
+                # from inside pandas — a dependency the caller never asked
+                # for, with nothing saying which extra supplies it.
+                raise ImportError(_LXML_HINT) from exc
             # lxml IS installed: pandas only reaches its html5lib-fallback
             # ImportError when lxml parsed the HTML and found no table — the
             # no-table case wearing a dependency error's clothes.
@@ -442,6 +467,13 @@ class PageResult:
     reading_order: List[int] = field(default_factory=list)
     #: Additive degradation warnings (recognition produced boxes but no text, etc.).
     warnings: List[str] = field(default_factory=list)
+    #: Which pipeline stages actually RAN for this page — not which produced
+    #: output. A layout pass that found zero regions leaves ``layout == []`` but
+    #: still reports ``"layout"``, so "never ran" is never confused with "ran and
+    #: found nothing" (a blank scan legitimately yields zero of everything, and
+    #: ``to_dict`` omits empty lists, so emptiness survives serialization as an
+    #: ambiguity). Recorded, never inferred.
+    stages: Tuple[str, ...] = field(default_factory=tuple, compare=False)
     #: The BGR source image this page was read from (kept for draw()/crop()).
     #: read() stores it by default; read_pdf/read_batch drop it unless
     #: keep_image=True. Not serialized.
@@ -498,6 +530,10 @@ class PageResult:
             dpi=self.dpi, orientation=self.orientation, layout=list(self.layout),
             tables=list(self.tables), formulas=list(self.formulas),
             warnings=list(self.warnings), image=self.image,
+            # reading_order is dropped above (its indices point into the ORIGINAL
+            # line list), so the stage record has to agree — otherwise the page
+            # would claim a stage whose output was just discarded.
+            stages=tuple(s for s in self.stages if s != "reading_order"),
         )
 
     # -- visualization -----------------------------------------------------
@@ -657,6 +693,8 @@ class PageResult:
         }
         if self.page is not None:
             d["page"] = self.page
+        if self.stages:
+            d["stages"] = list(self.stages)
         if self.dpi is not None:
             # Without this, a page serialized and restored lost its render
             # DPI, and a searchable PDF built from the restored page came out
@@ -710,6 +748,7 @@ class PageResult:
             formulas=[FormulaRegion.from_dict(x) for x in d.get("formulas", [])],
             reading_order=list(d.get("reading_order", [])),
             warnings=warnings_,
+            stages=tuple(d.get("stages", ())),
         )
 
     @classmethod
@@ -760,6 +799,23 @@ class PageResult:
         for ln in unassigned:
             if ln.text.strip():
                 blocks.append(("p", ln.text))
+
+        # Tables/formulas whose layout_id points at no region we emitted are
+        # appended rather than dropped. A fresh read can no longer produce
+        # this (tables/formulas imply layout in the RESULT, and layout=False
+        # with tables=True is refused), but a PageResult does not only come
+        # from a fresh read: from_dict() of output serialized before that
+        # implication existed, or a hand-built page, can still carry a table
+        # whose region is absent — and silently losing content the engine
+        # already paid to recognize is the wrong failure mode for an export.
+        emitted_t = {r.id for r in self.layout if r.label == "table"}
+        emitted_f = {r.id for r in self.layout if r.label in _FORMULA_LABELS}
+        for t in self.tables:
+            if t.layout_id not in emitted_t:
+                blocks.append(("table", t.html))
+        for f in self.formulas:
+            if f.layout_id not in emitted_f:
+                blocks.append(("formula", f.latex))
         return blocks
 
     def to_markdown(self, *, structured: Optional[bool] = None) -> str:
@@ -770,12 +826,17 @@ class PageResult:
         Markdown tables, formulas become ``$$…$$``, in reading order. Without
         layout it falls back to reading-order paragraphs. ``structured=False``
         forces the flat form; ``structured=True`` forces the structured form."""
-        want = self.layout if structured is None else structured
-        if structured and not self.layout:
+        # "Is there structure to lay out?" is not the same question as "are
+        # there layout REGIONS?": OCR(tables=True).read(img, layout=False)
+        # recognizes a table and leaves self.layout empty, and keying off
+        # layout alone silently dropped it from this export.
+        has_structure = bool(self.layout or self.tables or self.formulas)
+        want = has_structure if structured is None else structured
+        if structured and not has_structure:
             import warnings as _w
 
-            _w.warn("structured=True but no layout regions — run OCR(layout=True).",
-                    stacklevel=2)
+            _w.warn("structured=True but no layout regions, tables or formulas "
+                    "— run OCR(layout=True).", stacklevel=2)
             want = False
         if not want:
             return "\n\n".join(
@@ -805,13 +866,19 @@ class PageResult:
 
         blocks = (
             self._structured_blocks()
-            if self.layout
+            if (self.layout or self.tables or self.formulas)
             else [("p", ln.text) for ln in self.lines if ln.text.strip()]
         )
         out: List[str] = []
         for kind, payload in blocks:
             if kind == "table":
-                out.append(payload)  # already HTML
+                # Splice the <table> ELEMENT, not the document around it. The
+                # table stage returns a complete "<html><body><table>...</table>
+                # </body></html>", so appending it verbatim nested one full HTML
+                # document per table inside the body — a 54-table run produced 55
+                # <html> and 55 <body> tags. Browsers recover; strict/XHTML
+                # parsers and pandoc do not.
+                out.append(_table_element(payload))
             elif kind == "formula":
                 out.append(f"<p>\\[{_h.escape(payload)}\\]</p>")
             elif kind.startswith("h"):

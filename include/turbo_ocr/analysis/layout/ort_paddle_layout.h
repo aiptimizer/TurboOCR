@@ -45,6 +45,14 @@ public:
   // between a provider regression and a silently empty layout.
   void set_use_coreml(bool on) noexcept { use_coreml_ = on; }
 
+  /// True when this stage ASKED for CoreML and had to build on the CPU
+  /// provider instead, because the accelerated session failed to construct.
+  /// Layout still works and its output is equivalent (the CPU provider is what
+  /// every non-Apple backend runs by design) — it is simply slower. Exposed so
+  /// the degradation is a readable FACT rather than only a log line: a caller
+  /// that cares about layout latency can see that it was not accelerated.
+  [[nodiscard]] bool coreml_dropped() const noexcept { return coreml_dropped_; }
+
   [[nodiscard]] bool load_model(const std::string &onnx_path);
 
   /// Run layout detection on a CPU image. Returns detected layout boxes.
@@ -58,6 +66,13 @@ private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
   bool use_coreml_ = false; // opt-in; see set_use_coreml
+  bool coreml_dropped_ = false; // see coreml_dropped()
 };
+
+/// Pool-homogeneity latch (see ort_paddle_layout.cpp). True once ANY layout
+/// session in this process has had to drop CoreML; every later load then skips
+/// it so a replica pool never mixes providers.
+[[nodiscard]] bool coreml_layout_wedged();
+void set_coreml_layout_wedged();
 
 } // namespace turbo_ocr::layout

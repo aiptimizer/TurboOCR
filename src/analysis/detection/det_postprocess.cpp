@@ -1,3 +1,4 @@
+#include "turbo_ocr/base/log/logger.h"
 #include "turbo_ocr/analysis/detection/det_postprocess.h"
 #include "clipper/clipper.hpp"
 
@@ -216,10 +217,12 @@ std::vector<Box> extract_boxes_from_bitmap(
     // almost certainly have rejected anyway. Logged once per process.
     static std::atomic<bool> logged{false};
     if (!logged.exchange(true)) {
-      std::cerr << "[Det] dense page: " << cand.size()
-                << " candidate regions after filtering; scoring the "
-                << kMaxCandidates
-                << " largest (further dense pages not logged)\n";
+      // Info: the code comment above already calls this "a note, not a
+      // warning" — which is exactly why it must not go to stderr.
+      TOCR_LOG_INFO("det: dense page, scoring the largest candidates only "
+                    "(further dense pages not logged)",
+                    "candidates", (long)cand.size(),
+                    "scored", (long)kMaxCandidates);
     }
     cand.resize(static_cast<std::size_t>(kMaxCandidates));
     std::sort(cand.begin(), cand.end(),

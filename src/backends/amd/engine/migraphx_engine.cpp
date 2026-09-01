@@ -4,8 +4,10 @@
 
 #include "turbo_ocr/base/env_utils.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -106,6 +108,13 @@ struct MIGraphXEngine::Impl {
   struct Variant {
     migraphx::program prog;
     migraphx::program_parameter_shapes param_shapes;
+    // offload_copy=false makes the compiled program expose its OUTPUT buffers
+    // as parameters too (main:#output_N), and eval/run_async throws
+    // "Parameter not found" unless EVERY listed parameter is bound — graph
+    // inputs alone are not enough. Each variant therefore owns device buffers
+    // for its output parameters, allocated once here and rebound every run().
+    std::vector<std::pair<std::string, migraphx::shape>> out_params;
+    std::vector<std::shared_ptr<void>> out_bufs; // hipMalloc, hipFree deleter
   };
   std::unordered_map<std::string, Variant> variants;
   const Variant *last_used = nullptr; // fast path: same shape as last call
@@ -174,12 +183,67 @@ struct MIGraphXEngine::Impl {
            std::to_string(hash) + ".mxr";
   }
 
+  // A compiled artifact is trusted only if its input parameter shapes MATCH
+  // the dims requested for this key. .mxr files carry no record of the engine
+  // code that built them, and an artifact compiled before input pinning
+  // existed is a declared-dims program filed under a batched key (MI300X
+  // first contact: batch-64 cls keys loading batch-1 programs, so every
+  // downstream output copy overran an 8-byte buffer). Checked on BOTH cache
+  // load (stale artifact => delete + recompile) and fresh compile (code bug
+  // => never install, never save).
+  bool shapes_match_dims(const migraphx::program_parameter_shapes &ps,
+                         const std::vector<std::vector<std::int64_t>> &dims,
+                         const std::vector<std::string> &names) {
+    for (std::size_t i = 0; i < dims.size() && i < names.size(); ++i) {
+      auto lens = ps[names[i].c_str()].lengths();
+      if (lens.size() != dims[i].size())
+        return false;
+      for (std::size_t j = 0; j < lens.size(); ++j)
+        if (static_cast<std::int64_t>(lens[j]) != dims[i][j])
+          return false;
+    }
+    return true;
+  }
+
+  // Allocate the engine-owned device buffers for a variant's output
+  // parameters. With offload_copy=false the compiled program lists its output
+  // buffers among get_parameter_shapes() (as main:#output_N) and refuses to
+  // run unless every one of them is bound (proven on MI300X first contact:
+  // every run_async failed with "Parameter not found: main:#output_0").
+  // Inputs stay caller-owned; anything the compiled program lists that is NOT
+  // a graph input is an output buffer we must own. Sized by the compiled
+  // shape, so one allocation per variant covers every later run().
+  bool alloc_output_params(Variant &v) {
+    for (auto &&name : v.param_shapes.names()) {
+      if (std::find(in_names.begin(), in_names.end(), std::string(name)) !=
+          in_names.end())
+        continue;
+      migraphx::shape s = v.param_shapes[name];
+      void *buf = nullptr;
+      if (hipMalloc(&buf, s.bytes()) != hipSuccess || buf == nullptr) {
+        std::fprintf(stderr,
+                     "[MIGraphXEngine] hipMalloc(%zu) for output param "
+                     "'%s' failed\n",
+                     s.bytes(), static_cast<const char *>(name));
+        return false;
+      }
+      v.out_bufs.emplace_back(buf, [](void *q) { (void)hipFree(q); });
+      v.out_params.emplace_back(name, s);
+    }
+    return true;
+  }
+
   // Parse + compile ONE variant. `dims` empty => use the model's declared input
   // shapes verbatim (what load() does). Tries the persistent .mxr cache first;
   // on a compile, saves the result back (atomic tmp+rename so a crashed writer
   // never leaves a torn file for the next reader).
+  // `names` are the model input names aligned 1:1 with `dims`. Callers always
+  // have them (run() from the DeviceTensors, warmup() from the ShapeVariant);
+  // in_names is NOT a substitute — get_parameter_shapes().names() order is
+  // unspecified, so positional in_names pairing mis-pins multi-input models.
   Variant *compile_variant(const std::string &key,
-                           const std::vector<std::vector<std::int64_t>> &dims) {
+                           const std::vector<std::vector<std::int64_t>> &dims,
+                           const std::vector<std::string> &names) {
     const std::string mxr = cache_path_for(key);
     if (!mxr.empty()) {
       std::error_code ec;
@@ -189,6 +253,11 @@ struct MIGraphXEngine::Impl {
           Variant v;
           v.param_shapes = prog.get_parameter_shapes();
           v.prog = std::move(prog);
+          if (!shapes_match_dims(v.param_shapes, dims, names))
+            throw std::runtime_error(
+                "cached program input shapes do not match the requested dims");
+          if (!alloc_output_params(v))
+            return nullptr;
           auto [it, _] = variants.insert_or_assign(key, std::move(v));
           return &it->second;
         } catch (const std::exception &e) {
@@ -205,9 +274,9 @@ struct MIGraphXEngine::Impl {
       if (!dims.empty()) {
         // Pin every input parameter to a concrete shape BEFORE parsing, so the
         // parser materializes a static graph for exactly this (batch, width).
-        for (std::size_t i = 0; i < dims.size() && i < in_names.size(); ++i) {
+        for (std::size_t i = 0; i < dims.size() && i < names.size(); ++i) {
           std::vector<std::size_t> d(dims[i].begin(), dims[i].end());
-          onnx_opts.set_input_parameter_shape(in_names[i], d);
+          onnx_opts.set_input_parameter_shape(names[i], d);
         }
       }
       migraphx::program prog =
@@ -224,6 +293,15 @@ struct MIGraphXEngine::Impl {
       // MIGraphX would silently H2D/D2H every call.
       copts.set_offload_copy(false);
       prog.compile(t, copts);
+
+      if (!shapes_match_dims(prog.get_parameter_shapes(), dims, names)) {
+        std::fprintf(stderr,
+                     "[MIGraphXEngine] compile(%s, shapes=%s) produced input "
+                     "shapes that do not match the requested dims — refusing "
+                     "to install or cache it\n",
+                     model_path.c_str(), key.c_str());
+        return nullptr;
+      }
 
       if (!mxr.empty()) {
         // Atomic publish: save to a pid-suffixed temp in the SAME directory,
@@ -247,6 +325,8 @@ struct MIGraphXEngine::Impl {
       Variant v;
       v.param_shapes = prog.get_parameter_shapes();
       v.prog = std::move(prog);
+      if (!alloc_output_params(v))
+        return nullptr;
       auto [it, _] = variants.insert_or_assign(key, std::move(v));
       return &it->second;
     } catch (const std::exception &e) {
@@ -275,23 +355,65 @@ bool MIGraphXEngine::load(const std::string &model_path) {
   p_->last_used = nullptr;
   p_->last_key.clear();
 
-  // Compile the model's DECLARED shape first; this is also how we discover the
-  // I/O names that warmup() and run() bind against.
-  Impl::Variant *v = p_->compile_variant(/*key=*/"", /*dims=*/{});
-  if (!v) {
+  // PARSE-ONLY I/O-name discovery — no compile, and no reliance on the
+  // model's DECLARED dims. Both halves are load-bearing, learned on the
+  // MI300X first-contact run:
+  //
+  //  * MIGraphX materializes static shapes AT PARSE, and rec_tiny's declared
+  //    dynamic width is a placeholder too small for its final pooling — so
+  //    parsing (let alone compiling) the declared shape throws
+  //    "POOLING: not enough padding" and load() failed for every rec/cls
+  //    model before a single real shape was ever requested.
+  //    set_default_dim_value(64) makes the probe parse geometrically valid
+  //    for every model in the fleet; the probe program is never run and
+  //    never compiled, so the value only has to parse, not perform.
+  //  * The uncompiled program's parameters are exactly the GRAPH INPUTS.
+  //    A compiled program (offload_copy=false) also exposes its output
+  //    buffers as parameters, which could poison the positional
+  //    dims[i] -> in_names[i] mapping compile_variant builds.
+  //  * Dropping the declared-shape compile also drops a 100+-second
+  //    warmup-of-nothing for det: real shapes are compiled by warmup()
+  //    (rec/cls ladder) or the per-canvas hot path (det), exactly as before.
+  try {
+    // set_default_dim_value fills EVERY dynamic dim with one value, and the
+    // fleet has two incompatible classes of dynamic dims: spatial dims must be
+    // large enough for the deepest pooling (rec_tiny needs >=64 or parse
+    // throws "POOLING: not enough padding"), while layout.onnx (static
+    // 800x800 spatial, batched-NMS tail) only parses with a SMALL batch — 64
+    // throws a zero-element reshape. No single value satisfies both, so try
+    // the spatial-safe value first and fall back to the batch-safe one; the
+    // probe only needs I/O names, so any successful parse serves.
+    migraphx::program probe = [&] {
+      const unsigned int dim_ladder[] = {64, 1};
+      std::string first_err;
+      for (unsigned int dv : dim_ladder) {
+        try {
+          migraphx::onnx_options probe_opts;
+          probe_opts.set_default_dim_value(dv);
+          return migraphx::parse_onnx(model_path.c_str(), probe_opts);
+        } catch (const std::exception &e) {
+          if (first_err.empty())
+            first_err = e.what();
+        }
+      }
+      throw std::runtime_error(first_err);
+    }();
+
+    p_->in_names.clear();
+    for (auto &&name : probe.get_parameter_shapes().names())
+      p_->in_names.emplace_back(name);
+
+    // Outputs are exposed positionally by MIGraphX; synthesize stable names.
+    p_->out_names.clear();
+    auto out_shapes = probe.get_output_shapes();
+    for (std::size_t i = 0; i < out_shapes.size(); ++i)
+      p_->out_names.emplace_back("output_" + std::to_string(i));
+  } catch (const std::exception &e) {
+    std::fprintf(stderr, "[MIGraphXEngine] parse(%s) failed: %s\n",
+                 model_path.c_str(), e.what());
     p_->loaded = false;
     return false;
   }
-
-  p_->in_names.clear();
-  for (auto &&name : v->param_shapes.names())
-    p_->in_names.emplace_back(name);
-
-  // Outputs are exposed positionally by MIGraphX; synthesize stable names.
-  p_->out_names.clear();
-  auto out_shapes = v->prog.get_output_shapes();
-  for (std::size_t i = 0; i < out_shapes.size(); ++i)
-    p_->out_names.emplace_back("output_" + std::to_string(i));
 
   p_->loaded = true;
   return true;
@@ -308,7 +430,9 @@ MIGraphXEngine::warmup(const std::vector<ShapeVariant> &variants) {
       ++ok;
       continue;
     }
-    if (p_->compile_variant(key, v.input_dims))
+    const std::vector<std::string> &names =
+        v.input_names.empty() ? p_->in_names : v.input_names;
+    if (p_->compile_variant(key, v.input_dims, names))
       ++ok;
   }
   return ok;
@@ -347,9 +471,13 @@ bool MIGraphXEngine::run(const std::vector<DeviceTensor> &inputs,
 
   // --- Select the compiled program for this shape (hot path: a map hit) ------
   std::vector<std::vector<std::int64_t>> dims;
+  std::vector<std::string> in_tensor_names;
   dims.reserve(inputs.size());
-  for (const auto &t : inputs)
+  in_tensor_names.reserve(inputs.size());
+  for (const auto &t : inputs) {
     dims.push_back(t.shape);
+    in_tensor_names.push_back(t.name);
+  }
   const std::string key = shape_key(dims);
 
   const Impl::Variant *var = nullptr;
@@ -369,7 +497,7 @@ bool MIGraphXEngine::run(const std::vector<DeviceTensor> &inputs,
                    "this shape is missing from the warmup ladder (compile #%zu). "
                    "Add it to the stage's warmup() call.\n",
                    key.c_str(), p_->model_path.c_str(), p_->hot_compiles);
-      var = p_->compile_variant(key, dims);
+      var = p_->compile_variant(key, dims, in_tensor_names);
       if (!var)
         return false;
     }
@@ -399,6 +527,13 @@ bool MIGraphXEngine::run(const std::vector<DeviceTensor> &inputs,
       }
       pp.add(t.name.c_str(), migraphx::argument(s, t.data));
     }
+
+    // Bind the engine-owned output buffers: the compiled program requires its
+    // main:#output_N parameters in the map (see alloc_output_params).
+    for (std::size_t i = 0; i < var->out_params.size(); ++i)
+      pp.add(var->out_params[i].first.c_str(),
+             migraphx::argument(var->out_params[i].second,
+                                var->out_bufs[i].get()));
 
     // Enqueue on the caller's hipStream so pre/forward/post stay on one lane.
     // run_async does NOT block; the caller syncs the DeviceQueue before reading.

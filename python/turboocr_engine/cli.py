@@ -62,7 +62,9 @@ def _build_ocr(args):
         models_dir=args.models_dir,
         device=args.device,
         use_cls=args.cls,
-        layout=getattr(args, "layout", False),
+        # reading_order rides the layout model, so requesting it loads it
+        layout=(getattr(args, "layout", False)
+                or getattr(args, "reading_order", False)),
         tables=getattr(args, "tables", False),
         formulas=getattr(args, "formulas", False),
         autorotate=getattr(args, "autorotate", False),
@@ -110,6 +112,44 @@ def cmd_models(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_warmup(args: argparse.Namespace) -> int:
+    import time
+
+    import numpy as np
+
+    t0 = time.perf_counter()
+    ocr = _build_ocr(args)  # model download + the backend's load-time warmup
+    t1 = time.perf_counter()
+    # A realistic page, not a thumbnail: detector graphs are compiled per
+    # canvas SIZE, so a tiny image would warm only the smallest canvas and
+    # the first real document would still pay the big one.
+    page = np.full((1400, 1000, 3), 255, np.uint8)
+    for y in range(120, 1300, 44):
+        page[y : y + 18, 80:920] = 16
+    ocr.read(page, **_stage_kwargs(args))
+    t2 = time.perf_counter()
+    summary = f"{ocr.provider_summary} | model={ocr.model_name}"
+    ocr.close()
+    print(
+        f"warmup complete: load {t1 - t0:.1f}s, first read {t2 - t1:.1f}s "
+        f"({summary})"
+    )
+    return 0
+
+
+def _stage_kwargs(args) -> dict:
+    """The per-call stage request, derived from the parsed flags in ONE place.
+    Both subcommands forward these (Load is not Run: the constructor only
+    decides what is loadable) — cmd_pdf once parsed --layout/--tables/
+    --formulas and then never passed them, so they did nothing."""
+    return {
+        "layout": args.layout or None,
+        "tables": args.tables or None,
+        "formulas": args.formulas or None,
+        "reading_order": args.reading_order,
+    }
+
+
 def _resolve_fmt(args) -> str:
     if getattr(args, "format", None):
         return args.format
@@ -140,8 +180,14 @@ def cmd_ocr(args: argparse.Namespace) -> int:
         print("turboocr: no input images", file=sys.stderr)
         return 2
 
-    ocr = _build_ocr(args)
     fmt = _resolve_fmt(args)
+    if args.reading_order and fmt != "json":
+        # Only to_dict() carries the indices; any other format would compute
+        # them and silently drop them — refuse BEFORE the engine builds.
+        print("turboocr: --reading-order is only representable in JSON — "
+              "add --format json", file=sys.stderr)
+        return 2
+    ocr = _build_ocr(args)
     multi = len(paths) > 1
     # json/tsv/hocr ALWAYS emit the document shape ({"pages":[...]} / page
     # column / one hOCR doc), single input included: the shape used to
@@ -155,9 +201,7 @@ def cmd_ocr(args: argparse.Namespace) -> int:
         for i, path in enumerate(paths):
             try:
                 res = ocr.read(path, drop_score=args.drop_score,
-                               layout=args.layout or None,
-                               tables=args.tables or None,
-                               formulas=args.formulas or None)
+                               **_stage_kwargs(args))
             except Exception as exc:
                 if args.on_error == "raise":
                     raise
@@ -221,6 +265,20 @@ def cmd_pdf(args: argparse.Namespace) -> int:
                   "embeds page images) — it cannot run with --mode text",
                   file=sys.stderr)
             return 2
+    if args.reading_order and (args.searchable or _resolve_fmt(args) != "json"):
+        print("turboocr: --reading-order is only representable in JSON — "
+              "add --format json (and drop --searchable)", file=sys.stderr)
+        return 2
+    if args.mode == "text" and (args.layout or args.tables or args.formulas
+                                or args.reading_order):
+        # Same refusal read_pdf raises — but here BEFORE the engine builds
+        # (constructing a model pipeline just to print a usage error wastes
+        # seconds and downloads).
+        print('turboocr: --mode text serves the embedded text layer only (no '
+              'rendering, no models) — it cannot run --layout/--tables/'
+              '--formulas/--reading-order. Use --mode auto or --mode ocr.',
+              file=sys.stderr)
+        return 2
     ocr = _build_ocr(args)
     if args.searchable:
         # Stream page-by-page (constant memory) straight to the searchable PDF.
@@ -242,6 +300,7 @@ def cmd_pdf(args: argparse.Namespace) -> int:
         max_pages=args.max_pages,
         mode=args.mode,
         drop_score=args.drop_score,
+        **_stage_kwargs(args),
         password=args.password,
         progress=True if args.verbose else None,
     )
@@ -289,12 +348,30 @@ def build_parser() -> argparse.ArgumentParser:
     m = sub.add_parser("models", help="list available models")
     m.set_defaults(func=cmd_models)
 
+    w = sub.add_parser(
+        "warmup",
+        help="pay the one-time model download + engine compilation now",
+        description="Construct the requested engine and run one synthetic page "
+        "through it, so model downloads and per-machine engine compilation "
+        "(TensorRT engines, MIGraphX programs, CoreML specialization) happen "
+        "here — at install or image-build time — instead of on the first real "
+        "document. Loads every requested stage and exercises the det/cls/rec "
+        "core path. Idempotent: costs seconds once the caches are warm.",
+    )
+    _add_common(w)
+    w.add_argument("--layout", action="store_true",
+                   help="also load and run the layout stage")
+    w.set_defaults(func=cmd_warmup, reading_order=False)
+
     o = sub.add_parser("ocr", help="OCR one or more images")
     o.add_argument("images", nargs="+", help="image path(s) or glob(s)")
     _add_common(o)
     o.add_argument("-f", "--format", choices=list(OUTPUT_FORMATS), default=None)
     o.add_argument("-o", "--output", default=None, help="write to file instead of stdout")
     o.add_argument("--layout", action="store_true", help="also detect layout regions")
+    o.add_argument("--reading-order", action="store_true", dest="reading_order",
+                   help="compute reading-order indices (JSON output only — the "
+                        "other formats have no field for them)")
     o.add_argument("--overlay", default=None, help="save a boxes-overlay image to this path (single input)")
     o.add_argument("--json", action="store_true", help="shorthand for --format json")
     o.add_argument("--on-error", choices=["raise", "skip"], default="raise",
@@ -320,6 +397,9 @@ def build_parser() -> argparse.ArgumentParser:
     pf.add_argument("--pages", default=None, help="1-based pages, e.g. 1,3,5-8")
     pf.add_argument("--max-pages", type=int, default=None, help="cap page count")
     pf.add_argument("--layout", action="store_true", help="also detect layout regions")
+    pf.add_argument("--reading-order", action="store_true", dest="reading_order",
+                    help="compute reading-order indices (JSON output only — the "
+                         "other formats have no field for them)")
     pf.add_argument("--searchable", action="store_true", help="write a searchable PDF (needs -o out.pdf)")
     pf.add_argument("-f", "--format", choices=list(OUTPUT_FORMATS), default=None)
     pf.add_argument("-o", "--output", default=None, help="write to file instead of stdout")

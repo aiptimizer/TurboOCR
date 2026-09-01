@@ -436,12 +436,22 @@ jobs:
               gpgcheck=1
               gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key
               REPO
-              yum install -y rocm-hip-runtime-devel migraphx-devel rocblas-devel miopen-hip-devel
+              # hipblas/hipblaslt/half: migraphx-config.cmake find_dependency()s
+              # them, and RHEL8 packaging does not pull them transitively —
+              # without hipblaslt-devel the configure dies inside the MIGraphX
+              # cmake config (proven in the local replica of this job, 2026-08-26).
+              yum install -y rocm-hip-runtime-devel migraphx-devel rocblas-devel miopen-hip-devel hipblas-devel hipblaslt-devel half libstdc++-devel
             # The gfx list mirrors BRINGUP.md's supported parts: CDNA
             # (MI210/MI250 = gfx90a, MI300X = gfx942) and RDNA3 (gfx1100).
             # BRINGUP.md derives it from `rocminfo` on the target box; there is
             # no GPU here, so it is spelled out.
-            cmake-args-linux: "-DTURBO_BACKENDS=cpu;amd -DCMAKE_HIP_ARCHITECTURES=gfx90a;gfx942;gfx1100 -DCMAKE_PREFIX_PATH=/opt/rocm"
+            # --gcc-install-dir: amdclang auto-selects the bare EL8 gcc-8 tree,
+            # which has no libstdc++.so dev symlink in a manylinux image — the
+            # only complete GCC there is the gcc-toolset (proven in the local
+            # replica of this job, 2026-08-26: HIP's compiler check dies with
+            # "ld.lld: unable to find -lstdc++" without this). Bump the path
+            # when the manylinux_2_28 image bumps its toolset major.
+            cmake-args-linux: "-DTURBO_BACKENDS=cpu;amd -DCMAKE_HIP_ARCHITECTURES=gfx90a;gfx942;gfx1100 -DCMAKE_PREFIX_PATH=/opt/rocm -DCMAKE_HIP_FLAGS=--gcc-install-dir=/opt/rh/gcc-toolset-14/root/usr/lib/gcc/x86_64-redhat-linux/14"
             # ROCm/HIP runtime sonames are host-provided (driver + toolkit),
             # same rule as CUDA.
             repair-linux: >-

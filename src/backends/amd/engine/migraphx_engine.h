@@ -95,6 +95,12 @@ public:
   // here, or run() will pay a compile on first use.
   struct ShapeVariant {
     std::vector<std::vector<std::int64_t>> input_dims;
+    // Model input names aligned 1:1 with input_dims. REQUIRED for multi-input
+    // models: the engine discovers names via get_parameter_shapes().names(),
+    // whose order is NOT the graph's declared order, so positional pairing of
+    // dims to discovered names mis-pins shapes (layout.onnx: im_shape pinned
+    // to [1,3,800,800]). Empty is allowed for single-input models only.
+    std::vector<std::string> input_names;
   };
 
   // Parse the ONNX at `model_path`, compile it for the current gfx target at the

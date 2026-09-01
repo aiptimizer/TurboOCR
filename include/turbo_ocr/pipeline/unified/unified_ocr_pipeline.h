@@ -272,6 +272,19 @@ private:
   // whole RunFlags (it reads .tables/.formulas) for the same reason the public
   // entry points do: three of its call sites are internal, and they used to pass
   // two adjacent bools that nothing but argument order distinguished.
+  //
+  // INVARIANT — routing is a function of the RAW detection boxes, which the
+  // RESULT does not carry. `boxes` here is the pre-filter detector output;
+  // combine_recognition later drops empty and sub-drop_score items, and no
+  // result type (OcrPipelineResult items, PyResult, the HTTP/gRPC responses)
+  // preserves the originals. Therefore a run CANNOT be faithfully re-entered
+  // from its results: a "resume tables later from a stored result" feature
+  // would re-derive `boxes` from the surviving items and can route
+  // differently — same page, different tables, no error. This is exactly why
+  // the incremental/resumable stage API was evaluated and REJECTED
+  // (docs/reference/python.md, "Load is not Run"; measured benefit 1.01x).
+  // If someone builds replay anyway: persist THESE boxes alongside the
+  // result first, or the feature is wrong by construction.
   void dispatch_router_(OcrPipelineResult &out, const backend::ImageView &view,
                         const std::vector<Box> &boxes, const RunFlags &flags,
                         const backend_routing::RequestRouting &routing,

@@ -10,6 +10,7 @@
 #include <limits>
 #include <vector>
 
+#include "turbo_ocr/analysis/layout/ort_paddle_layout.h"
 #include "turbo_ocr/analysis/layout/picodet_decode.h"
 
 using turbo_ocr::layout::decode_picodet_rows;
@@ -48,12 +49,19 @@ TEST_CASE("picodet decode: non-finite rows fail loud, never silently blank",
   // page. The decoder must make that case visible rather than return a
   // plausible-looking empty layout.
   //
-  // The rule is PER ROW: a non-finite row is dropped and COUNTED (logged at
-  // ERROR with the count), finite rows survive. The whole-page failure that
-  // motivated the guard is the all-NaN case, which therefore still yields an
-  // empty result plus a loud log. Dropping only the bad rows is deliberate —
-  // one corrupt row should not discard an otherwise good page, and it matches
-  // how the detection postprocess treats malformed output.
+  // The rule is PER ROW: a non-finite row is dropped and COUNTED, finite rows
+  // survive. Dropping only the bad rows is deliberate — one corrupt row should
+  // not discard an otherwise good page, and it matches how the detection
+  // postprocess treats malformed output.
+  //
+  // The two cases are logged DIFFERENTLY, which is behaviour this test pins by
+  // proxy (the return value) rather than by capturing the log:
+  //   * ALL rows non-finite -> ERROR + empty result. This is the whole-page
+  //     failure that motivated the guard.
+  //   * SOME rows non-finite -> DEBUG, page kept. The export is a fixed-
+  //     capacity candidate buffer, and an execution provider may write only
+  //     the detections it found and leave the rest uninitialized; reporting
+  //     that at ERROR cried wolf on every page.
   const float nan_v = std::numeric_limits<float>::quiet_NaN();
 
   // All rows garbage (the real CoreML failure) -> empty.
@@ -123,4 +131,36 @@ TEST_CASE("picodet decode: degenerate inputs return empty", "[layout][picodet]")
   CHECK(decode_picodet_rows(rows.data(), 0, 7, nullptr, 0.5f, 1000, 800).empty());
   CHECK(decode_picodet_rows(rows.data(), 1, 5, nullptr, 0.5f, 1000, 800).empty()); // stride < 6
   CHECK(decode_picodet_rows(rows.data(), 1, 7, nullptr, 0.5f, 0, 800).empty());
+}
+
+TEST_CASE("layout CoreML latch: one-way, so a replica pool never mixes providers",
+          "[layout][coreml]") {
+  // Replicas each build their OWN layout session (python pipeline.py builds N
+  // Pipelines under one construct_lock hold). If a transient CoreML failure hit
+  // replica 3 of 4, a per-session fallback would leave a pool that answers the
+  // same page differently depending on which replica served it — while
+  // src/service/server/unified/backend_stages.cpp asserts the opposite
+  // invariant ("All entries load identically, so the last wins").
+  //
+  // The latch makes the pool homogeneous by construction: once ANY layout
+  // session drops CoreML, every later load in the process skips it. It is
+  // deliberately ONE-WAY — silently re-acquiring the accelerator mid-pool is
+  // the very inhomogeneity it exists to prevent.
+  using turbo_ocr::layout::coreml_layout_wedged;
+  using turbo_ocr::layout::set_coreml_layout_wedged;
+
+#ifdef __APPLE__
+  const bool before = coreml_layout_wedged();
+  set_coreml_layout_wedged();
+  CHECK(coreml_layout_wedged());
+  // Idempotent: latching twice is not an error and does not unset.
+  set_coreml_layout_wedged();
+  CHECK(coreml_layout_wedged());
+  (void)before;  // no un-latch API on purpose; the state is process-scoped
+#else
+  // Off Apple there is no CoreML to drop, so the latch is inert and the
+  // accelerated path is never taken.
+  set_coreml_layout_wedged();
+  CHECK_FALSE(coreml_layout_wedged());
+#endif
 }

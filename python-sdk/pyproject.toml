@@ -178,7 +178,7 @@ ignore_missing_imports = true
 # which is where the typed-API guarantee lives. Hand-annotating every test
 # fn with `-> None` and propagating types through the untyped grpc-stub
 # generated classes is mechanical churn that adds no safety.
-# (Matches httpx, pydantic, anthropic-sdk-python conventions.)
+# (Matches httpx and pydantic conventions.)
 [[tool.mypy.overrides]]
 module = ["tests", "tests.*"]
 ignore_errors = true

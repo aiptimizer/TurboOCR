@@ -29,7 +29,14 @@
 // ORT build (a ROCm onnxruntime ships MIGraphX/ROCm; a Windows build ships DML).
 // __has_include keeps the CPU/CoreML build (which has none of them) compiling —
 // the ORT_EP branch then fails cleanly at load() instead of at link time.
-#if __has_include(<migraphx_provider_factory.h>)
+//
+// MIGraphX is the exception: ORT >= 1.27 removed its public factory header
+// (only an INTERNAL one remains, uncompilable outside the ORT tree) and
+// declares the C shim in onnxruntime_c_api.h — but only a ROCm build EXPORTS
+// it, so presence is decided at the LINK level. CMake probes the resolved
+// library for the symbol and passes TURBO_HAVE_MIGRAPHX; the header probe
+// below remains for pre-1.27 ROCm ORTs, whose c_api.h lacks the declaration.
+#if !defined(TURBO_HAVE_MIGRAPHX) && __has_include(<migraphx_provider_factory.h>)
 #include <migraphx_provider_factory.h>
 #define TURBO_HAVE_MIGRAPHX 1
 #endif
@@ -76,9 +83,16 @@ Ort::Env &OrtEngine::process_env() {
   // eagerly constructed plain per-engine Env would win the singleton, and a
   // later DisablePerSessionThreads() session would then abort with "env must be
   // created with CreateEnvWithGlobalThreadPools".)
+  // ORT_LOGGING_LEVEL_ERROR, not WARNING: at WARNING ONNX Runtime narrates
+  // every session onto the host application's stderr — "CoreMLExecutionProvider
+  // ::GetCapability, number of partitions supported by CoreML: ..." and
+  // "VerifyEachNodeIsAssignedToAnEp". Both describe the NORMAL outcome (a
+  // partially-offloaded graph) and neither is actionable, but a library cannot
+  // hand that to its caller unasked. Genuine load failures are reported by this
+  // file explicitly. Matches ort_paddle_layout / slanext / ppformulanet.
   static Ort::Env env = [] {
     if (!turbo_ocr::env::env_enabled("ORT_SHARED_POOL"))
-      return Ort::Env(ORT_LOGGING_LEVEL_WARNING, "OrtEngine");
+      return Ort::Env(ORT_LOGGING_LEVEL_ERROR, "OrtEngine");
 
     // Shared global intra-op threadpool sized to ORT_GLOBAL_THREADS (default
     // hardware_concurrency). Avoids the oversubscription of N sessions × M
@@ -90,7 +104,7 @@ Ort::Env &OrtEngine::process_env() {
     topt.SetGlobalDenormalAsZero();
     std::cout << std::format("[OrtEngine] Shared ORT threadpool: {} threads", n)
               << '\n';
-    return Ort::Env(topt, ORT_LOGGING_LEVEL_WARNING, "OrtEngine");
+    return Ort::Env(topt, ORT_LOGGING_LEVEL_ERROR, "OrtEngine");
   }();
   return env;
 }

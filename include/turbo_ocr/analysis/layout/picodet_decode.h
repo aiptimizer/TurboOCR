@@ -117,14 +117,45 @@ decode_picodet_rows(const float *rows, int rows_dim0, int stride,
     out.push_back(lb);
   }
 
-  if (non_finite > 0) {
+  if (non_finite == n) {
+    // EVERY row bad — the failure this guard was written for (CoreML EP on
+    // ORT 1.24.4 NaN'd every score/box, so an empty layout was indistinguish-
+    // able from a blank page). Still an error, still returns empty.
     TOCR_LOG_ERROR_RL(
         "layout model returned non-finite rows — the execution provider is "
         "producing garbage; do NOT treat this as a blank page",
         "non_finite_rows", non_finite, "rows", n);
-    // ALL rows bad: return empty, exactly as the previous first-row guard did
-    // for the CoreML-EP-on-ORT-1.24.4 case it was written for.
-    if (non_finite == n) return {};
+    return {};
+  }
+  if (non_finite > 0) {
+    // SOME rows bad is a different, benign thing, and reporting it at error
+    // level cried wolf on every page. Root cause, traced through the graph on
+    // the shipped layout export: the mask->box subgraph marks an EMPTY mask
+    // with a literal 1e+08 sentinel — `where(mask, xs, 1e8)` — then zeroes the
+    // box with `box * has_any`. In fp32 that is 0 * 1e8 == 0. The CoreML EP
+    // computes this branch in FLOAT16 when it runs on the Metal GPU, where
+    // 1e8 overflows to +inf (fp16 max is 65504), so it becomes 0 * inf == NaN
+    // and the NaN then propagates through the six sigmoid/log refinement
+    // layers into the final box.
+    //
+    // So these rows are NOT uninitialized memory and NOT an unwritten tail:
+    // they are real, deterministic, bit-identical across runs, sitting
+    // mid-buffer (indices 156-241 of 300 on one measured page), and their
+    // class id / score / read order are all finite — only the four box
+    // columns are NaN. They are exactly the EMPTY-MASK queries, so they carry
+    // ~0.003 scores against a 0.3 threshold, and the CPU provider's rows at
+    // the same indices are degenerate boxes (x1 <= x0) that this loop drops
+    // anyway. No detection is lost: across an 83-page document CoreML and the
+    // CPU provider produced 601 regions each.
+    //
+    // Triggered only by MLComputeUnits=CPUAndGPU, which is what this repo's
+    // default COREML_FLAGS=0x020 selects; ORT's own default (ALL), CPUOnly,
+    // ANE, and ONLY_ALLOW_STATIC_INPUT_SHAPES all compute it cleanly. Dropping
+    // the rows (above) is a complete fix, so this is a debug note.
+    TOCR_LOG_DEBUG_RL(
+        "layout: dropped rows whose box is non-finite (fp16 overflow of the "
+        "empty-mask sentinel on the CoreML GPU path; sub-threshold queries)",
+        "non_finite_rows", non_finite, "rows", n);
   }
   return out;
 }

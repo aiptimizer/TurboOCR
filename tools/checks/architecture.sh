@@ -276,8 +276,12 @@ check_private_paths() {
   # exactly as much of a leak as an absolute path, and an earlier draft of this
   # rule let that one through precisely because it contained "~/".
   local always svc
+  # /private/tmp/ is matched STRUCTURALLY: any macOS per-tool scratch path in
+  # a tracked file is a leak regardless of which tool minted it, and naming a
+  # specific tool's prefix here would itself be an identifier in a tracked
+  # file — the exact class this gate exists to keep out.
   always=$(git grep -nI -iE \
-             'epailand|turbo-private|/private/tmp/claude-[0-9]+|\bid_ed25519|100\.(82|126)\.[0-9]+\.[0-9]+' \
+             'epailand|turbo-private|/private/tmp/|\bid_ed25519|100\.(82|126)\.[0-9]+\.[0-9]+' \
              -- . 2>/dev/null | grep -vE '^tools/checks/architecture\.sh:' || true)
 
   # Pass 2 is home directories, where portable forms ARE the fix and /home/ocr

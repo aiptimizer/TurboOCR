@@ -7,6 +7,8 @@
 
 #include "amd/stages/rocm_stages.h"
 
+#include "cpu/stages/cpu_stages.h"  // the shared host layout this file wraps
+
 #include "amd/support/hip_check.h"
 #include "amd/engine/migraphx_engine.h"
 #include "amd/memory/hip_allocator.h"
@@ -572,139 +574,49 @@ void RocmClassifier::run(const ImageView &img, std::vector<turbo_ocr::Box> &boxe
 }
 
 // ===========================================================================
-// RocmLayout (PP-DocLayoutV3, multi-IO image + im_shape + scale_factor)
+// HostLayoutOnHip — layout via the SHARED host ORT stage (see rocm_stages.h
+// for why MIGraphX cannot run this model: its parser rejects the export).
+// Mirror of the Apple backend's HostLayoutOnDevice, with one difference —
+// hipMalloc'd memory is not host-addressable, so device-resident pages stage
+// D2H through the seam allocator before the host stage reads them.
 // ===========================================================================
-struct RocmLayout::Impl {
+struct HostLayoutOnHip::Impl {
   StageDeps deps;
-  MIGraphXEngine engine;
-  float *d_input = nullptr;      // [3*S*S]
-  float *d_im_shape = nullptr;   // [2]
-  float *d_scale = nullptr;      // [2]
-  int S = 800;
-  explicit Impl(StageDeps d) : deps(d), engine(d.device_id) {}
-  ~Impl() {
-    if (d_input) deps.alloc->free(d_input);
-    if (d_im_shape) deps.alloc->free(d_im_shape);
-    if (d_scale) deps.alloc->free(d_scale);
-  }
+  turbo_ocr::cpu::CpuLayout inner;
+  std::vector<unsigned char> staging; // device-resident pages only
+  explicit Impl(StageDeps d) : deps(d) {}
 };
 
-RocmLayout::RocmLayout(StageDeps deps) : p_(std::make_unique<Impl>(deps)) {}
-RocmLayout::~RocmLayout() = default;
+HostLayoutOnHip::HostLayoutOnHip(StageDeps deps)
+    : p_(std::make_unique<Impl>(deps)) {}
+HostLayoutOnHip::~HostLayoutOnHip() = default;
 
-bool RocmLayout::load(const std::string &model_path) {
-  ready_ = p_->engine.load(model_path);
-  if (ready_) {
-    const int S = p_->S;
-    // Layout runs at ONE canvas, so its ladder is a single multi-IO variant
-    // (image + im_shape + scale_factor). Pre-compile it so the first page does
-    // not pay the graph compile.
-    p_->engine.warmup({MIGraphXEngine::ShapeVariant{
-        {{1, 3, S, S}, {1, 2}, {1, 2}}}});
-    p_->d_input = static_cast<float *>(p_->deps.alloc->allocate((std::size_t)3 * S * S * sizeof(float)));
-    p_->d_im_shape = static_cast<float *>(p_->deps.alloc->allocate(2 * sizeof(float)));
-    p_->d_scale = static_cast<float *>(p_->deps.alloc->allocate(2 * sizeof(float)));
-  }
-  return ready_;
+bool HostLayoutOnHip::load(const std::string &model_path) {
+  return p_->inner.load(model_path);
 }
+
+bool HostLayoutOnHip::is_ready() const noexcept { return p_->inner.is_ready(); }
 
 std::vector<turbo_ocr::layout::LayoutBox>
-RocmLayout::run(const ImageView &img, int orig_h, int orig_w,
-                float score_threshold, DeviceQueue &queue) {
-  if (!ready_ || img.empty())
-    return {};
-  const int S = p_->S;
-  hipStream_t s = hip_stream_of(queue);
+HostLayoutOnHip::run(const ImageView &img, int orig_h, int orig_w,
+                     float score_threshold, DeviceQueue &queue) {
+  if (img.empty()) return {};
+  if (img.is_host())
+    return p_->inner.run(img, orig_h, orig_w, score_threshold, queue);
 
-  // SHARED layout normalization: pixel/255 (mean 0, std 1), BGR planes.
-  // NOTE: this site used to set letterbox = true. No backend honours letterbox
-  // (see the PARAMETER CONTRACT in kernels.h) — CUDA's baked layout
-  // preprocessor STRETCHES, and the im_shape/scale_factor pair below is derived
-  // from that stretch, so a letterboxed AMD input with stretch-derived scale
-  // factors would have mis-mapped every layout box. The shared factory sets
-  // letterbox = false, matching the coordinate math directly below.
-  p_->deps.kernels->resize_normalize(img, p_->d_input, S, S,
-                                     backend::norm::layout_norm(), queue);
-
-  // im_shape = resized (S,S); scale_factor = resized/original (PP-DocLayoutV3
-  // maps detections back to original coords internally).
-  const float im_shape[2] = {static_cast<float>(S), static_cast<float>(S)};
-  const float scale[2] = {static_cast<float>(S) / orig_h,
-                          static_cast<float>(S) / orig_w};
-  HIP_CHECK(hipMemcpyAsync(p_->d_im_shape, im_shape, sizeof(im_shape),
-                           hipMemcpyHostToDevice, s));
-  HIP_CHECK(hipMemcpyAsync(p_->d_scale, scale, sizeof(scale),
-                           hipMemcpyHostToDevice, s));
-
-  // Bind the 3 inputs by their model names (order from input_names()).
-  const auto &names = p_->engine.input_names();
-  auto name_at = [&](std::size_t i, const char *fallback) {
-    return i < names.size() ? names[i] : std::string(fallback);
-  };
-  std::vector<DeviceTensor> ins = {
-      DeviceTensor{name_at(0, "image"), p_->d_input, backend::DeviceKind::Hip,
-                   DType::F32, p_->deps.device_id, {1, 3, S, S}},
-      DeviceTensor{name_at(1, "im_shape"), p_->d_im_shape,
-                   backend::DeviceKind::Hip, DType::F32, p_->deps.device_id, {1, 2}},
-      DeviceTensor{name_at(2, "scale_factor"), p_->d_scale,
-                   backend::DeviceKind::Hip, DType::F32, p_->deps.device_id, {1, 2}},
-  };
-  std::vector<OutputLease> leases;
-  if (!p_->engine.run(ins, {}, leases, queue) || leases.empty())
-    return {};
-
-  // PP-DocLayoutV3 emits [N, 6|7] rows {class_id, score, x0, y0, x1, y1
-  // [, read_order]} in ORIGINAL coords, plus a separate int32 COUNT tensor.
-  //
-  // This block used to decode the rows by hand and got three things wrong:
-  // it rejected any tensor with cols < 6 while silently ignoring column 6
-  // (read_order); it used det.shape[0] as the row count, which is
-  // data-dependent and documented to go stale across repeated requests (it
-  // silently dropped layout from every consecutive response on the TRT path,
-  // and the same trap applies to MIGraphX); and it did no class-id range
-  // check, so a garbage id indexes kLayoutLabels out of bounds downstream.
-  // It now calls the SHARED decoder, which is Intel's correct implementation.
-  const OutputLease &det = leases[0];
-  const int rows_dim0 = det.shape.empty() ? 0 : static_cast<int>(det.shape[0]);
-  const int stride = det.shape.size() >= 2 ? static_cast<int>(det.shape[1]) : 6;
-  if (rows_dim0 <= 0 || stride < 6)
-    return {};
-
-  // Pull the count tensor when the export provides one (2nd rank-1 output).
-  // Its value overrides rows_dim0 — see the shared decoder's contract.
-  std::int32_t count_val = 0;
-  const std::int32_t *count_ptr = nullptr;
-  if (leases.size() >= 2 && leases[1].data) {
-    HIP_CHECK(hipMemcpyAsync(&count_val, leases[1].data, sizeof(std::int32_t),
-                             hipMemcpyDeviceToHost, s));
-    count_ptr = &count_val;
-  }
-
-  // Copy the FULL NMS budget of rows, never `min(rows_dim0, budget)`. The
-  // decoder's contract lets the count tensor OVERRIDE rows_dim0 — that is the
-  // whole point of the count output, because shape[0] is data-dependent and
-  // goes stale to a smaller value on repeated requests. Sizing this host
-  // buffer from rows_dim0 while letting *count drive the loop meant that on
-  // exactly those stale-shape requests (*count > rows_dim0) the shared decoder
-  // walked past the end of `h` — a heap over-read. The rows tensor itself is
-  // allocated at the budget regardless of how many detections the page
-  // produced, so copying the budget is always in-bounds on the device side.
-  const int rows_to_copy = turbo_ocr::layout::kPicodetMaxDet;
-  std::vector<float> h(static_cast<std::size_t>(rows_to_copy) * stride);
-  HIP_CHECK(hipMemcpyAsync(h.data(), det.data, h.size() * sizeof(float),
-                           hipMemcpyDeviceToHost, s));
-  HIP_CHECK(hipStreamSynchronize(s));
-
-  // The SHARED postfilter (NMS + full-page-image drop + containment/merge-mode
-  // reconciliation) must run on EVERY backend: CPU (ort_paddle_layout.cpp:271)
-  // and NVIDIA (paddle_layout.cpp:223) already applied it, and these two arms
-  // did not — so Intel/AMD returned raw overlapping boxes and their layout,
-  // reading order and every downstream block/table decision diverged from the
-  // other two on the same page. Generic policy is shared, never per backend.
-  auto boxes = turbo_ocr::layout::decode_picodet_rows(
-      h.data(), rows_to_copy, stride, count_ptr, score_threshold, orig_h, orig_w);
-  return turbo_ocr::layout::postfilter_layout_boxes(std::move(boxes), orig_h,
-                                                    orig_w);
+  // Device-resident page: order the upload before the read, then stage the
+  // pixels to host memory (hip device memory is never host-coherent).
+  queue.synchronize();
+  ImageView host = img;
+  host.kind = backend::DeviceKind::Host;
+  const std::size_t bytes =
+      (img.step ? img.step : static_cast<std::size_t>(img.cols) * 3) *
+      static_cast<std::size_t>(img.rows);
+  p_->staging.resize(bytes);
+  p_->deps.alloc->copy_d2h(p_->staging.data(), img.data, bytes, queue);
+  host.data = p_->staging.data();
+  return p_->inner.run(host, orig_h, orig_w, score_threshold, queue);
 }
+
 
 } // namespace turbo_ocr::amd

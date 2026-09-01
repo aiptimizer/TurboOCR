@@ -7,7 +7,9 @@ anywhere.
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import sys
 
 import numpy as np
 import pytest
@@ -43,6 +45,16 @@ def _has_native() -> bool:
 needs_native = pytest.mark.skipif(not _has_native(), reason="_turboocr extension not built")
 needs_models = pytest.mark.skipif(MODELS is None, reason="no local models")
 needs_fixture = pytest.mark.skipif(not os.path.exists(FIXTURE), reason="no fixture image")
+# The umbrella SDK (python-sdk/) is a separate >=3.12 package; its PEP 695
+# type aliases make a plain import raise SyntaxError (not ImportError) on
+# older interpreters, so pytest.importorskip cannot gate it — the re-export-
+# contract tests below gate on the interpreter version instead. Found when the
+# native package's own suite failed 5 tests on a Python 3.11 host despite the
+# native package supporting >=3.9.
+needs_umbrella = pytest.mark.skipif(
+    sys.version_info < (3, 12) or importlib.util.find_spec("turboocr") is None,
+    reason="turboocr umbrella SDK not importable (requires Python >= 3.12)",
+)
 
 
 # -- pure-python units (no native / models needed) ------------------------
@@ -64,6 +76,474 @@ def test_configure_backend_apple_auto_disables_coreml(monkeypatch):
     resolved2, _ = native.configure_backend("coreml")
     assert resolved2 == "coreml"
     assert "DISABLE_COREML" not in os.environ
+
+
+def test_drop_score_upper_bound_and_nan(monkeypatch):
+    """The FLOOR was validated but not the ceiling. drop_score=1.5 dropped every
+    line and returned an empty page with no warning — indistinguishable from a
+    blank scan — and NaN slipped past every comparison (NaN < x is False), which
+    silently disabled filtering altogether."""
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
+    import numpy as _np
+
+    # Past validation, read() marshals through _read_array; stub it so this
+    # test exercises the GUARD, not the engine.
+    # The shell sets _read_array as an INSTANCE attribute, which shadows the
+    # class; override it there so this test exercises the GUARD, not the engine.
+    ocr._read_array = lambda img, **kw: P.PageResult(width=8, height=8)
+    img = _np.zeros((8, 8, 3), _np.uint8)
+    for bad in (1.5, 100.0, float("nan")):
+        with pytest.raises(ValueError):
+            P.OCR.read(ocr, img, drop_score=bad)
+        # EVERY entry point that takes drop_score validates it — it used to be
+        # read()-only, so read_batch(drop_score=nan) silently disabled
+        # filtering on the native batch path and read_pdf(drop_score=2.0)
+        # returned every page empty.
+        with pytest.raises(ValueError):
+            P.OCR.read_batch(ocr, [img], drop_score=bad)
+        with pytest.raises(ValueError):
+            list(P.OCR.read_pdf_stream(ocr, "f.pdf", drop_score=bad))
+    # the documented usable range still works
+    P.OCR.read(ocr, img, drop_score=0.5)
+    P.OCR.read(ocr, img, drop_score=1.0)
+
+
+def test_mode_text_refuses_structure_requests(monkeypatch):
+    """mode="text" never renders and never runs a model, so an explicit
+    layout/tables/formulas/reading_order request silently came back as empty
+    lists — indistinguishable from "ran and found nothing". Refusal names the
+    working alternative (mode="auto" runs structure on text-layer pages)."""
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
+    for kw in ({"layout": True}, {"tables": True}, {"formulas": True},
+               {"reading_order": True}):
+        with pytest.raises(ValueError, match='mode="auto"'):
+            list(P.OCR.read_pdf_stream(ocr, "f.pdf", mode="text", **kw))
+    # plain mode="text" stays legal (stub must yield a text-layer item)
+    import sys
+
+    sys.modules["turboocr_engine.pdf"].iter_pdf_pages = (
+        lambda p, dpi, pages, max_pages, mode, password=None,
+        text_with_raster=False, on_error="raise":
+        iter([("text", 1, 4, 4, [], None, [])])
+    )
+    (pr,) = P.OCR.read_pdf_stream(ocr, "f.pdf", mode="text")
+    assert pr.stages == ("text",)
+
+
+def test_rotate_must_be_a_quarter_turn(monkeypatch):
+    """rotate=45 produced a 659x659 canvas of a tilted page that no downstream
+    stage expects; a str spelling raised TypeError out of `%` string formatting
+    instead of the documented ValueError."""
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
+    import numpy as _np
+
+    ocr._read_array = lambda img, **kw: P.PageResult(width=8, height=8)
+    img = _np.zeros((8, 8, 3), _np.uint8)
+    for bad in (45, 91, 1000, "90", 90.0):
+        with pytest.raises(ValueError):
+            P.OCR.read(ocr, img, rotate=bad)
+    for ok in (0, 90, 180, 270, 360, -90):
+        P.OCR.read(ocr, img, rotate=ok)
+
+
+def test_pages_argument_validated_at_call_time(monkeypatch):
+    """pages="1-6" (the CLI's spelling) and pages=3 (a bare int) used to survive
+    validation and raise TypeError from inside a WORKER THREAD, with a traceback
+    unconnected to the caller's mistake."""
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=3)
+    for bad in ("1-6", 3, {1: 2}, [1, "2"], [0], [-1], [True]):
+        with pytest.raises(ValueError):
+            P.OCR.read_pdf_stream(ocr, "f.pdf", pages=bad)
+    P.OCR.read_pdf_stream(ocr, "f.pdf", pages=[1, 2])
+    P.OCR.read_pdf_stream(ocr, "f.pdf", pages=None)
+
+
+def test_to_html_splices_the_table_element_not_a_document():
+    """The table stage returns a COMPLETE "<html><body><table>...". Appending it
+    verbatim nested one full document per table inside the body (a 54-table run
+    emitted 55 <html> and 55 <body> tags), which strict/XHTML parsers and pandoc
+    reject."""
+    from turboocr_engine.result import DocumentResult, LayoutBox, PageResult, TableRegion
+
+    p = PageResult(width=100, height=100)
+    p.layout = [LayoutBox(label="table", confidence=0.9,
+                          box=((0, 0), (9, 0), (9, 9), (0, 9)), id=0)]
+    p.tables = [TableRegion(
+        html="<html><body><table><tr><td>a</td></tr></table></body></html>",
+        score=0.9, box=((0, 0), (9, 0), (9, 9), (0, 9)), layout_id=0)]
+    body = p.to_html()
+    assert "<table" in body and "<td>a</td>" in body
+    assert "<html" not in body and "<body" not in body
+    full = DocumentResult(pages=[p]).to_html(full=True)
+    assert full.count("<html") == 1 and full.count("<body") == 1
+    # A producer that already hands over a bare fragment is untouched.
+    p.tables[0].html = "<table><tr><td>z</td></tr></table>"
+    assert "<td>z</td>" in p.to_html()
+
+
+def test_structure_boxes_are_clamped_to_the_page():
+    """The table stage expands a region by TABLE_CROP_MARGIN before cropping;
+    the CROP was clamped to the image, the REPORTED box was not, so a table
+    touching the page edge came back with negative coordinates and a consumer
+    slicing img[y0:y1, x0:x1] silently got the wrong strip."""
+    from turboocr_engine import pipeline as _P
+
+    box = ((-28, -28), (987, -28), (987, 987), (-28, 987))
+    assert _P._clamp_quad(box, 960, 960) == (
+        (0, 0), (959, 0), (959, 959), (0, 959))
+    # in-bounds boxes are untouched
+    ok = ((1, 2), (3, 2), (3, 4), (1, 4))
+    assert _P._clamp_quad(ok, 960, 960) == ok
+    # a contained failure carries 0x0 dims: clamping there would collapse every
+    # point onto the origin, so it is disabled instead.
+    assert _P._clamp_quad(box, 0, 0) == box
+
+
+def test_load_is_not_run(monkeypatch):
+    """LOAD IS NOT RUN. The constructor decides which models are resident and
+    which requests are LEGAL; the CALL decides which output stages run.
+
+    Python used to inherit the constructor flags as per-call defaults, so
+    OCR(tables=True).read(img) and OCR().read(img) returned different things
+    from an identical call site (418 ms vs 61 ms). That was drift: the shared
+    gate's parse_options_core() step 1 is `if (on) requested.request(id)` —
+    unconditional — and `loaded` is read ONLY by the availability check, so on
+    HTTP and gRPC what is resident never decided what was ASKED FOR.
+    docs/reference/python.md promised the corrected behaviour all along."""
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
+    import numpy as _np
+
+    seen = {}
+
+    def spy(img, **kw):
+        seen.update(kw)
+        return P.PageResult(width=8, height=8)
+
+    ocr._read_array = spy
+    ocr.has_layout = ocr.has_tables = ocr.has_formulas = True  # fully loaded
+    img = _np.zeros((8, 8, 3), _np.uint8)
+
+    P.OCR.read(ocr, img)
+    # read() resolves the request ONCE (Load is not Run): unspecified flags
+    # become "not requested" — never the engine's loaded set (pinned by the
+    # next test at the _StageRequest level).
+    assert seen["req"] == P._NO_STAGES
+
+
+def test_stage_flags_resolve_without_inheritance():
+    """_StageRequest.resolve maps absent -> not requested and an explicit value
+    through unchanged (still unclamped, so the shared gate owns the refusal
+    message), and folds the tables/formulas -> layout implication in."""
+    from turboocr_engine.pipeline import _NO_STAGES, _StageRequest as R
+
+    assert R.resolve() == _NO_STAGES
+    assert R.resolve(layout=None, tables=None, formulas=None) == _NO_STAGES
+    r = R.resolve(tables=True)
+    assert r.run_tables and r.run_layout and r.run_structure
+    assert not r.run_formulas and not r.run_reading_order
+    # reading_order rides the engine's layout pass without emitting regions
+    r = R.resolve(reading_order=True)
+    assert r.run_structure and not r.run_layout
+    # explicit truthy non-True is a request too
+    assert R.resolve(formulas=1).run_formulas is True
+    # the sub-request for the text-layer structure pass
+    assert R.resolve(layout=True, reading_order=True).without_reading_order() \
+        == R.resolve(layout=True)
+
+
+def test_layout_false_with_tables_true_is_refused(monkeypatch):
+    """Turning layout off while asking for tables is contradictory: tables and
+    formulas are recognized INSIDE layout regions, so the implication would
+    silently switch layout back on and return a result contradicting the
+    request. Refuse instead."""
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
+    import numpy as _np
+
+    ocr.has_layout = ocr.has_tables = ocr.has_formulas = True
+    img = _np.zeros((8, 8, 3), _np.uint8)
+    for kw in ({"tables": True}, {"formulas": True}, {"tables": True, "formulas": True}):
+        with pytest.raises(ValueError, match="layout=False cannot be combined"):
+            P.OCR.read(ocr, img, layout=False, **kw)
+    # layout=False on its own is the FAST PATH, not an error: only the
+    # explicit PAIR is contradictory.
+
+
+def test_can_batch_uses_the_request_not_the_engine(monkeypatch):
+    """_can_batch read self.has_tables/has_formulas directly, so after 'Load is
+    not Run' a loaded engine reading plain text would still be denied the
+    native whole-batch call — silently slower, no error, nothing in the result
+    to show for it."""
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
+    ocr.has_layout = ocr.has_tables = ocr.has_formulas = True
+    ocr.autorotate = False
+
+    class _P:
+        def run_batch(self, arrs):
+            return [[] for _ in arrs]
+
+    ocr._pipe = _P()
+    R = P._StageRequest.resolve
+    # plain text on a fully-loaded engine: the fast path must still be taken
+    assert P.OCR._can_batch(ocr, req=R(), autorotate=None) is True
+    # ...and asking for a stage correctly falls back to one-at-a-time
+    assert P.OCR._can_batch(ocr, req=R(layout=True), autorotate=None) is False
+    assert P.OCR._can_batch(ocr, req=R(tables=True), autorotate=None) is False
+    # reading_order is a per-image stage too: taking the whole-batch path
+    # would silently drop the request (no error, no reading_order field)
+    assert P.OCR._can_batch(ocr, req=R(reading_order=True),
+                            autorotate=None) is False
+
+
+def test_info_reports_the_coreml_layout_latch(monkeypatch):
+    """info()["layout_coreml_dropped"] surfaces the process-wide C++ latch
+    (a layout session dropped CoreML and rebuilt on the CPU provider), so the
+    degradation is queryable, not only a WARN line. Wiring is tested through a
+    stub: really setting the latch would wedge THIS test process one-way.
+    An extension older than the binding must read as False, not crash."""
+    import types
+
+    from turboocr_engine import pipeline as P
+
+    ocr = object.__new__(P.OCR)
+    ocr.model_name = "tiny"
+    ocr.backend = ocr.engine = "cpu"
+    ocr.mode = ocr.requested_mode = "auto"
+    ocr.replicas = 1
+    ocr.fp16 = False
+    ocr.provider_summary = ""
+    ocr.use_cls = False
+    ocr.has_layout = False
+    ocr.capabilities = {}
+    ocr.paths = types.SimpleNamespace(det="d", rec="r", dict="k")
+
+    monkeypatch.setattr(P.native, "load_native",
+                        lambda: types.SimpleNamespace(
+                            coreml_layout_wedged=lambda: True))
+    assert P.OCR.info(ocr)["layout_coreml_dropped"] is True
+    monkeypatch.setattr(P.native, "load_native",
+                        lambda: types.SimpleNamespace())  # pre-binding .so
+    assert P.OCR.info(ocr)["layout_coreml_dropped"] is False
+
+
+def test_release_asset_names_map_exactly():
+    """A mapping miss is a 404, not a softer download: formula assets mapped to
+    bare basenames that were never published, so OCR(formulas=True) with a cold
+    cache could not provision itself; and a case miss made the SHA256 lookup
+    silently skip verification (GitHub serves asset URLs case-insensitively,
+    the sums file does not)."""
+    from turboocr_engine.models import _local_to_asset
+
+    assert _local_to_asset(
+        "formula/ppformulanet_s/inference_trt.onnx") == "ppformulanet_s_trt.onnx"
+    assert _local_to_asset(
+        "formula/ppformulanet_s/tokenizer.json") == "ppformulanet_s_tokenizer.json"
+    for rel, asset in (
+        ("table/slanext_encoder/SLANeXt_wired_encoder.onnx",
+         "slanext_wired_encoder.onnx"),
+        ("table/slanext_encoder/SLANeXt_wired_decoder.bin",
+         "slanext_wired_decoder.bin"),
+        ("table/slanext_encoder/SLANeXt_dict_infer.txt",
+         "slanext_dict_infer.txt"),
+    ):
+        assert _local_to_asset(rel) == asset
+    # the untouched mappings stay untouched
+    assert _local_to_asset("rec/korean/rec.onnx") == "rec-korean.onnx"
+    assert _local_to_asset("layout/layout.onnx") == "layout.onnx"
+
+
+def test_pdf_paths_record_stages(monkeypatch):
+    """The stage record must agree across entry points: a rendered PDF page
+    records "autorotate" when the orientation pass ran (read() already did),
+    and a text-layer page that ran a structure pass merges that pass's record
+    — minus its "text", whose recognized lines were discarded in favour of
+    the layer's."""
+    import contextlib
+    import sys
+    import types
+
+    import numpy as np
+
+    P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
+    # the explicit autorotate=True below goes through the _require_doc_ori
+    # refusal gate, which probes the live pipeline
+    ocr._pipe = types.SimpleNamespace(has_doc_ori=lambda: True)
+    pdf_mod = sys.modules["turboocr_engine.pdf"]
+    arr = np.zeros((4, 4, 3), np.uint8)
+
+    # rendered page + autorotate=True
+    pdf_mod.iter_pdf_pages = (
+        lambda p, dpi, pages, max_pages, mode, password=None,
+        text_with_raster=False, on_error="raise": iter([("img", 1, arr)])
+    )
+
+    def fake_read_array(a, *, drop_score, page, keep_image, rotate=0, **kw):
+        return P.PageResult(width=4, height=4, page=page, stages=("text",))
+
+    ocr._read_array = fake_read_array
+
+    class _Pipe:
+        def detect_orientation(self, a):
+            return 0  # checked, already upright — the pass still RAN
+
+    @contextlib.contextmanager
+    def checkout():
+        yield _Pipe()
+
+    ocr._checkout = checkout
+    (pr,) = P.OCR.read_pdf_stream(ocr, "f.pdf", autorotate=True)
+    assert pr.stages == ("text", "autorotate")
+
+    # text-layer page + a layout-only structure pass
+    pdf_mod.iter_pdf_pages = (
+        lambda p, dpi, pages, max_pages, mode, password=None,
+        text_with_raster=False, on_error="raise":
+        iter([("text", 1, 4, 4, [], arr, [])])
+    )
+
+    def struct_read_array(a, *, drop_score, page, keep_image, **kw):
+        # a real layout-only pass returns ("layout",); include a "text" here
+        # to prove the merge FILTERS it rather than double-recording
+        return P.PageResult(width=4, height=4, page=page,
+                            stages=("text", "layout"))
+
+    ocr._read_array = struct_read_array
+    (pr,) = P.OCR.read_pdf_stream(ocr, "f.pdf", mode="auto", layout=True)
+    assert pr.stages == ("text", "layout")
+
+
+def test_page_stages_records_what_ran_not_what_produced_output():
+    """An empty layout list is ambiguous — a blank scan legitimately yields zero
+    regions — and to_dict() omits empty lists, so the ambiguity would survive a
+    round trip. stages is recorded, never inferred."""
+    from turboocr_engine.result import PageResult
+
+    p = PageResult(width=10, height=10, stages=("text", "layout"))
+    assert p.layout == [] and "layout" in p.stages     # ran, found nothing
+    assert PageResult.from_dict(p.to_dict()).stages == ("text", "layout")
+    # a page with no record round-trips to empty rather than guessing
+    assert PageResult.from_dict({"width": 1, "height": 1}).stages == ()
+    # filter() drops reading_order, so the record must agree
+    q = PageResult(width=10, height=10,
+                   stages=("text", "layout", "reading_order"))
+    assert "reading_order" not in q.filter(min_confidence=0.0).stages
+
+
+def test_apple_native_missing_refuses_instead_of_degrading(tmp_path, monkeypatch):
+    """backend="apple" without the native export used to fall back to CoreML
+    SILENTLY (one line on stderr, return value discarded). That is not a
+    graceful degradation: measured on an 83-page document, native Apple is
+    27.9 pages/s, plain CPU 3.9, and the CoreML fallback 1.7 — so asking for
+    the fast backend and missing the bundle left the caller SLOWER than never
+    asking. Now it raises, and the message says WHICH condition failed."""
+    from turboocr_engine import models as m
+
+    monkeypatch.setattr(m.sys, "platform", "darwin")
+    monkeypatch.setattr(m.platform, "machine", lambda: "arm64")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    from turboocr_engine.catalog import find_model
+
+    entry = find_model("small")
+
+    # (a) a user-managed models_dir names the directory and the missing file.
+    mine = tmp_path / "mine"
+    mine.mkdir()
+    store = m.ModelStore(None, allow_download=True)
+    store.local_dir = None
+    store.cache_dir = str(cache)
+    res = m.ResolvedModel(det=str(mine / "det_small.onnx"),
+                          rec=str(mine / "rec_small.onnx"),
+                          dict=str(mine / "keys.txt"), cls=None, name="small")
+    assert store.ensure_apple_native(entry, res) is False
+    reason = store.apple_native_reason
+    assert reason and "user-managed" in reason
+    assert "det_small/graph.json" in reason
+
+    # (b) allow_download=False says so rather than blaming the network.
+    store2 = m.ModelStore(None, allow_download=False)
+    store2.local_dir = None
+    store2.cache_dir = str(cache)
+    res2 = m.ResolvedModel(det=str(cache / "det_small.onnx"),
+                           rec=str(cache / "rec_small.onnx"),
+                           dict=str(cache / "keys.txt"), cls=None, name="small")
+    assert store2.ensure_apple_native(entry, res2) is False
+    reason2 = store2.apple_native_reason
+    assert reason2 and "allow_download=False" in reason2
+
+    # (c) a script model has no native export at all — a different sentence.
+    ko = find_model("korean")
+    assert store.ensure_apple_native(ko, res2) is False
+    reason3 = store.apple_native_reason
+    assert reason3 and "no Apple native export" in reason3
+
+    # (d) NOT applicable off darwin: False with NO reason, so nothing raises
+    #     for every Linux/Windows user who never asked for Apple.
+    monkeypatch.setattr(m.sys, "platform", "linux")
+    assert store.ensure_apple_native(entry, res2) is False
+    assert store.apple_native_reason is None
+
+
+def test_apple_seam_keeps_coreml_for_aux_stages(monkeypatch):
+    """On the apple SEAM, det/rec run natively on MPSGraph while the aux ORT
+    stages (cls/layout/doc-ori/formula) keep the CoreML EP.
+
+    CoreML makes those stages ~1.7x faster (83-page document: 32s vs 51s) and
+    the layout output is equivalent — 601 regions either way, 600 of them
+    matching within 4px with identical labels. It DOES leave part of the
+    layout model's fixed 300-row output buffer uninitialized on some pages;
+    picodet_decode drops those rows and (since this batch) says so at debug
+    level rather than crying "the EP is producing garbage" per page.
+
+    ORT_EP stays cleared so a stale value cannot poison the aux sessions;
+    DISABLE_COREML is left ALONE so the operator escape hatch still works."""
+    monkeypatch.setattr(native, "is_apple_silicon", lambda: True)
+    monkeypatch.setattr(native, "native_backends", lambda: ["apple", "cpu"])
+    for name in ("apple", "metal"):
+        monkeypatch.delenv("DISABLE_COREML", raising=False)
+        monkeypatch.delenv("ORT_EP", raising=False)
+        resolved, _ = native.configure_backend(name)
+        assert resolved == "apple", (name, resolved)
+        assert "ORT_EP" not in os.environ, name
+        # Not forced off: that cost 1.7x for no correctness gain.
+        assert "DISABLE_COREML" not in os.environ, name
+
+    # The operator override is untouched in both directions.
+    monkeypatch.setenv("DISABLE_COREML", "1")
+    native.configure_backend("apple")
+    assert os.environ["DISABLE_COREML"] == "1"
+
+
+def test_table_to_pandas_names_lxml_when_parser_missing(monkeypatch):
+    """pandas does not depend on an HTML parser, so bare `pip install pandas`
+    leaves read_html one import short. That surfaced as a raw
+    "ModuleNotFoundError: No module named 'lxml'" from inside pandas — a
+    dependency the caller never asked for, with nothing naming the fix."""
+    import builtins
+
+    from turboocr_engine import result as R
+
+    real_import = builtins.__import__
+
+    def no_lxml(name, *a, **kw):
+        if name == "lxml" or name.startswith("lxml."):
+            raise ImportError("No module named 'lxml'")
+        return real_import(name, *a, **kw)
+
+    class FakePd:
+        @staticmethod
+        def read_html(*a, **kw):
+            raise ImportError("html5lib not found, please install it")
+
+    monkeypatch.setattr(R, "_require_pandas", lambda: FakePd)
+    monkeypatch.setattr(builtins, "__import__", no_lxml)
+    t = R.TableRegion(html="<table><tr><td>a</td></tr></table>", score=1.0,
+                      box=((0, 0), (1, 0), (1, 1), (0, 1)))
+    with pytest.raises(ImportError) as ei:
+        t.to_pandas()
+    msg = str(ei.value)
+    assert "lxml" in msg and "turboocr[cpu,pandas]" in msg
+    # ...and it points at the no-extra escape hatch.
+    assert "TableRegion.html" in msg
 
 
 def test_configure_backend_non_apple_ort_ep(monkeypatch):
@@ -467,6 +947,7 @@ def test_document_exports_shape():
 
 @needs_native
 @needs_models
+@needs_umbrella
 def test_read_batch_returns_document():
     ocr = turboocr.OCR("tiny", backend="cpu", models_dir=MODELS)
     img = np.full((60, 90, 3), 255, np.uint8)
@@ -479,6 +960,7 @@ def test_read_batch_returns_document():
 @needs_native
 @needs_fixture
 @needs_models
+@needs_umbrella
 def test_searchable_pdf_text_layer(tmp_path):
     reportlab = pytest.importorskip("reportlab")  # noqa: F841
     pdfium = pytest.importorskip("pypdfium2")
@@ -533,6 +1015,7 @@ def test_tables_to_html():
     assert "tables" in d and d["tables"][0]["html"]
 
 
+@needs_umbrella
 def test_searchable_pdf_multiscript_and_dpi():
     """Synthetic (no OCR models): pins the CID-font Unicode coverage and the
     DPI-correct media box permanently, cheaply, and always-runs."""
@@ -1041,7 +1524,7 @@ def test_read_pdf_uses_parallel_map(monkeypatch):
     ocr.has_layout = ocr.has_tables = ocr.has_formulas = False
     pages_read = []
 
-    def fake_read_array(arr, *, drop_score, page, keep_image, rotate=0):
+    def fake_read_array(arr, *, drop_score, page, keep_image, rotate=0, **kw):
         pages_read.append(page)
         return P.PageResult(width=1, height=1, page=page)
 
@@ -1122,7 +1605,7 @@ def _fake_pdf_ocr(monkeypatch, n_pages=4):
     ocr._pipe = object()  # eager validation probes for a live pipeline
     ocr.has_layout = ocr.has_tables = ocr.has_formulas = False
 
-    def fake_read_array(arr, *, drop_score, page, keep_image, rotate=0):
+    def fake_read_array(arr, *, drop_score, page, keep_image, rotate=0, **kw):
         return P.PageResult(width=1, height=1, page=page)
 
     ocr._read_array = fake_read_array
@@ -1193,7 +1676,7 @@ def test_read_pdf_on_error_skip_contains_page_failures(monkeypatch):
     (page_failed warning, correct .page); the default still raises."""
     P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=4)
 
-    def failing_read_array(arr, *, drop_score, page, keep_image, rotate=0):
+    def failing_read_array(arr, *, drop_score, page, keep_image, rotate=0, **kw):
         if page == 2:
             raise RuntimeError("decoder exploded")
         return P.PageResult(width=1, height=1, page=page)
@@ -1264,7 +1747,7 @@ def test_read_pdf_autorotate_rotates_pages(monkeypatch):
 
     seen = []
 
-    def fake_read_array(arr, *, drop_score, page, keep_image, rotate=0):
+    def fake_read_array(arr, *, drop_score, page, keep_image, rotate=0, **kw):
         seen.append((page, rotate, arr.shape[:2]))
         return P.PageResult(width=arr.shape[1], height=arr.shape[0],
                             page=page, orientation=rotate)
@@ -1298,7 +1781,7 @@ def _batch_shell(replicas: int):
     ocr.keep_image = None
     ocr._closed = False
     ocr._pipe = object()
-    ocr._can_batch = lambda *, layout, autorotate: False
+    ocr._can_batch = lambda *, req, autorotate, **kw: False
     return P, ocr
 
 
@@ -1360,7 +1843,7 @@ def test_read_batch_native_chunk_failure_falls_back_per_image():
     ocr.keep_image = True
     ocr._closed = False
     ocr._pipe = object()
-    ocr._can_batch = lambda *, layout, autorotate: True
+    ocr._can_batch = lambda *, req, autorotate, **kw: True
 
     class FakePipe:
         def run_batch(self, arrays):
@@ -1371,8 +1854,9 @@ def test_read_batch_native_chunk_failure_falls_back_per_image():
     good = np.zeros((4, 4, 3), np.uint8)
     bad = np.zeros((5, 5, 3), np.uint8)
 
-    def fake_read_array(arr, *, drop_score, keep_image, want_layout=None):
-        assert want_layout is False  # the rescue run must not resurrect layout
+    def fake_read_array(arr, *, drop_score, keep_image, req=None, **kw):
+        # the rescue run must not resurrect layout: no request means no stages
+        assert req is None or not req.run_structure
         if arr.shape[0] == 5:
             raise RuntimeError("this raster is the poison")
         return P.PageResult(width=arr.shape[1], height=arr.shape[0])
@@ -1396,7 +1880,7 @@ def test_keep_image_defaults_per_path(monkeypatch):
     P, ocr = _fake_pdf_ocr(monkeypatch, n_pages=1)
     seen = {}
 
-    def rec(arr, *, drop_score, page, keep_image, rotate=0):
+    def rec(arr, *, drop_score, page, keep_image, rotate=0, **kw):
         seen[page] = keep_image
         return P.PageResult(width=1, height=1, page=page)
 
@@ -1423,6 +1907,7 @@ def test_keep_image_defaults_per_path(monkeypatch):
     assert got["keep_image"] is True
 
 
+@needs_umbrella
 def test_searchable_pdf_refuses_all_rasterless_pages():
     """A searchable PDF from pages that ALL lost their raster (the new
     keep_image=False default) must raise an error naming keep_image — while a
@@ -1624,7 +2109,7 @@ def test_pdf_auto_mode_ocrs_only_textless_pages(tmp_path):
                                   None])
     ocr_pages = []
 
-    def fake_read_array(arr, *, drop_score, page, keep_image, rotate=0):
+    def fake_read_array(arr, *, drop_score, page, keep_image, rotate=0, **kw):
         ocr_pages.append(page)
         return PageResult(width=arr.shape[1], height=arr.shape[0], page=page)
 
@@ -1757,6 +2242,35 @@ def test_cli_structure_flags_and_info(monkeypatch, capsys):
     assert cli.main(["info", "--tables"]) == 0
     assert json.loads(capsys.readouterr().out)["model"] == "tiny"
     assert seen["tables"] is True
+
+
+def test_cli_warmup_constructs_and_reads_once(monkeypatch, capsys):
+    """`turboocr warmup` = construct + ONE read of a realistic-size page with
+    the requested stages, then close. The page must be big enough to hit the
+    main detector canvas — a thumbnail would warm only the smallest one and
+    the first real document would still pay the big compile."""
+    from turboocr_engine import cli
+
+    calls = {}
+
+    class FakeOCR:
+        provider_summary = "fake-backend"
+        model_name = "tiny"
+
+        def read(self, img, **kw):
+            calls["shape"] = img.shape
+            calls["stages"] = kw
+
+        def close(self):
+            calls["closed"] = True
+
+    monkeypatch.setattr(cli, "_build_ocr", lambda args: FakeOCR())
+    assert cli.main(["warmup", "--tables", "--formulas"]) == 0
+    h, w, _ = calls["shape"]
+    assert h >= 1000 and w >= 900
+    assert calls["stages"]["tables"] and calls["stages"]["formulas"]
+    assert calls["closed"]
+    assert "warmup complete" in capsys.readouterr().out
 
 
 @needs_native
@@ -1980,6 +2494,7 @@ def test_requested_stage_load_failure_raises():
     assert not (ocr.has_layout or ocr.has_tables or ocr.has_formulas or ocr.autorotate)
 
 
+@needs_umbrella
 def test_roundtrip_carries_dpi_and_parent_id():
     """to_dict/from_dict fidelity: dpi survives (a restored page must build a
     correctly-sized searchable PDF) and LayoutBox.parent_id survives (region
@@ -2038,11 +2553,17 @@ def test_default_engine_cache_keys_and_race(monkeypatch):
     import turboocr_engine as te
 
     built = []
+    built_lt = []
 
     class FakeOCR:
-        def __init__(self, model, backend, *, layout=False, tables=False,
-                     formulas=False, autorotate=False):
+        def __init__(self, model, backend, *, lang=None, tier=None,
+                     layout=False, tables=False, formulas=False,
+                     autorotate=False):
+            # lang/tier are CONSTRUCTOR arguments: they pick the recognizer.
+            # The module-level read()/read_pdf() used to drop them into
+            # **kwargs, where they reached OCR.read() and raised TypeError.
             built.append((model, backend, layout, tables, formulas, autorotate))
+            built_lt.append((lang, tier))
 
         def close(self):
             pass
@@ -2082,6 +2603,55 @@ def test_default_engine_cache_keys_and_race(monkeypatch):
                             lambda name, _m=m: type("E", (), {"name": _m})())
         te._default_engine(m, "cpu")
     assert len(te._DEFAULT_CACHE) <= te._DEFAULT_CACHE_CAP
+
+
+    # lang/tier reach the CONSTRUCTOR (regression: they used to be swallowed by
+    # **kwargs and handed to OCR.read(), which raised TypeError), and they are
+    # part of the cache key so two tiers cannot share one engine.
+    built_lt.clear()
+    te._default_engine(tier="small")
+    te._default_engine(tier="medium")
+    te._default_engine(tier="small")   # cached: no third build
+    assert built_lt == [(None, "small"), (None, "medium")]
+
+
+def test_one_shot_wrappers_forward_stage_flags_per_call(monkeypatch):
+    """Load is not Run reaches the module-level one-shots too: building a
+    capable engine no longer makes the stages run, so read()/read_pdf() must
+    ALSO pass the flags with the call. read_pdf(pdf, tables=True) used to
+    build a table-capable engine and then return a result with no tables."""
+    import turboocr_engine as te
+
+    calls = {}
+
+    class FakeOCR:
+        def __init__(self, *a, **kw):
+            pass
+
+        def read(self, image, **kw):
+            calls["read"] = kw
+            return "page"
+
+        def read_pdf(self, pdf, **kw):
+            calls["read_pdf"] = kw
+            return "doc"
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(te, "OCR", FakeOCR)
+    monkeypatch.setattr(te, "_DEFAULT_CACHE", type(te._DEFAULT_CACHE)())
+
+    te.read("img.png", tables=True)
+    assert calls["read"]["tables"] is True and calls["read"]["layout"] is None
+    te.read_pdf("doc.pdf", tables=True, formulas=True)
+    assert calls["read_pdf"]["tables"] is True
+    assert calls["read_pdf"]["formulas"] is True
+    assert calls["read_pdf"]["layout"] is None
+    # flags left off stay UNREQUESTED (None), never a hard False that would
+    # fight a future explicit kwarg
+    te.read_pdf("doc.pdf")
+    assert calls["read_pdf"]["tables"] is None
 
 
 def test_concurrent_document_streams_share_one_worker_pool(monkeypatch):
@@ -2533,10 +3103,14 @@ def test_auto_mode_quality_gate_rejects_thin_and_garbled_layers(tmp_path):
 
 
 def test_auto_mode_runs_structure_on_text_pages(monkeypatch):
-    """Engines built with layout/tables/formulas must still produce them on
-    text-layer pages: the raster is rendered for the structure pass while the
-    text stays byte-exact from the layer (used to silently return zero
-    regions on every born-digital page)."""
+    """A REQUESTED structure stage must still be produced on text-layer pages:
+    the raster is rendered for the structure pass while the text stays
+    byte-exact from the layer (this used to silently return zero regions on
+    every born-digital page).
+
+    Note the request is now explicit. Under "Load is not Run" a loaded engine
+    no longer implies the stage — read_pdf(layout=True) asks for it, and a bare
+    read_pdf() correctly renders nothing extra."""
     import sys
     import types
 
@@ -2564,7 +3138,7 @@ def test_auto_mode_runs_structure_on_text_pages(monkeypatch):
         return iter([("text", 1, 30, 20, lines,
                       arr if text_with_raster else None, [])])
 
-    def fake_read_array(a, *, drop_score, page, keep_image, want_text=True, rotate=0):
+    def fake_read_array(a, *, drop_score, page, keep_image, want_text=True, rotate=0, **kw):
         assert want_text is False  # structure-only run through the gate
         pr = P.PageResult(width=30, height=20, page=page)
         pr.layout.append(LayoutBox(label="text", confidence=0.9,
@@ -2578,7 +3152,7 @@ def test_auto_mode_runs_structure_on_text_pages(monkeypatch):
         extract_pdf_text=lambda *a, **k: iter(()),
     ))
 
-    doc = P.OCR.read_pdf(ocr, "f.pdf")
+    doc = P.OCR.read_pdf(ocr, "f.pdf", layout=True)
     assert seen["text_with_raster"] is True
     pg = doc.pages[0]
     assert [ln.text for ln in pg.lines] == ["layer text"]      # layer text kept
@@ -2631,7 +3205,7 @@ def test_on_error_skip_contains_render_failures(tmp_path, monkeypatch):
     ocr._pipe = object()
     ocr.has_layout = ocr.has_tables = ocr.has_formulas = False
 
-    def fake_read_array(a, *, drop_score, page, keep_image, rotate=0):
+    def fake_read_array(a, *, drop_score, page, keep_image, rotate=0, **kw):
         return P.PageResult(width=a.shape[1], height=a.shape[0], page=page)
 
     ocr._read_array = fake_read_array
@@ -2876,8 +3450,9 @@ def test_module_read_tables_key(monkeypatch):
     built = []
 
     class FakeOCR:
-        def __init__(self, model, backend, *, layout=False, tables=False,
-                     formulas=False, autorotate=False):
+        def __init__(self, model, backend, *, lang=None, tier=None,
+                     layout=False, tables=False, formulas=False,
+                     autorotate=False):
             built.append((layout, tables, formulas, autorotate))
 
         def read(self, image, **kw):

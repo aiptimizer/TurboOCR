@@ -94,8 +94,6 @@ model.cache
 # Ad-hoc PDF-editor demo scratch (rendered PDFs/PNGs, tens of MB).
 /.ocr-demo/
 
-# Claude Code local session state (scheduled_tasks.lock and friends).
-/.claude/
 python/turboocr/turbo_apple.metallib
 build-wheels/
 

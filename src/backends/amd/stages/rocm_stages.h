@@ -126,22 +126,40 @@ private:
   bool ready_ = false;
 };
 
-// ---- Layout (PP-DocLayoutV3, multi-IO) -------------------------------------
-class RocmLayout final : public backend::ILayout {
+// ---- Layout (PP-DocLayoutV3) — the shared HOST ORT stage behind the seam ---
+// Deliberately NOT a MIGraphX stage. MIGraphX 2.14 cannot PARSE the
+// PP-DocLayoutV3 export at all (verified on MI300X / ROCm 7.1.1, and it fails
+// at parse — before shapes, fp16 or execution can matter):
+//   * default dims:  "Reshape: Wrong number of elements for reshape: reshape
+//     has 0 elements whereas the input has 1" — the post-NMS subgraph has
+//     data-dependent shapes a static compiler cannot materialize;
+//   * pinned dims (@image 1,3,800,800 @im_shape 1,2 @scale_factor 1,2):
+//     "convolution.cpp:72 validate_or_init_attributes: Inconsistent strides
+//     size, is: 2, should be: 18446744073709551615" — an uninitialized size_t
+//     in MIGraphX's op builder.
+// So this backend routes layout through the SAME host implementation every
+// ORT-based backend runs (cpu::CpuLayout over layout::OrtPaddleLayout) — the
+// exact pattern the Apple backend established with HostLayoutOnDevice
+// (apple_backend.mm), because structure output must be byte-comparable across
+// backends and generic policy is shared, never per backend. Unlike Apple's
+// unified memory, hipMalloc'd pixels are NOT host-addressable, so a
+// device-resident page is staged D2H first. When an onnxruntime with the
+// MIGraphX EP is linked, ORT can place this graph on the GPU (ORT handles the
+// dynamic shapes) INSIDE this same design — no seam change needed.
+class HostLayoutOnHip final : public backend::ILayout {
 public:
-  explicit RocmLayout(StageDeps deps);
-  ~RocmLayout() override;
+  explicit HostLayoutOnHip(StageDeps deps);
+  ~HostLayoutOnHip() override;
 
   [[nodiscard]] bool load(const std::string &model_path) override;
   [[nodiscard]] std::vector<turbo_ocr::layout::LayoutBox>
   run(const ImageView &img, int orig_h, int orig_w, float score_threshold,
       DeviceQueue &queue) override;
-  [[nodiscard]] bool is_ready() const noexcept override { return ready_; }
+  [[nodiscard]] bool is_ready() const noexcept override;
 
 private:
   struct Impl;
   std::unique_ptr<Impl> p_;
-  bool ready_ = false;
 };
 
 } // namespace turbo_ocr::amd

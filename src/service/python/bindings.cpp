@@ -13,6 +13,9 @@
 // FORMULA_TOKENIZER), exactly like the server: the Python layer sets those and
 // calls load_structure().
 
+#include "turbo_ocr/analysis/layout/ort_paddle_layout.h"
+#include "turbo_ocr/base/env_utils.h"
+#include <opencv2/core/utils/logger.hpp>
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
@@ -328,6 +331,16 @@ NB_MODULE(_turboocr, m) {
   // flushing after the redirect window closes.
   std::cout << std::unitbuf;
 
+  // Silence OpenCV's own logger. OpenCV writes straight to stderr — e.g.
+  // "[ WARN:0@46.407] global matrix_expressions.cpp:1334 assign OpenCV/MatExpr:
+  // processing of multi-channel arrays might be changed in the future" — which
+  // is a note to OpenCV's own developers about a FUTURE API change, is not
+  // actionable by anyone using this library, and bypasses LOG_LEVEL entirely.
+  // A library must not narrate its dependencies' internals to the host
+  // application. TURBO_OPENCV_LOG=1 restores OpenCV's default for debugging.
+  if (!turbo_ocr::env::env_enabled("TURBO_OPENCV_LOG"))
+    cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_SILENT);
+
   // Real capabilities of THIS build: the ONNX Runtime version + execution
   // providers compiled into the linked ORT, plus the device backends compiled
   // into this module (backend seam), so `doctor` reflects the native path.
@@ -356,6 +369,15 @@ NB_MODULE(_turboocr, m) {
   // this returns the JSON snapshot and resets the counters — the Python twin
   // of the server's /profile route, for diagnosing where a read() goes.
   m.def("profile_dump", []() { return turbo_ocr::prof::dump_json_and_reset(); });
+
+  // The layout stage's process-wide CoreML latch (ort_paddle_layout.cpp):
+  // True once ANY layout session had to drop the accelerator and rebuild on
+  // the CPU provider — after which every later layout load in this process
+  // skips CoreML so the replica pool stays homogeneous. Exposed so the
+  // degradation is a QUERYABLE fact (info()/doctor), not only a WARN line:
+  // a caller who cares about layout latency can see it was not accelerated.
+  m.def("coreml_layout_wedged",
+        []() { return turbo_ocr::layout::coreml_layout_wedged(); });
 
   m.def("build_info", []() {
     nb::dict d;

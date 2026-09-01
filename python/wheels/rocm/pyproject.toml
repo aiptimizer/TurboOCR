@@ -8,9 +8,11 @@
 # import name and the same `turboocr` console script, so two of them
 # in one site-packages is last-writer-wins, not a merge.
 #
-# STATUS: the AMD backend compiles (verified in a ROCm 7.1.1 container) but has
-# never run on AMD hardware. This config exists so the wheel can be produced by
-# an operator who has one; it is not a shipped artifact yet.
+# STATUS: the AMD backend is hardware-verified on MI300X (2026-08-26: all
+# goldens + conformance + FUNSD F1 85.15%, tiny 105.5 img/s; the Python suite
+# is green on hardware — src/backends/amd/BRINGUP.md). The WHEEL itself has
+# been built but not yet pip-installed and run on an AMD box; publish after
+# that one check.
 #
 # THIS FILE IS STAGED, NOT BUILT IN PLACE. It is the canonical config for the
 # AMD variant, but the build copies it OVER python/pyproject.toml (backing the
@@ -40,8 +42,10 @@ The AMD build of [TurboOCR](https://turboocr.com). Identical Python API to the
 `turboocr-engine-cpu` wheel — `from turboocr_engine import OCR`, or
 `from turboocr import OCR` through the pure-Python `turboocr` umbrella
 (`pip install "turboocr[rocm]"` installs both) — with the AMD backend
-compiled into the native extension: HIP kernels and the native MIGraphX engine,
-plus the shared ONNX Runtime fast path on the MIGraphX/ROCm execution provider.
+compiled into the native extension: HIP kernels and the native MIGraphX engine
+(hardware-verified on MI300X). The bundled ONNX Runtime is the CPU build, so
+`engine_mode="onnx"` runs on CPU; the GPU MIGraphX execution provider needs a
+ROCm ONNX Runtime, which this wheel deliberately does not bundle (multi-GB).
 
 Needs a ROCm installation on the host. **Install exactly one**
 `turboocr-engine-*` wheel per environment: they all provide the
@@ -120,6 +124,7 @@ cmake.source-dir = ".."
 # scikit-build-core appends AFTER this list.
 cmake.args = [
     "-DBUILD_PYTHON=ON",
+    "-DBUILD_SERVER=OFF",
     "-DUSE_CPU_ONLY=ON",
     "-DTURBO_BACKENDS=cpu;amd",
 ]

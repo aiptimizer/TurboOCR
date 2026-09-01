@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from dataclasses import dataclass
 import queue
 import threading
 from typing import AsyncIterator, Generator, List, Optional
@@ -42,7 +43,11 @@ from .options import (
     PdfMode,
 )
 from .options import check_on_error as _check_on_error_impl
-from .options import check_pdf_mode as _check_pdf_mode
+from .options import (
+    check_drop_score,
+    check_pages,
+    check_pdf_mode as _check_pdf_mode,
+)
 
 # Placed into the replica pool by close(): a reader that raced past the
 # _closed flag and parked in Queue.get() receives this instead of blocking
@@ -241,14 +246,110 @@ def _ensure_stage_asset(store: ModelStore, stage: str, rel: str) -> str:
         ) from exc
 
 
-def _fill_structure(page_res: PageResult, r, *, want_layout: bool,
-                    want_tables: bool, want_formulas: bool,
-                    want_reading_order: bool) -> None:
+def _clamp_quad(box, w: int, h: int):
+    """Clamp a region quad into the page.
+
+    The table stage expands each region by TABLE_CROP_MARGIN (3%) before
+    cropping; the CROP is clamped to the image but the REPORTED box was not, so
+    a table touching the page edge came back with negative coordinates (measured
+    -28 on a 960x960 fixture). A consumer slicing `img[y0:y1, x0:x1]` with a
+    negative y0 silently gets the wrong strip, and drawing it lands off-canvas.
+    Page dims of 0 (a contained failure) disable the clamp rather than collapse
+    every point to 0."""
+    if w <= 0 or h <= 0:
+        return tuple((int(p[0]), int(p[1])) for p in box)
+    return tuple((min(max(int(p[0]), 0), w - 1),
+                  min(max(int(p[1]), 0), h - 1)) for p in box)
+
+
+@dataclass(frozen=True)
+class _StageRequest:
+    """THE per-call stage request, resolved ONCE at the entry point.
+
+    Every reader below the entry points sees only this object, never the raw
+    keywords — so a stage flag cannot be dropped, defaulted differently, or
+    mis-threaded on one path (the bug class that produced eight distinct
+    silent-wrong-answer defects while the flags travelled as four parallel
+    keywords through four layers of calls).
+
+    LOAD IS NOT RUN. :meth:`resolve` treats an absent flag (None) as NOT
+    REQUESTED — never "whatever this engine happens to have loaded". This
+    mirrors the shared gate exactly: parse_options_core() step 1
+    (validation/options_core.h:78) is `if (on) requested.request(id)`,
+    unconditional, and `loaded` is read in exactly ONE place — step 3's
+    availability check at :103. What is resident decides whether a request is
+    LEGAL, never whether it was MADE. An EXPLICIT request is still never
+    clamped to what was built: it flows through run_with_layout to the gate,
+    which raises with the same message HTTP returns for the same request.
+
+    ``run_layout`` already folds in the implication "tables/formulas IMPLY
+    layout in the RESULT": those stages recognize content INSIDE layout
+    regions, and withholding the regions produced an incoherent page
+    (page.tables[0].layout_id pointing at a region that was not there).
+    _bind_stages applies the same implication at CONSTRUCTION time."""
+
+    run_layout: bool
+    run_tables: bool
+    run_formulas: bool
+    run_reading_order: bool
+
+    @classmethod
+    def resolve(cls, *, layout=None, tables=None, formulas=None,
+                reading_order: bool = False) -> "_StageRequest":
+        """Resolve raw per-call keywords into the request, refusing the one
+        contradiction: layout explicitly OFF with tables/formulas ON (the
+        implication would silently switch layout back on). Entry points call
+        this eagerly, so an ARGUMENT error raises once at the call — never as
+        N per-page `page_failed` warnings under on_error="skip", which exists
+        to contain broken pages, not broken arguments."""
+        def _on(req) -> bool:
+            return False if req is None else bool(req)
+
+        use_tables, use_formulas = _on(tables), _on(formulas)
+        if layout is not None and not _on(layout) and (use_tables or use_formulas):
+            wanted = " and ".join(
+                n for n, v in (("tables", use_tables), ("formulas", use_formulas))
+                if v
+            )
+            raise ValueError(
+                f"layout=False cannot be combined with {wanted}=True: "
+                f"{wanted} are recognized INSIDE layout regions, so the layout "
+                "stage has to run for them to exist. Drop layout=False, or drop "
+                f"{wanted}."
+            )
+        return cls(
+            run_layout=_on(layout) or use_tables or use_formulas,
+            run_tables=use_tables,
+            run_formulas=use_formulas,
+            run_reading_order=bool(reading_order),
+        )
+
+    @property
+    def run_structure(self) -> bool:
+        """Does this request route through run_with_layout at all?
+        reading_order rides the engine's layout pass even when the caller
+        opted out of layout REGIONS in the result — the shared gate
+        auto-enables layout for it."""
+        return self.run_layout or self.run_reading_order
+
+    def without_reading_order(self) -> "_StageRequest":
+        """The same request minus reading_order — for the text-layer structure
+        pass, whose recognized lines (which the indices would point into) are
+        discarded in favour of the PDF layer's."""
+        return _StageRequest(self.run_layout, self.run_tables,
+                             self.run_formulas, False)
+
+
+#: The empty request — what a call gets when it asks for no stage.
+_NO_STAGES = _StageRequest(False, False, False, False)
+
+
+def _fill_structure(page_res: PageResult, r, *, req: "_StageRequest") -> None:
     """Marshal the native run_with_layout result's STRUCTURE outputs
     (layout regions, tables, formulas, reading order, degradation warnings)
     into ``page_res`` — pure translation, no engine or pool state, the
     structure-side sibling of :func:`_fill_lines`."""
-    if want_layout:
+    if req.run_layout:
         for lb in r.layout:
             page_res.layout.append(
                 LayoutBox(
@@ -261,16 +362,16 @@ def _fill_structure(page_res: PageResult, r, *, want_layout: bool,
                 )
             )
     if r.reading_order:
-        # NOT nested under want_layout: reading order is its own request
+        # NOT nested under run_layout: reading order is its own request
         # (the engine may compute it while the caller opted out of layout
         # REGIONS in the result).
         page_res.reading_order = list(r.reading_order)
-    if want_tables:
+    if req.run_tables:
         for t in r.tables:
             page_res.tables.append(
                 TableRegion(
                     html=t.content, score=float(t.score),
-                    box=tuple((int(p[0]), int(p[1])) for p in t.box),  # type: ignore
+                    box=_clamp_quad(t.box, page_res.width, page_res.height),  # type: ignore
                     layout_id=t.layout_id,
                 )
             )
@@ -281,12 +382,12 @@ def _fill_structure(page_res: PageResult, r, *, want_layout: bool,
         if r.table_degraded:
             page_res.warnings.append(
                 f"table_degraded: {r.table_warning or 'no detail'}")
-    if want_formulas:
+    if req.run_formulas:
         for f in r.formulas:
             page_res.formulas.append(
                 FormulaRegion(
                     latex=f.content, score=float(f.score),
-                    box=tuple((int(p[0]), int(p[1])) for p in f.box),  # type: ignore
+                    box=_clamp_quad(f.box, page_res.width, page_res.height),  # type: ignore
                     layout_id=f.layout_id,
                 )
             )
@@ -354,9 +455,10 @@ class OCR:
         where supported, no graph build).
     backend:
         ``"auto"`` (the wheel's best default: on the NVIDIA wheels this is
-        the ``"turbo"`` engine — the first run builds a cached TensorRT
-        engine — elsewhere the CPU path), ``"turbo"`` (TensorRT on the
-        NVIDIA build), ``"apple"`` (native Metal/MPSGraph on macOS arm64),
+        the ``"tensorrt"`` engine — the first run builds a cached TensorRT
+        engine — elsewhere the CPU path), ``"tensorrt"`` (also ``"trt"``;
+        legacy ``"turbo"``) on the NVIDIA build,
+        ``"apple"`` (native Metal/MPSGraph on macOS arm64),
         ``"cpu"``, or an explicit EP (``"cuda"``, ``"openvino"``,
         ``"coreml"``, ``"directml"``, ``"rocm"``).
     replicas:
@@ -449,10 +551,32 @@ class OCR:
         # Provision the Apple NATIVE-mode bundle (MPSGraph exports + the ANE
         # packages) BEFORE construction — the engine probes for the export
         # dirs at load time, and this must stay outside construct_lock (it may
-        # download once). Best-effort by contract: without the bundle,
-        # backend="apple" runs its CoreML fallback exactly as before.
+        # download once).
+        #
+        # REFUSE rather than degrade. Without the bundle the Apple backend
+        # silently ran its CoreML fallback, which is not a graceful
+        # degradation but a TRAP: measured on an 83-page document, native
+        # Apple is 27.9 pages/s, the plain CPU path 3.9, and the CoreML
+        # fallback 1.7 — so asking for the fast backend and missing the bundle
+        # left you SLOWER than not asking at all, announced by nothing but a
+        # line on stderr. Same rule as _bind_stages below: a request that
+        # cannot be honoured fails at construction with the reason, instead of
+        # quietly returning something worse.
         if native.resolve_engine(backend) == "apple":
-            store.ensure_apple_native(self.entry, self.paths)
+            if not store.ensure_apple_native(self.entry, self.paths):
+                reason = getattr(store, "apple_native_reason", None)
+                if reason:
+                    from .errors import ModelLoadError
+
+                    raise ModelLoadError(
+                        f"backend='apple' needs the Apple native export, and "
+                        f"{reason}. Without it this backend falls back to "
+                        "CoreML, which measures SLOWER than backend='cpu' — "
+                        "so it is refused rather than served quietly. Fix the "
+                        "cause above, or pick the backend you actually want: "
+                        "backend='cpu' (portable ORT path) or "
+                        "backend='coreml' (the CoreML fallback, explicitly)."
+                    )
 
         # Serialize env-mutation + construction: the engine reads its EP from
         # process env at construction, so two OCR(...) builds with different
@@ -748,18 +872,28 @@ class OCR:
         the HTTP and gRPC surfaces return, rather than quietly coming back with
         a full OCR result labelled layout-only."""
         img = load_image(image)
-        # The C++ engine applies its own hard floor (kDropScore = 0.5) BEFORE
-        # Python sees any item, so a lower drop_score here can only pretend:
-        # read(drop_score=0.1) returned output byte-identical to 0.5 with no
-        # warning. Refuse until the floor is plumbed through RunFlags.
-        if drop_score < DROP_SCORE:
+        check_drop_score(drop_score)
+        # Resolve the stage request ONCE, eagerly: an argument contradiction
+        # raises here, before the orientation pass below does any work.
+        req = _StageRequest.resolve(layout=layout, tables=tables,
+                                    formulas=formulas,
+                                    reading_order=reading_order)
+        # The engine rotates in quarter turns; anything else silently produced a
+        # differently-shaped canvas (rotate=45 gave a 659x659 image of a tilted
+        # page) that no downstream stage expects. A non-int spelling reached
+        # `%` and raised TypeError from string formatting instead of a
+        # documented ValueError.
+        if isinstance(rotate, bool) or not isinstance(rotate, int):
             raise ValueError(
-                f"drop_score={drop_score} is below the engine's hard floor "
-                f"({DROP_SCORE}): the C++ pipeline filters at "
-                f"{DROP_SCORE} before Python sees results, so lower values "
-                "have no effect. Use drop_score >= 0.5."
+                f"rotate must be an int (0, 90, 180 or 270), got "
+                f"{type(rotate).__name__}"
             )
         angle = rotate % 360
+        if angle % 90:
+            raise ValueError(
+                f"rotate must be a quarter turn (0, 90, 180 or 270), got "
+                f"{rotate}. Use autorotate=True to detect the angle instead."
+            )
         do_auto = self.autorotate if autorotate is None else autorotate
         # An explicit per-call autorotate=True must either WORK or RAISE — the
         # same refusal-beats-silent-no-op rule the layout/tables/formulas gate
@@ -773,24 +907,25 @@ class OCR:
                 angle = int(pipe.detect_orientation(np.ascontiguousarray(img, np.uint8)))
         if angle:
             img = rotate_bound(img, angle)
-        return self._read_array(
-            img, drop_score=drop_score, rotate=angle,
-            want_layout=layout, want_reading_order=reading_order,
-            want_tables=tables, want_formulas=formulas, want_text=text,
-            keep_image=keep_image,
+        page = self._read_array(
+            img, drop_score=drop_score, rotate=angle, req=req,
+            want_text=text, keep_image=keep_image,
         )
+        if do_auto:
+            # The orientation pass RAN (whatever angle it concluded), so record
+            # it. page.orientation alone cannot say this: 0 is both "checked,
+            # already upright" and "never checked".
+            page.stages = (*page.stages, "autorotate")
+        return page
 
     def _read_array(
         self,
         img: np.ndarray,
         *,
-        drop_score: float,  # validated below: cannot go under the engine floor
+        drop_score: float,  # entry points validated it (check_drop_score)
         rotate: int = 0,
         page: Optional[int] = None,
-        want_layout: Optional[bool] = None,
-        want_reading_order: bool = False,
-        want_tables: Optional[bool] = None,
-        want_formulas: Optional[bool] = None,
+        req: _StageRequest = _NO_STAGES,
         want_text: bool = True,
         keep_image: Optional[bool] = None,
     ) -> PageResult:
@@ -814,28 +949,6 @@ class OCR:
         if self._keep(keep_image, True):
             page_res.image = img
 
-        def _resolve(req, have, name):
-            # An EXPLICIT request is never clamped to the built capability set:
-            # it flows through run_with_layout to the shared request-option gate
-            # (validation/python_options.h over the live capability mask), which
-            # raises with the same message HTTP returns for the same request.
-            # This used to warn-and-ignore — a silent wrong answer (the caller
-            # asked for tables and got a result without them). Only an implicit
-            # request (req is None) defaults to what was built.
-            del name  # the gate names the capability in its own message
-            if req is None:
-                return have
-            return bool(req)
-
-        use_layout = _resolve(want_layout, self.has_layout, "layout")
-        use_tables = _resolve(want_tables, self.has_tables, "tables")
-        use_formulas = _resolve(want_formulas, self.has_formulas, "formulas")
-        # reading_order routes through run_with_layout too: the shared gate
-        # auto-enables layout for it (and rejects when layout is not loaded).
-        # It used to be missing here, so read(reading_order=True) took the
-        # plain run() branch and silently returned reading_order == [].
-        use_structure = use_layout or use_tables or use_formulas or want_reading_order
-
         with self._checkout() as pipe:  # one replica per in-flight run (GIL released in C++)
             # `not want_text` takes this branch even with no structure requested:
             # run_with_layout is where the shared request-option gate runs AND
@@ -844,7 +957,7 @@ class OCR:
             # to the plain run() below instead would have returned a full
             # det+rec result for a request that asked for no text at all — the
             # silent-wrong-answer the gate exists to prevent.
-            if use_structure or not want_text:
+            if req.run_structure or not want_text:
                 # tables/formulas need layout regions, so layout is on internally.
                 # KEYWORDS, not position. The C++ side replaced four positional
                 # bools with pipeline::RunFlags precisely so a transposition is
@@ -855,22 +968,32 @@ class OCR:
                 # src/service/python/bindings.cpp.
                 r = pipe.run_with_layout(
                     img,
-                    layout=use_structure,
-                    reading_order=want_reading_order,
-                    tables=use_tables,
-                    formulas=use_formulas,
+                    layout=req.run_structure,
+                    reading_order=req.run_reading_order,
+                    tables=req.run_tables,
+                    formulas=req.run_formulas,
                     text=want_text,
                 )
                 items = r.items
-                _fill_structure(
-                    page_res, r, want_layout=use_layout,
-                    want_tables=use_tables, want_formulas=use_formulas,
-                    want_reading_order=want_reading_order,
-                )
+                _fill_structure(page_res, r, req=req)
             else:
                 items = pipe.run(img)  # native C++ det->sort->(cls)->rec
 
         _fill_lines(page_res, items, drop_score)
+        # Record what actually RAN (see PageResult.stages). autorotate is a
+        # pre-step owned by read(), which records its outcome in
+        # page_res.orientation, so it is derived from that rather than from a
+        # request flag — it is input preparation, not an output stage.
+        ran = ["text"] if want_text else []
+        if req.run_layout:
+            ran.append("layout")
+        if req.run_reading_order:
+            ran.append("reading_order")
+        if req.run_tables:
+            ran.append("tables")
+        if req.run_formulas:
+            ran.append("formulas")
+        page_res.stages = tuple(ran)
         return page_res
 
     # -- batch of images ---------------------------------------------------
@@ -880,10 +1003,13 @@ class OCR:
         *,
         drop_score: float = DROP_SCORE,
         layout: Optional[bool] = None,
+        tables: Optional[bool] = None,
+        formulas: Optional[bool] = None,
+        reading_order: bool = False,
         autorotate: Optional[bool] = None,
         progress=None,
         keep_image: Optional[bool] = None,
-        batch_size: int = 8,
+        batch_size: Optional[int] = None,
         on_error: OnError = "raise",
     ) -> DocumentResult:
         """OCR a list of images into a :class:`DocumentResult` (one page each).
@@ -908,7 +1034,22 @@ class OCR:
         Returns a DocumentResult — iterate it for the per-image pages, or use
         ``doc.to_tsv()`` / ``doc.text`` etc."""
         _check_on_error(on_error)
+        check_drop_score(drop_score)
+        req = _StageRequest.resolve(layout=layout, tables=tables,
+                                    formulas=formulas,
+                                    reading_order=reading_order)
         self._live_pipe()
+        if batch_size is None:
+            # Replica-aware default. Chunking into 8s feeds the detector a real
+            # batch, which is the win at replicas=1 — but it also coarsens the
+            # fan-out granularity, so with a replica pool the chunks stop
+            # load-balancing and throughput DROPS: measured on 80 fixtures,
+            # replicas=3 gave 33.1 img/s at batch_size=8 vs 38.0 at 1, and
+            # replicas=6 gave 45.3 vs 50.5. Consistent at every replica count
+            # >= 2, so the default follows the pool rather than a constant.
+            batch_size = 8 if self.replicas == 1 else 1
+        if batch_size < 1:
+            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
         # Batch reads default to DROPPING rasters (keep_image=False): a long
         # batch at ~6 MB/raster retains GBs invisibly. Pass keep_image=True
         # (per call or on the engine) when you need draw()/searchable PDFs.
@@ -917,7 +1058,7 @@ class OCR:
         report = _make_progress(progress, total, "images")
         doc = DocumentResult()
 
-        if self._can_batch(layout=layout, autorotate=autorotate):
+        if self._can_batch(req=req, autorotate=autorotate):
             chunks = list(_chunks(images, batch_size))
 
             def _run_chunk(chunk) -> List[PageResult]:
@@ -958,14 +1099,13 @@ class OCR:
                         batch = None
                         for j, arr in loaded:
                             try:
-                                # want_layout=False: the batched path is only
-                                # entered when the resolved layout request is
-                                # off (_can_batch), so the rescue run must not
-                                # resurrect engine-default layout regions the
-                                # successfully-batched pages don't carry.
+                                # _NO_STAGES: the batched path is only entered
+                                # when the resolved request is empty
+                                # (_can_batch), so the rescue run must match
+                                # the pages that batched successfully.
                                 slots[j] = self._read_array(
                                     arr, drop_score=drop_score,
-                                    keep_image=keep_image, want_layout=False,
+                                    keep_image=keep_image,
                                 )
                             except Exception as exc:
                                 slots[j] = _failed_page(
@@ -974,7 +1114,7 @@ class OCR:
                 if batch is not None:
                     for (j, arr), items in zip(loaded, batch):
                         h, w = arr.shape[:2]
-                        pr = PageResult(width=w, height=h)
+                        pr = PageResult(width=w, height=h, stages=("text",))
                         if keep_image:
                             pr.image = arr
                         slots[j] = _fill_lines(pr, items, drop_score)
@@ -1034,6 +1174,8 @@ class OCR:
         def _read_one(im) -> PageResult:
             try:
                 return self.read(im, drop_score=drop_score, layout=layout,
+                                 tables=tables, formulas=formulas,
+                                 reading_order=reading_order,
                                  autorotate=autorotate, keep_image=keep_image)
             except Exception as exc:
                 if on_error == "raise":
@@ -1075,18 +1217,22 @@ class OCR:
             report(i)
         return doc
 
-    def _can_batch(self, *, layout: Optional[bool], autorotate: Optional[bool]) -> bool:
+    def _can_batch(self, *, req: _StageRequest,
+                   autorotate: Optional[bool]) -> bool:
         """True when a batch can go through the native whole-batch submission.
 
-        Only the plain det->rec path is batched: layout / tables / formulas run
+        Only the plain det->rec path is batched: every structure stage runs
         through ``run_with_layout``, and autorotate needs a per-image
-        orientation pass first, so those keep the one-image-at-a-time loop."""
+        orientation pass first, so those keep the one-image-at-a-time loop.
+        The decision reads the resolved REQUEST, not what the engine happens
+        to carry (Load is not Run): reading self.has_* here meant a loaded
+        engine asking for plain text was denied the native whole-batch call
+        for stages it never requested — silently slower, no error."""
         if not hasattr(self._pipe, "run_batch"):
             return False  # extension predates the batch binding
         if self.autorotate if autorotate is None else autorotate:
             return False
-        want_layout = self.has_layout if layout is None else layout
-        return not (want_layout or self.has_tables or self.has_formulas)
+        return not req.run_structure
 
     # -- PDF ---------------------------------------------------------------
     def read_pdf(
@@ -1098,6 +1244,10 @@ class OCR:
         drop_score: float = DROP_SCORE,
         max_pages: Optional[int] = None,
         mode: PdfMode = "ocr",
+        layout: Optional[bool] = None,
+        tables: Optional[bool] = None,
+        formulas: Optional[bool] = None,
+        reading_order: bool = False,
         progress=None,
         keep_image: Optional[bool] = None,
         on_error: OnError = "raise",
@@ -1163,7 +1313,8 @@ class OCR:
         )
         for pr in self.read_pdf_stream(
             pdf, dpi=dpi, pages=pages, drop_score=drop_score,
-            max_pages=max_pages, mode=mode, progress=progress,
+            max_pages=max_pages, mode=mode, layout=layout, tables=tables,
+            formulas=formulas, reading_order=reading_order, progress=progress,
             keep_image=keep_image, on_error=on_error, autorotate=autorotate,
             password=password,
         ):
@@ -1179,6 +1330,10 @@ class OCR:
         drop_score: float = DROP_SCORE,
         max_pages: Optional[int] = None,
         mode: PdfMode = "ocr",
+        layout: Optional[bool] = None,
+        tables: Optional[bool] = None,
+        formulas: Optional[bool] = None,
+        reading_order: bool = False,
         ordered: bool = True,
         progress=None,
         keep_image: Optional[bool] = None,
@@ -1246,6 +1401,27 @@ class OCR:
         from .options import check_max_pages
 
         check_max_pages(max_pages)
+        check_pages(pages)
+        check_drop_score(drop_score)
+        req = _StageRequest.resolve(layout=layout, tables=tables,
+                                    formulas=formulas,
+                                    reading_order=reading_order)
+        if mode == "text" and req.run_structure:
+            wanted = ", ".join(
+                n for n, v in (("layout", layout), ("tables", tables),
+                               ("formulas", formulas),
+                               ("reading_order", reading_order)) if v
+            )  # raw flags: name only what the CALLER spelled out
+            # Refusal beats silent no-op: mode="text" serves the embedded
+            # layer only — no rendering, no models — so these requests used to
+            # come back as empty lists indistinguishable from "ran and found
+            # nothing".
+            raise ValueError(
+                f'mode="text" cannot run {wanted}: it serves the PDF\'s '
+                "embedded text layer only, with no rendering and no models. "
+                'Use mode="auto" (text layer for trusted pages, structure '
+                'stages on the rendered raster) or mode="ocr".'
+            )
         if dpi < 1:
             # dpi=0/-100 died deep inside pdfium as "Crop exceeds page
             # dimensions" — or SUCCEEDED for text-layer pages, so the
@@ -1262,12 +1438,13 @@ class OCR:
             pdf, dpi=dpi, pages=pages, drop_score=drop_score,
             max_pages=max_pages, text_source=mode, ordered=ordered,
             progress=progress, keep_image=keep_image, on_error=on_error,
-            do_auto=do_auto, password=password,
+            do_auto=do_auto, password=password, req=req,
         )
 
     def _stream_pdf_pages(
         self, pdf, *, dpi, pages, drop_score, max_pages, text_source, ordered,
         progress, keep_image, on_error, do_auto, password,
+        req: _StageRequest = _NO_STAGES,
     ) -> Generator[PageResult, None, None]:
         """The generator behind :meth:`read_pdf_stream` — arguments arrive
         pre-validated and pre-resolved (keep_image and do_auto are concrete
@@ -1292,7 +1469,11 @@ class OCR:
         report = _make_progress(progress, total, "pages")
 
         def _text_page(page_no, w, h, lines) -> PageResult:
-            pr = PageResult(width=w, height=h, page=page_no)
+            # "text" is honest here: the page HAS text, it just came from the
+            # PDF's own layer rather than the recognizer (every line carries
+            # source="pdf"). Structure stages, if requested, are appended by the
+            # _read_array pass that follows.
+            pr = PageResult(width=w, height=h, page=page_no, stages=("text",))
             for text, quad in lines:
                 pr.lines.append(
                     TextLine(text=text, confidence=1.0, box=quad, source="pdf")
@@ -1329,7 +1510,13 @@ class OCR:
         # Text-layer pages carry no raster by default; render one anyway when
         # the engine runs structure stages (they need pixels) or the caller
         # asked to keep page images (draw()/save_searchable_pdf afterwards).
-        structure_wanted = self.has_layout or self.has_tables or self.has_formulas
+        # Load is not Run: what the CALL asked for, not what the engine holds.
+        # Reading self.has_* here made a text-layer page and a rendered page in
+        # the SAME document disagree about which stages ran. run_layout folds
+        # in tables/formulas; reading_order alone is NOT structure here (it is
+        # never computed for text-layer pages — its indices would point into
+        # the discarded OCR line list).
+        structure_wanted = req.run_layout
         text_with_raster = structure_wanted or keep_image
 
         def _process(item):
@@ -1352,19 +1539,35 @@ class OCR:
                         if structure_wanted:
                             # Server parity (Geometric + layout): the page's
                             # TEXT stays byte-exact from the layer while the
-                            # structure stages run on the rendered raster —
-                            # want_text=False goes through the shared request
-                            # gate as a layout-only run. Without this, the
-                            # auto default silently returned zero layout/
-                            # tables/formulas for every born-digital page.
+                            # structure stages run on the rendered raster.
+                            #
+                            # want_text is NOT simply False here. Tables and
+                            # formulas RECOGNIZE text inside their regions, so
+                            # the shared request gate rejects text=0 alongside
+                            # them ("tables=1/formulas=1 need the OCR pass") —
+                            # which made mode="auto" raise ValueError on every
+                            # text-layer page of an engine built with
+                            # tables=True or formulas=True. A layout-ONLY pass
+                            # can still skip recognition, and does, because
+                            # that is the cheaper half of the common case.
+                            # Either way sr.lines is discarded: the page's
+                            # lines stay the layer's.
                             sr = self._read_array(
                                 arr, drop_score=drop_score, page=page_no,
-                                keep_image=False, want_text=False,
+                                keep_image=False,
+                                req=req.without_reading_order(),
+                                want_text=req.run_tables or req.run_formulas,
                             )
                             pr.layout = sr.layout
                             pr.tables = sr.tables
                             pr.formulas = sr.formulas
                             pr.warnings.extend(sr.warnings)
+                            # The structure pass's record joins the page's.
+                            # Its "text" entry is dropped: the recognized
+                            # lines were discarded above, and the page's
+                            # "text" (the layer's) is already recorded.
+                            pr.stages = (*pr.stages,
+                                         *(s for s in sr.stages if s != "text"))
                     return pr
                 arr = rest[0]
                 angle = 0
@@ -1379,8 +1582,12 @@ class OCR:
                         arr = rotate_bound(arr, angle)
                 pr = self._read_array(
                     arr, drop_score=drop_score, page=page_no,
-                    keep_image=keep_image, rotate=angle,
+                    keep_image=keep_image, rotate=angle, req=req,
                 )
+                if do_auto:
+                    # Same record as read(): the orientation pass RAN,
+                    # whatever angle it concluded.
+                    pr.stages = (*pr.stages, "autorotate")
                 pr.dpi = dpi
                 return pr
             except Exception as exc:
@@ -1609,4 +1816,13 @@ class OCR:
             "dict": self.paths.dict,
             "hardware": detect_hardware().vendor,
             "native": True,
+            # True once ANY layout session in this process dropped CoreML and
+            # rebuilt on the CPU provider (process-wide one-way latch — see
+            # docs/reference/python.md, Accelerator degradation). Layout still
+            # works, just unaccelerated. getattr: extensions older than the
+            # binding cannot have latched, so False is the honest answer.
+            "layout_coreml_dropped": bool(
+                getattr(native.load_native(), "coreml_layout_wedged",
+                        lambda: False)()
+            ),
         }

@@ -11,7 +11,7 @@ Pick a backend explicitly, or see what to install:
 
 >>> turboocr.doctor()                # install panel for your GPU
 >>> ocr = turboocr.OCR("medium", backend="cuda")   # NVIDIA, no engine build
->>> ocr = turboocr.OCR("medium", backend="turbo")  # NVIDIA TensorRT (opt-in)
+>>> ocr = turboocr.OCR("medium", backend="tensorrt")  # NVIDIA TensorRT (opt-in)
 
 PDF — built in, no extra needed; pages fan out across the replica pool:
 
@@ -34,6 +34,7 @@ Metal/MPSGraph — the fast path on Apple silicon), ``cpu``, and explicit EPs
 from __future__ import annotations
 
 import threading as _threading
+from typing import Optional
 from collections import OrderedDict
 
 from ._version import __version__
@@ -99,6 +100,8 @@ def _default_engine(
     model: str = DEFAULT_MODEL,
     backend: str = "auto",
     *,
+    lang: Optional[str] = None,
+    tier: Optional[str] = None,
     layout: bool = False,
     tables: bool = False,
     formulas: bool = False,
@@ -108,8 +111,10 @@ def _default_engine(
     # read(tables=True) must build a table-capable engine, not hit a cached
     # incapable one (the shared gate would then reject the request loudly,
     # but the feature would be unreachable from the one-shot API).
-    key = (resolve_model(model).name, backend, layout, tables, formulas,
-           autorotate)
+    # lang/tier are part of the KEY: they select a different recognizer, so
+    # two calls that differ only in tier must not share one cached engine.
+    key = (resolve_model(model).name, backend, lang, tier, layout, tables,
+           formulas, autorotate)
     with _DEFAULT_LOCK:
         eng = _DEFAULT_CACHE.get(key)
         if eng is not None:
@@ -127,8 +132,8 @@ def _default_engine(
                 _DEFAULT_CACHE.move_to_end(key)
                 return eng
         try:
-            eng = OCR(model, backend, layout=layout, tables=tables,
-                      formulas=formulas, autorotate=autorotate)
+            eng = OCR(model, backend, lang=lang, tier=tier, layout=layout,
+                      tables=tables, formulas=formulas, autorotate=autorotate)
         except Exception:
             # A failed build must not leave its key lock behind forever —
             # with backend/model strings from user input that dict would
@@ -149,28 +154,53 @@ def _default_engine(
         return eng
 
 
+def _one_shot(model, backend, lang, tier, layout, tables, formulas,
+              reading_order, autorotate):
+    """Shared half of the one-shot wrappers: the cached engine AND the per-call
+    stage kwargs, together — so a wrapper cannot build a capable engine and
+    then forget to ask (read_pdf shipped exactly that bug: an engine with the
+    table model resident and a call that never requested tables).
+
+    Load is not Run: capability flags must do BOTH jobs. They size the cached
+    engine (reading_order rides the layout model, so it must LOAD layout even
+    though the shared gate auto-enables the layout STAGE per call), and they
+    travel with the call as explicit requests. autorotate alone stays an
+    engine property — input preparation, inherited by every read path."""
+    eng = _default_engine(model, backend, lang=lang, tier=tier,
+                          layout=layout or reading_order,
+                          tables=tables, formulas=formulas,
+                          autorotate=autorotate)
+    return eng, {"layout": layout or None, "tables": tables or None,
+                 "formulas": formulas or None, "reading_order": reading_order}
+
+
 def read(
     image,
     *,
     model: str = DEFAULT_MODEL,
     backend: str = "auto",
+    lang: Optional[str] = None,
+    tier: Optional[str] = None,
     layout: bool = False,
     tables: bool = False,
     formulas: bool = False,
+    reading_order: bool = False,
     autorotate: bool = False,
     **kwargs,
 ):
     """One-shot convenience: OCR a single image with a cached default engine.
 
     ``layout``/``tables``/``formulas``/``autorotate`` build (and cache) an
-    engine with those capabilities — they are NOT silently ignored. For
-    repeated calls, construct an :class:`OCR` once and reuse it.
+    engine with those capabilities — they are NOT silently ignored, and
+    ``lang``/``tier`` select the recognizer the same way they do on
+    :class:`OCR` (they used to land in ``**kwargs`` and reach ``OCR.read()``,
+    which raised TypeError). For repeated calls, construct an :class:`OCR`
+    once and reuse it.
     """
-    eng = _default_engine(model, backend, layout=layout, tables=tables,
-                          formulas=formulas, autorotate=autorotate)
-    return eng.read(image, layout=layout or None, tables=tables or None,
-                    formulas=formulas or None, autorotate=autorotate or None,
-                    **kwargs)
+    eng, stage_kwargs = _one_shot(model, backend, lang, tier, layout, tables,
+                                  formulas, reading_order, autorotate)
+    return eng.read(image, autorotate=autorotate or None,
+                    **stage_kwargs, **kwargs)
 
 
 def read_pdf(
@@ -178,14 +208,17 @@ def read_pdf(
     *,
     model: str = DEFAULT_MODEL,
     backend: str = "auto",
+    lang: Optional[str] = None,
+    tier: Optional[str] = None,
     layout: bool = False,
     tables: bool = False,
     formulas: bool = False,
+    reading_order: bool = False,
     autorotate: bool = False,
     **kwargs,
 ):
     """One-shot convenience: OCR a PDF with a cached default engine (the
     capability flags work as in :func:`read`)."""
-    eng = _default_engine(model, backend, layout=layout, tables=tables,
-                          formulas=formulas, autorotate=autorotate)
-    return eng.read_pdf(pdf, **kwargs)
+    eng, stage_kwargs = _one_shot(model, backend, lang, tier, layout, tables,
+                                  formulas, reading_order, autorotate)
+    return eng.read_pdf(pdf, **stage_kwargs, **kwargs)

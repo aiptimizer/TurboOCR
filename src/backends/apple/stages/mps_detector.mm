@@ -8,6 +8,8 @@
 #import "apple/support/apple_contention.h"
 #import "apple/support/coreml_compile.h"
 
+#include "turbo_ocr/base/log/logger.h"
+
 #import <CoreML/CoreML.h>
 #import <Foundation/Foundation.h>
 #import <dispatch/dispatch.h>
@@ -212,10 +214,15 @@ bool MpsDetector::load(const std::string &model_path) {
       static std::atomic<bool> logged{false};
       if (!logged.exchange(true)) {
         const auto chw = source_.input_chw();
-        NSLog(@"[apple] det: dynamic page shapes (engine specialized per "
-              @"shape from the %dx%d export, cached). TURBO_APPLE_DET_JIT=0 "
-              @"pins the exported canvas instead.",
-              chw.size() == 3 ? chw[1] : 0, chw.size() == 3 ? chw[2] : 0);
+        // TOCR_LOG_INFO, not NSLog: this is a normal-operation note, and
+        // NSLog wrote it to stderr unconditionally — outside the log level
+        // AND outside the Python layer's stdout quieting, so every library
+        // user saw it on every construction with no way to turn it off.
+        TOCR_LOG_INFO("apple det: dynamic page shapes (engine specialized "
+                      "per shape from the export, cached; "
+                      "TURBO_APPLE_DET_JIT=0 pins the exported canvas)",
+                      "export_h", (long)(chw.size() == 3 ? chw[1] : 0),
+                      "export_w", (long)(chw.size() == 3 ? chw[2] : 0));
       }
       ready_ = true;
       return true; // canvases_ fills lazily via jit_canvas_()
@@ -328,8 +335,11 @@ MpsDetector::DetCanvas *MpsDetector::jit_canvas_(int h, int w) {
   // ~7 ms and logging those turns a normal varied-shape workload into a
   // wall of noise — the exact confusion the old per-canvas log caused).
   if (ms > 50.0) {
-    NSLog(@"[apple] det: compiled engine for %dx%d pages in %.0f ms "
-          @"(one-time per shape)", cv->h, cv->w, ms);
+    // Info, not NSLog: a cold-cache compile is NORMAL operation, and NSLog
+    // writes straight to the host application's stderr past both LOG_LEVEL
+    // and the Python layer's stdout quieting.
+    TOCR_LOG_INFO("apple det: compiled engine for a new page shape",
+                  "h", (long)cv->h, "w", (long)cv->w, "ms", (long)ms);
   }
   cv->last_use = ++use_tick_;
   canvases_.push_back(std::move(cv));

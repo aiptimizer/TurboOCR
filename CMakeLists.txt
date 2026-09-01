@@ -480,6 +480,7 @@ add_executable(turbo_ocr_tests
     tests/cpp/layout/test_blocks_aggregate.cpp
     tests/cpp/layout/test_layout_blocks.cpp
     tests/cpp/layout/test_layout_hierarchy.cpp
+    tests/cpp/layout/test_layout_coreml_smoke.cpp
     tests/cpp/layout/test_picodet_decode.cpp
     tests/cpp/layout/test_reading_order_buckets.cpp
     tests/cpp/layout/test_xy_cut.cpp
@@ -602,6 +603,19 @@ target_compile_definitions(turbo_ocr_tests PRIVATE
 # nothing. Catch2's amalgamated runner returns non-zero on any failure, so a
 # single add_test gates correctly. `ctest --no-tests=error` guards an empty suite.
 add_test(NAME turbo_ocr_unit COMMAND turbo_ocr_tests)
+if(APPLE)
+    # The accelerated layout path's gate. Every accuracy/golden test runs with
+    # DISABLE_COREML=1 (deterministic exact-match), so a CoreML EP regression
+    # (ORT 1.24.4 NaN'd every layout row into a silent empty page) is invisible
+    # to them — this entry runs the hidden [coreml-smoke] test in its OWN
+    # process, WITHOUT that env, and fails if CoreML does not attach or does
+    # not agree with the CPU provider. Own process is load-bearing: the latch
+    # test in test_picodet_decode wedges CoreML process-wide.
+    add_test(NAME layout_coreml_smoke COMMAND turbo_ocr_tests "[coreml-smoke]")
+    set_tests_properties(layout_coreml_smoke PROPERTIES
+        SKIP_RETURN_CODE 4
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+endif()
 
 # In the CPU build the test binary links turbo_ocr_common (not turbo_ocr_cpu),
 # so it doesn't inherit USE_CPU_ONLY — define it here so GPU-only test files
@@ -787,6 +801,20 @@ if(USE_CPU_ONLY)
     )
     target_link_libraries(turbo_ocr_cpu PUBLIC turbo_ocr_common ${ONNXRUNTIME_LIB}
         Threads::Threads)
+    # ORT >= 1.27 removed the public migraphx/rocm provider factory headers;
+    # their C shims are declared in onnxruntime_c_api.h and EXPORTED only by a
+    # ROCm build of the library — so EP presence is a LINK question, not a
+    # header question. Probe the resolved library and let ort_engine.cpp key
+    # off the result (its __has_include fallback still covers pre-1.27 ROCm
+    # ORTs, whose c_api.h lacks the declaration).
+    include(CheckLibraryExists)
+    check_library_exists("${ONNXRUNTIME_LIB}"
+        OrtSessionOptionsAppendExecutionProvider_MIGraphX ""
+        TURBO_ORT_HAS_MIGRAPHX)
+    if(TURBO_ORT_HAS_MIGRAPHX)
+        message(STATUS "ONNX Runtime exports the MIGraphX EP — ORT_EP=migraphx enabled")
+        target_compile_definitions(turbo_ocr_cpu PRIVATE TURBO_HAVE_MIGRAPHX)
+    endif()
 
     # In-process PDFium text work — text-layer extraction, mode=auto_verified,
     # and the searchable-PDF writer. Pure library calls, so it builds on every
@@ -823,17 +851,24 @@ if(USE_CPU_ONLY)
     # the pair together, rather than linking fine and dying on #include.
     find_path(TURBOJPEG_INCLUDE_DIR turbojpeg.h
         HINTS /opt/homebrew/opt/jpeg-turbo/include /usr/local/opt/jpeg-turbo/include)
+    # BOTH TUs compile unconditionally: pdf_ppm is plain C++, and the page
+    # encoder now carries an OpenCV-JPEG fallback. They used to sit inside the
+    # turbojpeg conditional, which made a box without libturbojpeg-dev fail at
+    # LINK (ppm_max_pixels / encode_page_image are referenced unconditionally
+    # by the renderer and region extract) — a missing OPTIONAL dependency must
+    # cost speed, never the build. First hit: the ROCm bring-up pod.
+    target_sources(turbo_ocr_cpu PRIVATE
+        src/pdf/render/pdf_ppm.cpp
+        src/image/page_image_encoder.cpp)
+    set(TURBO_HAVE_PAGE_EXPORT ON CACHE INTERNAL "")
     if(TURBOJPEG_LIB AND TURBOJPEG_INCLUDE_DIR)
-        target_sources(turbo_ocr_cpu PRIVATE
-            src/pdf/render/pdf_ppm.cpp
-            src/image/page_image_encoder.cpp)
+        target_compile_definitions(turbo_ocr_cpu PRIVATE TURBO_HAVE_TURBOJPEG)
         target_include_directories(turbo_ocr_cpu PUBLIC ${TURBOJPEG_INCLUDE_DIR})
         target_link_libraries(turbo_ocr_cpu PUBLIC ${TURBOJPEG_LIB})
-        set(TURBO_HAVE_PAGE_EXPORT ON CACHE INTERNAL "")
     else()
-        message(STATUS "libturbojpeg not found — PDF page-image export disabled "
-                       "(install jpeg-turbo to enable)")
-        set(TURBO_HAVE_PAGE_EXPORT OFF CACHE INTERNAL "")
+        message(STATUS "libturbojpeg not found — JPEG page export uses the "
+                       "slower OpenCV encoder (install jpeg-turbo for the "
+                       "fast path)")
     endif()
 
     # The DAEMON page renderer is Linux-bound: pdf_daemon drives worker
@@ -1409,15 +1444,15 @@ if(TURBO_BACKENDS)
     # to validate. Warn loudly rather than let anyone mistake it for exercised
     # code; see the per-backend note at the target definition.
     if(amd IN_LIST TURBO_BACKENDS)
-        # AMD is IMPLEMENTED but UNVERIFIED: it has never been configured or
-        # compiled — no ROCm, no hipcc, no AMD GPU on the machines this was
-        # written on. It is a real target (not a FATAL_ERROR) so an operator with
-        # ROCm can build it; it is loud so nobody mistakes it for exercised code.
-        # NOTE: ROCm 7.14 moved to the modular "TheRock" build system — verify
-        # the HIP sources against that layout on first bring-up.
-        message(WARNING
-            "Backend 'amd' is UNVERIFIED — never configured or compiled on ROCm "
-            "hardware. Needs hipcc + MIGraphX. See src/backends/amd/README.md.")
+        # First hardware bring-up done 2026-08-24 on an MI300X (gfx942, ROCm
+        # 7.1.1 / MIGraphX 2.14): all four stage goldens, cross-backend
+        # conformance and the FUNSD accuracy gate (F1 85.21% vs floor 85.0)
+        # PASS — correctness is verified. What is NOT yet measured on
+        # hardware: throughput, the server soak, and the ORT+MIGraphX-EP
+        # onnx mode. Session record + traps: src/backends/amd/BRINGUP.md.
+        message(STATUS
+            "Backend 'amd': correctness hardware-verified (MI300X, 2026-08-24); "
+            "throughput/soak not yet measured — see src/backends/amd/BRINGUP.md.")
     endif()
     if(apple IN_LIST TURBO_BACKENDS AND NOT APPLE)
         message(FATAL_ERROR "TURBO_BACKENDS contains 'apple' but this is not an Apple platform")

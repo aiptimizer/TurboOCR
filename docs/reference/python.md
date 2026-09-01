@@ -55,9 +55,52 @@ Japanese ([model selection](../models/selection.md)).
 | `use_cls` | Run the 0°/180° line classifier on every line |
 | `mode` | `"native"`/`"ultra"` = the vendor graph engine (TensorRT / MPSGraph / OpenVINO blob — fastest, needs a one-time build); `"onnx"`/`"fast"` = the ONNX model on that vendor's ORT provider, no graph build; `"auto"` takes native when its artefact exists. Resolved value: `info()["mode"]` |
 | `replicas` | Independent native pipelines behind a checkout queue — one pipeline is single-flight, so this is where concurrency comes from. Each replica holds its own model copy in memory. `replicas=3` measured ~2.4× one replica (94% of the server's multi-replica throughput) on Apple silicon |
-| `layout` / `tables` / `formulas` | Load the optional stage models at construction (tables/formulas imply layout). Per-call opt-in still applies at `read()` |
+| `layout` / `tables` / `formulas` | **Load** the optional stage models and make those requests legal. They do **not** run unless a call asks — see *Load is not Run* below. tables/formulas imply layout |
 | `autorotate` | Load the page-orientation model (0/90/180/270). Applies to `read()` **and** the PDF paths: each rendered page is detected, rotated upright before OCR, and the angle lands in `PageResult.orientation`. Deliberately **opt-in**: measured on the fixture corpus, the classifier false-fires (180°) on 2 of 19 upright images (a menu photo and a multi-language page) even through its confidence gate — rotating a correct page is worse than leaving a rotated one — and costs roughly +3 ms/page (cpu tiny) to +11 ms/page (apple tiny). Scanned-document corpora measure clean (0 false positives on rendered PDF pages) |
 | `keep_image` | Keep each page's raster on the result (needed for `save_overlay` / `save_searchable_pdf` / `draw`). Default is per path: `read()` keeps it, `read_pdf`/`read_batch` **drop** it (a raster is ~6 MB per page at 150 DPI — long documents retained GBs). Set it here to override both, or per call |
+
+### Load is not Run
+
+**The constructor decides which models are in memory and which requests are
+legal. The call decides which output stages run.**
+
+```python
+plain  = turboocr.OCR()
+loaded = turboocr.OCR(layout=True, tables=True, formulas=True)
+
+assert plain.read(img).to_dict() == loaded.read(img).to_dict()   # both ~61 ms
+loaded.read(img, tables=True)                                    # ~434 ms, because you asked
+plain.read(img, tables=True)                                     # ValueError: model not loaded
+```
+
+Constructing an engine with more models never changes what a call returns — only
+what a call is *allowed* to ask for. This matches the HTTP and gRPC surfaces,
+which have always worked this way (a request without `?layout=1` does not get
+layout, however many models the server has resident).
+
+Two consequences worth knowing:
+
+* `read(img, layout=False, tables=True)` raises `ValueError`. Tables and formulas
+  are recognized *inside* layout regions, so asking for them with layout off is a
+  contradiction rather than a preference.
+* **`autorotate` is the one exception, deliberately.** It is input preparation —
+  it rotates the pixels every other stage then sees — not an output stage, and it
+  never reaches the shared request gate. It stays inherited from the constructor,
+  so `OCR(autorotate=True)` keeps straightening pages without a per-call flag.
+  `page.stages` records whether it ran.
+
+Stage costs, so the trade is visible at the call site (M3 Max, apple backend,
+tiny tier, a text-dense letter, medians of 5):
+
+| request | time |
+|---|---|
+| `read(img)` — text only | **61 ms** |
+| `read(img, layout=True)` | 329 ms |
+| `read(img, layout=True, tables=True, formulas=True)` | 418 ms |
+
+Layout is ~82% of a full parse: a fixed 800×800 pass whose cost does not shrink
+with page size, and on Apple it is not overlapped with recognition. Skipping it is
+a **5.4× speedup**, which is why it must be asked for rather than inherited.
 
 ## Backends
 
@@ -67,14 +110,15 @@ what the installed wheel carries.
 
 | `backend=` | Runs | Notes |
 |---|---|---|
-| `"auto"` *(default)* | The installed wheel's best default | On the NVIDIA wheels this resolves to **`"turbo"`** — the first run builds and caches a TensorRT engine (one-time; `TRT_ENGINE_CACHE`, default `~/.cache/turbo-ocr`). Elsewhere: the CPU path |
+| `"auto"` *(default)* | The installed wheel's best default | On the NVIDIA wheels this resolves to **`"tensorrt"`** — the first run builds and caches a TensorRT engine (one-time; `TRT_ENGINE_CACHE`, default `~/.cache/turbo-ocr`). Elsewhere: the CPU path |
 | `"cpu"` | ONNX Runtime, MLAS | Works on every wheel |
 | `"cuda"` | ORT CUDA execution provider | NVIDIA wheels; instant start, no engine build |
-| `"turbo"` (`"tensorrt"`, `"trt"`) | Native TensorRT engine | NVIDIA wheels; peak throughput, one-time cached engine build. On wheels without the nvidia engine it raises `BackendUnavailable` (it used to silently run on CPU) |
+| `"tensorrt"` (`"trt"`, `"nvidia"`; legacy `"turbo"`) | Native TensorRT engine | NVIDIA wheels; peak throughput, one-time cached engine build. On wheels without the nvidia engine it raises `BackendUnavailable` (it used to silently run on CPU) |
 | `"openvino"` (`"ov"`) | **Native OpenVINO engine** on the openvino wheel; the ORT OpenVINO EP on builds that carry it | `device=` picks `CPU`/`GPU`/`NPU`; the OpenVINO runtime arrives as the wheel's own pip dependency, found automatically |
 | `"intel"` | The native intel engine ONLY | Unlike `"openvino"` it has no EP fallback: on wheels without the engine it raises `BackendUnavailable` naming turboocr-engine-openvino |
 | `"apple"` | The Apple backend, in one of two modes — see below | macOS builds of the cpu wheel only |
-| `"rocm"` / `"migraphx"` | ORT ROCm / MIGraphX EPs | rocm wheel (not yet hardware-verified) |
+| `"amd"` | Native MIGraphX engine | rocm wheel. Hardware-verified on an MI300X (all goldens, cross-backend conformance, the FUNSD accuracy gate). Layout runs the shared host stage (MIGraphX cannot parse that model — see `src/backends/amd/BRINGUP.md`) |
+| `"rocm"` / `"migraphx"` | ORT ROCm / MIGraphX EPs | Needs an onnxruntime built with the MIGraphX EP (none is published officially; a working source-build recipe is in `src/backends/amd/BRINGUP.md`). Not yet hardware-verified |
 
 Asking for a backend the installed wheel cannot run raises
 `BackendUnavailable` naming the wheel that can.
@@ -103,7 +147,7 @@ page = ocr.read(image, *, drop_score=0.5, rotate=0, layout=None,
                 autorotate=None, text=True, keep_image=None)
 ```
 
-`image` is a path, bytes, NumPy array, or PIL image. `layout=True` adds
+`image` is a path, bytes, NumPy array, or PIL image. **A NumPy array is read as BGR** (OpenCV's order), everything else as RGB — so `read(np.array(Image.open(p)))` silently OCRs channel-swapped colour and gives different text from `read(p)`. Pass the PIL image itself, or `cv2.imread(p)`, or swap with `arr[..., ::-1]`. `layout=True` adds
 layout regions; `tables=True` / `formulas=True` return HTML / LaTeX regions
 (the matching `OCR(...)` flag must have loaded the model);
 `reading_order=True` needs the layout model too (`OCR(layout=True)` — the
@@ -114,14 +158,15 @@ layout-only run — validated by the same shared option gate as the HTTP
 ignored.
 
 ```python
-doc = ocr.read_batch(images, *, batch_size=8, progress=None,
+doc = ocr.read_batch(images, *, layout=None, tables=None, formulas=None,
+                     reading_order=False, batch_size=None, progress=None,
                      on_error="raise", keep_image=None, ...)
 ```
 
-Images go through the native whole-batch submission in groups of
+Stage flags work exactly as on `read()` — they are per-call requests, not inherited from the constructor (*Load is not Run*), so `read_batch(images, tables=True)` and `read_pdf(pdf, layout=True)` are how those paths ask for structure. Images go through the native whole-batch submission in groups of
 `batch_size` (the server's `/ocr/batch` chunking), so the detector sees a
 real batch. Requests needing per-image stages (layout, tables, formulas,
-autorotate) fall back to one-at-a-time. `progress=True` logs to stderr, or
+reading_order, autorotate) fall back to one-at-a-time. `progress=True` logs to stderr, or
 pass a callable `progress(done, total)`. `on_error="skip"` contains a
 failing image to its own page — an empty `PageResult` with a
 `page_failed: ...` warning — instead of aborting the batch; the default
@@ -130,7 +175,8 @@ started.
 
 ```python
 doc = ocr.read_pdf(pdf, *, dpi=150, pages=None, max_pages=None,
-                   mode="ocr", on_error="raise", autorotate=None,
+                   mode="ocr", layout=None, tables=None, formulas=None,
+                   reading_order=False, on_error="raise", autorotate=None,
                    keep_image=None, password=None, ...)
 ```
 
@@ -169,7 +215,11 @@ expose no reading_order parameter today).
 `geometric` mode, which does apply its gate; the server's `auto_verified`
 mode is currently aliased to `auto` there and has no Python spelling).
 Because PDFium is globally single-threaded, `replicas` and async buy nothing
-in this mode — the speed comes from skipping rasterization and OCR.
+in this mode — the speed comes from skipping rasterization and OCR. Since it
+never renders and never runs a model, combining it with `layout`/`tables`/
+`formulas`/`reading_order` raises `ValueError` instead of returning empty
+lists — `mode="auto"` is the one that serves the text layer *and* runs
+structure stages on the rendered raster.
 
 `pdf_to_searchable()` always renders regardless of `mode` (its output embeds
 the page rasters). The HTTP server's `/ocr/pdf` also defaults to `ocr`, so
@@ -314,6 +364,7 @@ The page behaves as a sequence of its lines: `for line in page`, `page[0]`,
 | `formulas` | `FormulaRegion`s (`latex`, `score`, `box`; `confidence` aliases `score`) — with `formulas=True` |
 | `reading_order` | Engine reading-order indices (with `read(reading_order=True)`; empty on PDF pages) |
 | `image` | The source raster when kept (see `keep_image`); not serialized |
+| `stages` | Which pipeline stages actually **ran** for this page (`text`, `layout`, `reading_order`, `tables`, `formulas`, `autorotate`) — recorded, not inferred. An empty `layout` list is ambiguous between "never ran" and "ran and found nothing" (a blank scan legitimately yields zero regions), so the record is kept explicitly and serialized. `filter()` drops `reading_order` from both the list and the record |
 | `warnings` | Degradation notes (e.g. recognition produced boxes but no text; `page_failed: ...` marks a page contained by `on_error="skip"`; `no_text_layer:` marks an empty `mode="text"` page) |
 | `filter(min_confidence=…, contains=…, predicate=…)` | A new `PageResult` keeping only matching lines (page context carried over) |
 | `to_dict()` | JSON-shaped dict, same keys as the server's response |
@@ -326,7 +377,7 @@ The page behaves as a sequence of its lines: `for line in page`, `page[0]`,
 | `save_searchable_pdf(path)` | Searchable PDF. A page WITH its raster becomes image + invisible text (the facsimile deliverable); a page WITHOUT one (text-layer pages under `mode="auto"`/`"text"`, or `keep_image=False` reads) becomes a VISIBLE re-typeset text-only page. For guaranteed facsimile output use `pdf_to_searchable()` or read with `keep_image=True, mode="ocr"` |
 | `to_pdf_bytes()` | The same searchable PDF as bytes (e.g. for a web response) |
 | `to_html()` | The page as structured HTML (layout-aware when layout ran) |
-| `from_dict(d)` / `from_json(s)` | Rebuild a `PageResult` from its serialized form (classmethods). Accepts BOTH key spellings: this library's `box`/`label`/`score` and the HTTP server's `bounding_box`/`class`/`confidence`, so a server response parses directly |
+| `from_dict(d)` / `from_json(s)` | Rebuild a `PageResult` from its serialized form (classmethods). Accepts BOTH key spellings: this library's `box`/`label`/`score` and the HTTP server's `bounding_box`/`class`/`confidence`, so a server response parses directly. Text, boxes, layout, tables, formulas, page numbers and `dpi` round-trip exactly; **confidences are serialized to 4 decimal places** (matching the server's wire format), so a restored score can differ from the in-memory one by <1e-4 |
 
 ### `DocumentResult` — a PDF or an image batch
 
@@ -353,11 +404,19 @@ The engine wheel installs a `turboocr` command:
 ```bash
 turboocr doctor           # detect hardware, name the right wheel + install line
 turboocr models           # list available models/tiers
+turboocr warmup           # pay model download + engine compilation once, now
 turboocr ocr page.png     # OCR images
 turboocr pdf report.pdf   # OCR a PDF
 turboocr info             # build the engine, print its resolved config (JSON)
 turboocr version
 ```
+
+`warmup` exists because the GPU engines compile models per machine on first
+use (TensorRT engines, MIGraphX programs, CoreML specialization) — minutes on
+a cold box. Run it once at install or image-build time (with the same
+`--backend`/`--model`/stage flags you will serve with) and the first real
+document is fast; once the caches are warm it costs seconds and is safe to
+re-run.
 
 Shared engine flags on `ocr`/`pdf`/`info`: `--backend`, `--model`/`--lang`/
 `--tier`, `--replicas N` (parallel pages/images), `--layout`, `--tables`,
@@ -393,6 +452,48 @@ the pixel ceiling, encrypted PDFs with a wrong/missing password), a
 missing file is `FileNotFoundError`, and using a closed engine is
 `RuntimeError`. Catch `(TurboOCRError, ValueError)` for "anything this
 library refuses".
+
+## Logging
+
+The library is **silent by default** on both stdout and stderr: every
+configuration measured — `cpu` and `apple`, with `layout`, `tables`,
+`formulas`, `autorotate`, `use_cls` individually and all together, reading
+images and PDFs in every mode — emits **zero** unrequested lines.
+`OCR(verbose=True)` or `LOG_LEVEL=info` brings the diagnostics back (they are
+silenced, not deleted); `LOG_LEVEL` accepts `debug|info|warn|error` and
+defaults to `warn`.
+
+One exception is outside the library's control: with **`replicas>1` on the
+apple backend**, macOS emits a burst of `Context leak detected, CoreAnalytics
+returned false` on stderr when CoreML sessions are created. It comes from
+Apple's CoreAnalytics, not from TurboOCR; it is asynchronous, so a scoped
+redirect cannot reliably catch it, and `OS_ACTIVITY_MODE=disable` has no
+effect. It is bounded — construction-time only, it does not scale with pages
+or documents — and `replicas=1` never triggers it.
+
+### Accelerator degradation
+
+The layout stage treats CoreML as an **accelerator, not a precondition**. If the
+accelerated session fails to build — which happens transiently under GPU/ANE
+contention, since the model compiles as many independent CoreML partitions —
+the stage rebuilds once on the CPU provider instead of disappearing. Layout is
+then slower but *available*, its output is equivalent (the CPU provider is what
+every non-Apple backend runs by design), and the fallback is announced at WARN
+with the original error. It is also queryable: `info()["layout_coreml_dropped"]`
+is `True` once any layout session in the process has fallen back (`doctor`
+cannot show this — it runs in a fresh process, where the latch is always
+clear).
+
+Two deliberate properties:
+
+* **Out-of-memory is never retried.** A failed allocation is not contention, and
+  the CPU build needs more host memory than the accelerated one, so retrying
+  would turn an honest load failure into a success that dies later.
+* **The drop is process-wide and one-way.** Replicas each build their own layout
+  session, so once any of them falls back, every later load in that process
+  skips CoreML too — otherwise a pool could answer the same page differently
+  depending on which replica served it. Re-acquiring the accelerator means a new
+  process.
 
 ## Threading and processes
 

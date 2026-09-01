@@ -110,7 +110,7 @@ void nms_inplace(std::vector<Candidate> &cand, float iou_thr) {
 struct FieldModel::Impl {
   FieldModelOptions opt;
 
-  Ort::Env env{ORT_LOGGING_LEVEL_WARNING, "FFDetr"};
+  Ort::Env env{ORT_LOGGING_LEVEL_ERROR, "FFDetr"};
   std::unique_ptr<Ort::Session> session;
   Ort::AllocatorWithDefaultOptions allocator;
   Ort::MemoryInfo memory_info{

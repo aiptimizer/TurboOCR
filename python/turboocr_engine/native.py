@@ -352,14 +352,17 @@ _BACKEND_TABLE: Tuple[BackendAlias, ...] = (
     # CPU-only wheel behaves exactly as it did before this table existed.
     BackendAlias("apple", ("metal", "mps"), "CoreMLExecutionProvider",
                  engine="apple", summary="Apple (Metal/MPSGraph)"),
-    # "turbo"/"tensorrt"/"trt" — and, since 2026-08-12, the DEFAULT "auto"
-    # (via _AUTO_SEAM_PREFERENCE) — reach the nvidia SEAM backend when this build
+    # "tensorrt" (the canonical user spelling — it names the actual engine,
+    # consistent with "cuda"/"openvino" naming technologies), plus "trt" and
+    # the legacy "turbo" — and, since 2026-08-12, the DEFAULT "auto" (via
+    # _AUTO_SEAM_PREFERENCE) — reach the nvidia SEAM backend when this build
     # has it compiled in (resolve_engine checks native_backends()); on a
     # CPU-only wheel they fall through to the honest CPU-fallback branch in
-    # configure_backend. Without these aliases, backend="turbo" could NEVER
+    # configure_backend. Without these aliases, backend="tensorrt" could NEVER
     # reach the nvidia backend — even on a build that shipped it — and the
     # fallback message blamed a missing wheel the user might actually have.
-    BackendAlias("nvidia", ("turbo", "tensorrt", "trt"), engine="nvidia",
+    # "turbo" stays accepted forever: a rename must never break a caller.
+    BackendAlias("nvidia", ("tensorrt", "trt", "turbo"), engine="nvidia",
                  summary="NVIDIA (TensorRT)"),
     BackendAlias("intel", (), engine="intel", summary="Intel (OpenVINO backend)"),
     BackendAlias("amd", (), engine="amd", summary="AMD"),
@@ -648,7 +651,7 @@ def configure_backend(
         if backend in ("turbo", "tensorrt", "trt"):
             # Not swallowed into plain CPU silently: on a Mac wheel there is
             # no nvidia seam backend, so say what the caller actually got.
-            return "turbo", "CPU (turbo/TensorRT needs a turboocr-engine-cuda12/13 wheel)"
+            return "tensorrt", "CPU (tensorrt needs a turboocr-engine-cuda12/13 wheel)"
         if backend in ("auto", "fast", "onnx", "default", ""):
             return "cpu", "CPU (MLAS)"
         # An EXPLICIT EP request (xnnpack, dnnl, an unknown name) falls
@@ -673,7 +676,7 @@ def configure_backend(
         # backend in this build (otherwise the engine branch returned) — so
         # the fallback message is now true by construction.
         env.pop("ORT_EP", None)
-        return "turbo", "CPU (turbo/TensorRT needs a turboocr-engine-cuda12/13 wheel)"
+        return "tensorrt", "CPU (tensorrt needs a turboocr-engine-cuda12/13 wheel)"
     if backend in _EP_ALIASES:
         ep = _EP_ALIASES[backend]
         env["ORT_EP"] = ep

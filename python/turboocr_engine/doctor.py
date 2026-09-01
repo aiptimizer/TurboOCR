@@ -61,7 +61,7 @@ _RECOMMEND: dict = {
     # (native.resolve_engine). Starring the no-build CUDA row described a
     # default the build no longer has.
     "nvidia": ("tensorrt", PACKAGE_CUDA12, "NVIDIA GPU detected — the NVIDIA engine wheel carries the native TensorRT engine (the default: backend='auto' picks it, and the first run builds+caches the engine) plus the CUDA execution provider as the instant-start backend='cuda' fallback."),
-    "amd": ("rocm", PACKAGE_ROCM, "AMD GPU detected — turboocr-engine-rocm carries the ROCm/MIGraphX execution provider (Linux only)."),
+    "amd": ("rocm", PACKAGE_ROCM, "AMD GPU detected — turboocr-engine-rocm carries the native MIGraphX engine (backend='amd', hardware-verified on MI300X). Requires a system ROCm >= 6.4 install on Linux; the wheel does not bundle ROCm."),
     "intel": ("openvino", PACKAGE_OPENVINO, "Intel GPU/NPU detected — turboocr-engine-openvino carries the OpenVINO execution provider, the best acceleration on Intel silicon."),
     "apple": ("cpu", PACKAGE_CPU, "Apple Silicon — the CPU engine wheel is the right one; its macOS arm64 build carries the Apple backend, and there is no separate Apple wheel."),
     "cpu": ("cpu", PACKAGE_CPU, "No supported accelerator detected — the CPU engine wheel works everywhere."),
@@ -370,7 +370,25 @@ def _render_plain(report: dict) -> None:
 
 
 def available_backends() -> List[str]:
-    """Backend keys whose EPs are present in the ONNX Runtime that will
-    actually run inference (the native extension's, when it is built)."""
+    """Backend names ``OCR(backend=...)`` can actually reach on this build.
+
+    This is the UNION of two different things, and reporting only the first
+    was actively misleading on macOS: the ONNX Runtime execution providers
+    compiled into the extension, AND the device backends in the C++ seam
+    registry (``native.native_backends()``). On an Apple wheel the EP list is
+    ``['coreml', 'cpu']`` — so a user discovering backends through this
+    function was pointed at ``coreml``, measured the SLOWEST option of
+    everything available (1.68 pages/s on an 83-page document), and never
+    saw ``apple``, the native Metal/MPSGraph seam that measured 27.9 pages/s
+    on the same document. The seam names come first because they are the
+    fast path where they exist."""
+    seam: List[str] = []
+    try:
+        from . import native as _native
+
+        seam = [b for b in _native.native_backends() if b != "cpu"]
+    except Exception:  # pragma: no cover - extension missing: EPs only
+        seam = []
     avail = set(effective_providers()[0])
-    return [b.key for b in INSTALL_MATRIX if any(ep in avail for ep in b.ep_names)]
+    eps = [b.key for b in INSTALL_MATRIX if any(ep in avail for ep in b.ep_names)]
+    return seam + [e for e in eps if e not in seam]

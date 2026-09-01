@@ -1,5 +1,5 @@
 <p align="center">
-  <sub>v4 alpha · backends: NVIDIA, Apple (Metal + Neural Engine), Intel (OpenVINO), AMD (ROCm), CPU · AMD is not yet hardware-tested</sub>
+  <sub>v4 alpha · backends: NVIDIA, Apple (Metal + Neural Engine), Intel (OpenVINO), AMD (ROCm), CPU · all four GPU backends hardware-verified</sub>
 </p>
 
 <p align="center">
@@ -84,7 +84,22 @@ Full documentation: **[docs/](docs/index.md)**
 > image** — those paths build from this checkout. Full details in
 > **[the install guide](docs/getting-started/install.md)**.
 
-Picking a backend is two steps, the same on every path below:
+**The fastest path — Python, one line, nothing else to install.** The wheel
+is self-contained (OpenCV, ONNX Runtime and PDF support built in) and models
+download automatically on first use:
+
+```bash
+pip install --pre "turboocr[cpu]"   # Apple Silicon: [apple] · Intel: [openvino]
+turboocr ocr page.png               # or: turboocr pdf report.pdf -f markdown
+```
+
+`turboocr doctor` names the right extra for your hardware. On GPU backends,
+an optional `turboocr warmup` pays the one-time model download and engine
+compilation at install time so the first real document is fast.
+
+The rest of this section is the **server** story — Docker images and
+from-source builds per vendor. Picking a backend there is two steps, the same
+on every path below:
 
 1. **Build time — what gets compiled in.** `-DTURBO_BACKENDS="cpu;intel"` is a
    semicolon-separated list telling CMake which backends to compile into the
@@ -199,7 +214,7 @@ only sees the iGPU if you pass `--device /dev/dri`, so the image defaults to
 </details>
 
 <details>
-<summary><strong>AMD GPU (ROCm)</strong> &nbsp;·&nbsp; not yet hardware-tested</summary>
+<summary><strong>AMD GPU (ROCm)</strong> &nbsp;·&nbsp; hardware-verified on MI300X (all correctness gates + FUNSD accuracy gate)</summary>
 
 **Docker** (built from this repo):
 
@@ -253,17 +268,24 @@ hardware (install exactly one backend; the engine wheels are mutually
 exclusive):
 
 > **Alpha status: `[cpu]`, `[apple]` and `[openvino]` install from PyPI
-> today** (with `--pre` — see below). The NVIDIA `[cuda12]` / `[cuda13]` extras resolve once
-> PyPI approves the file-size requests for those wheels; `[rocm]` is
-> deliberately unpublished. For a backend that is not on PyPI yet, this is the
-> working path:
+> today** (with `--pre` — see below). The NVIDIA and AMD wheels are hosted on
+> a [GitHub release](https://github.com/aiptimizer/TurboOCR/releases/tag/wheels-4.0.0a7)
+> while PyPI's file-size requests for the NVIDIA wheels are pending
+> ([pypi/support#11962](https://github.com/pypi/support/issues/11962),
+> [#11963](https://github.com/pypi/support/issues/11963)) — same
+> distributions, resolvable by name through this repo's package index:
 
 ```bash
-# The helper builds AND repairs the wheel — a bare `pip wheel python/`
-# bundles no libraries and only runs on the machine that built it.
-scripts/python/build_backend_wheel.sh cpu     # cpu | cuda12 | cuda13 | openvino | rocm
-pip install build-wheels/cpu/fixed/*.whl
+pip install --pre turboocr-engine-cuda12 \
+  --extra-index-url https://aiptimizer.github.io/TurboOCR/simple/
+# cuda12 (driver R525+) | cuda13 (driver R580+) | rocm (needs system ROCm >= 6.4)
 ```
+
+The release page carries SHA256 digests and pinned direct-URL installs; the
+index links embed the digests, so pip verifies every download. When PyPI
+approves the size requests, the same names publish there and the release
+stays as a mirror. Building a wheel yourself also remains one command
+(`scripts/python/build_backend_wheel.sh <backend>`).
 
 The engine wheel is self-sufficient: `import turboocr_engine` gives you the
 full pipeline and the `turboocr` CLI without the umbrella package installed.
@@ -292,7 +314,8 @@ pip install --pre "turboocr[cpu]"        # or pin: turboocr[cpu]==4.0.0a7
 ```
 
 On NVIDIA, the engine wheel needs only an NVIDIA **driver** (no CUDA toolkit).
-Its default `backend="auto"` resolves to the native TensorRT engine: the
+Its default `backend="auto"` resolves to the native TensorRT engine
+(`backend="tensorrt"`): the
 **first** run builds an engine (~90 s on a 5090, longer on older cards) and
 caches it under `TRT_ENGINE_CACHE` (default `~/.cache/turbo-ocr`), so every
 later run starts fast. `backend="cuda"` is the instant-start ONNX Runtime

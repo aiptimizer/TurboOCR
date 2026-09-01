@@ -1,3 +1,4 @@
+#include "turbo_ocr/base/log/logger.h"
 #include "turbo_ocr/analysis/formula/ppformulanet/ort_formula_recognizer.h"
 
 #include <algorithm>
@@ -45,11 +46,13 @@ bool OrtFormulaRecognizer::load(const std::string &model_path,
   }
   tok_ = FormulaTokenizer::load(tokenizer_json);
   if (!tok_) {
-    std::cerr << "[CpuFormula] tokenizer load failed: " << tokenizer_json << '\n';
+    TOCR_LOG_ERROR("formula tokenizer load failed", "path", tokenizer_json);
     return false;
   }
   ready_ = true;
-  std::cerr << "[CpuFormula] CPU decode path ready (fused graph, ORT CPUExecutionProvider)\n";
+  // Success is INFO: a healthy stage announcing itself on stderr is
+  // noise in a library, and this one printed on every construction.
+  TOCR_LOG_INFO("formula CPU decode path ready (fused graph, ORT CPU EP)");
   return true;
 }
 

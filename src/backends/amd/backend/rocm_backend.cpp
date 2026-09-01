@@ -216,7 +216,7 @@ backend::StageSet RocmBackend::load_stages(const backend::BackendConfig &cfg) {
   }
   // Layout (optional).
   if (cfg.want_layout && !cfg.layout_model.empty()) {
-    auto lay = std::make_unique<RocmLayout>(deps);
+    auto lay = std::make_unique<HostLayoutOnHip>(deps);
     if (lay->load(cfg.layout_model)) {
       set.layout = std::move(lay);
       set.available.optional.set(capability::CapabilityId::Layout, true);

@@ -81,7 +81,16 @@ def user_cache_dir() -> str:
 
 
 def _local_to_asset(rel: str) -> str:
-    """Map a catalog-relative path to its release asset name."""
+    """Map a catalog-relative path to its release asset name.
+
+    The mapping must produce the EXACT published asset name: a miss is not a
+    softer download, it is a 404 (formula/... mapped to a bare
+    "inference_trt.onnx" for an asset published as "ppformulanet_s_trt.onnx",
+    so OCR(formulas=True) with a cold cache could never provision itself), and
+    a case miss silently skips SHA256 verification (GitHub serves asset URLs
+    case-insensitively, so "SLANeXt_wired_encoder.onnx" downloaded the
+    lowercase-published asset fine — but the sums file is keyed by the exact
+    name, so `expected` came back None and the pin was never checked)."""
     rel = rel.replace("\\", "/")
     if rel.startswith("rec/") and rel.endswith("/rec.onnx"):
         lang = rel.split("/")[1]
@@ -89,8 +98,13 @@ def _local_to_asset(rel: str) -> str:
     if rel.startswith("rec/") and rel.endswith("/dict.txt"):
         lang = rel.split("/")[1]
         return f"dict-{lang}.txt"
-    if rel.startswith("layout/"):
-        return os.path.basename(rel)
+    if rel == "formula/ppformulanet_s/inference_trt.onnx":
+        return "ppformulanet_s_trt.onnx"
+    if rel == "formula/ppformulanet_s/tokenizer.json":
+        return "ppformulanet_s_tokenizer.json"
+    if rel.startswith("table/slanext_encoder/"):
+        # published lowercase; the local (cache/C++-expected) name keeps its case
+        return os.path.basename(rel).lower()
     return os.path.basename(rel)
 
 
@@ -194,18 +208,34 @@ class ModelStore:
         Never raises: native mode is an upgrade, and every failure path
         (no such asset published, offline, bad archive) leaves the engine on
         its CoreML fallback exactly as before."""
+        # WHY it was unavailable, for the caller's error message. None means
+        # "provisioned, or not applicable on this platform/model". Set on every
+        # exit so a stale value from a previous call can never be reported.
+        self.apple_native_reason: Optional[str] = None
         try:
             if sys.platform != "darwin" or platform.machine() != "arm64":
-                return False
+                return False  # not applicable: no reason to report
             if entry.name not in ("tiny", "small", "medium"):
-                return False  # script models have no native bundles
+                self.apple_native_reason = (
+                    f"the '{entry.name}' model has no Apple native export "
+                    "(only tiny/small/medium do)")
+                return False
             det_export = os.path.splitext(resolved.det)[0]
             if self._det_export_present(det_export):
                 return True
             cache = os.path.abspath(self.cache_dir)
             if os.path.abspath(os.path.dirname(resolved.det)) != cache:
+                self.apple_native_reason = (
+                    f"models_dir={os.path.dirname(resolved.det)!r} is a "
+                    "user-managed directory, and the Apple native export "
+                    f"({os.path.basename(det_export)}/graph.json) is not in "
+                    "it. Nothing is ever downloaded into a directory you "
+                    "manage")
                 return False
             if not self.allow_download:
+                self.apple_native_reason = (
+                    "the Apple native export is not in the cache and "
+                    "allow_download=False")
                 return False
             rel = f"apple_native_{entry.name}.tar.gz"
             archive = os.path.join(self.cache_dir, rel)
@@ -243,10 +273,24 @@ class ModelStore:
                         raise
                 finally:
                     fcntl.flock(lk, fcntl.LOCK_UN)
-            return self._det_export_present(det_export)
+            if self._det_export_present(det_export):
+                return True
+            # Download + extraction "succeeded" yet the export is not there
+            # (an archive missing its graph.json, say). Without a reason the
+            # constructor's refusal is skipped and the engine silently falls
+            # back to CoreML — the exact trap the reason exists to close.
+            self.apple_native_reason = (
+                f"the downloaded bundle extracted without error but "
+                f"{os.path.basename(det_export)}/graph.json is still missing "
+                "from the cache — the archive appears incomplete. Delete "
+                f"{archive!r} to force a re-download")
+            return False
         except Exception as exc:  # pragma: no cover - network/broken archive
-            print(f"[turboocr] apple native bundle unavailable ({exc}); "
-                  "backend='apple' uses the CoreML fallback.", file=sys.stderr)
+            # No stderr print: the CALLER decides what to do about it and owns
+            # the message. A library must not narrate to the host application.
+            self.apple_native_reason = (
+                f"the Apple native bundle could not be provisioned "
+                f"({type(exc).__name__}: {exc})")
             return False
 
     def _extract_apple_bundle(self, archive: str) -> None:

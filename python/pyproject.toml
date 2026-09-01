@@ -80,7 +80,10 @@ minimum-version = "1.0"
 # incremental. Safe to delete anytime.
 build-dir = "../build-wheels/skbuild-{wheel_tag}"
 cmake.source-dir = ".."
-cmake.args = ["-DBUILD_PYTHON=ON", "-DUSE_CPU_ONLY=ON"]
+# Wheels build only the _turboocr extension: the server (and its Drogon
+# dependency) is never part of a wheel, so its configure-time find_package
+# must not run in wheel environments.
+cmake.args = ["-DBUILD_PYTHON=ON", "-DUSE_CPU_ONLY=ON", "-DBUILD_SERVER=OFF"]
 build.targets = ["_turboocr"]
 install.components = ["python"]
 wheel.packages = ["turboocr_engine"]

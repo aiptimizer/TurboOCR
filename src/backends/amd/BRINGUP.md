@@ -1,5 +1,33 @@
 # AMD bring-up runbook — hourly-billed box, minimal paid time
 
+**STATUS (updated 2026-08-26, after the second hardware session):**
+**correctness RE-PROVEN and tiny throughput MEASURED on MI300X.** All gates
+green on the first try (4 goldens, conformance, FUNSD F1 85.06–85.15%, unit
+suite) and the Python binding is suite-green on hardware (123 passed / 0
+failed, 3.12 stable-ABI build). The first PUBLISHABLE throughput number:
+**tiny = 105.5 img/s, F1 85.15%** (18.95 s window, 0.03% clock skew,
+threads=5) vs 415.8 on a 5090 and 63.7 on M3 Max. small/medium windows and
+the onnx-mode run were eaten by MIGraphX compile time (see the round-2
+session notes); `mxr_cache_gfx942.tgz` (~85 compiled programs) is archived —
+**round 3 MUST restore it to ~/.cache/turbo-ocr first**, making those
+measurements minutes, not hours. Bring-up itself is now ONE COMMAND (below).
+
+**One command replaces phases A–F** (added round 2, 2026-08-26):
+
+```bash
+rsync -az --exclude '/.git' --exclude '/build*' --exclude '/tmp' \
+      --exclude '/models' --exclude '/third_party/pdfium' \
+      <repo>/ pod:~/turbo/ && ssh pod \
+  'cd ~/turbo && bash scripts/setup/amd_pod_bootstrap.sh --gates --bench'
+```
+
+The script is idempotent by real probes (ROCm version, cmake version, a
+`<format>` compile test, installed-file checks), so a well-chosen image skips
+straight to the build and a failed run resumes where it stopped. Every trap
+in this file is encoded in it. `--with-ort` adds the onnx-mode runtime. The
+manual phases below remain as documentation of what it does and as the
+failure-triage guide.
+
 Written 2026-08-02, before the first hardware session. The goal of this file is
 that the paid GPU hours contain **only** the work that needs a GPU: every
 compile-class risk was already burned down on the dev machine (see "Already
@@ -168,3 +196,167 @@ scp home: `build/golden_amd_*.json`, `build/conformance.json`,
 log, and `rocminfo | head`. Update `docs/` + the gap doc with measured numbers
 and flip this file's status header. If the rental will be reused, also tar
 `~/.cache/turbo-ocr/mgx_*.mxr` (per-gfx — only reusable on the same arch).
+
+---
+
+## Second hardware session — 2026-08-26, RunPod MI300X (same host), ROCm 7.1.1
+
+~2 paid hours. Full detail + chronology: `tmp/amd-round2/SESSION_LOG.md`
+(kept on the dev machine with every artifact, pulled continuously — nothing
+was lost to pod death this time).
+
+**Proven:** every gate green FIRST TRY on a fresh pod (unit, det/cls/rec/
+layout goldens, backend_conformance, funsd_amd_tiny F1 85.06%); Python
+binding suite-green on hardware (123 passed / 27 skipped / 0 failed; 3.12
+stable-ABI `_turboocr.abi3.so`); first publishable throughput —
+**tiny 105.5 img/s @ F1 85.15%** (threads=5, 18.95 s window, 0.03% skew).
+The bring-up itself became `scripts/setup/amd_pod_bootstrap.sh` (one
+command), and the ORT>=1.27 MIGraphX-EP link-probe landed in CMakeLists +
+ort_engine.cpp (configure prints "ONNX Runtime exports the MIGraphX EP").
+
+**Not measured (compile time ate the window):** small/medium throughput
+windows, the onnx-mode scored run, the 5-min soak, and the wheel-on-hardware
+check. The dominant cost was MIGraphX compilation: ~100 programs, with
+det_small canvas graphs at MINUTES each. Round-3 rules: (1) restore
+`mxr_cache_gfx942.tgz` into `~/.cache/turbo-ocr` BEFORE anything runs;
+(2) NEVER run goldens/benches concurrently — parallel first-runs serialize
+on the GPU's compile lock (measured ~10x per-variant slowdown at ctest -j8);
+(3) `--count` clamps to the image set — size windows with
+`--threads 5 --repeat N`.
+
+**Round 3 is ONE command** — after the bootstrap, `scripts/setup/amd_round3.sh
+[mxr_cache.tgz] [rocm_wheel.whl]` runs the entire residual verification
+hands-free (cache restore -> gates -> all-tier bench -> python smoke ->
+onnx-mode -> server smoke + soak -> wheel install test), with every rule
+above baked in and all artifacts in ~/artifacts for the sync-home loop.
+
+## First hardware session — 2026-08-24, RunPod MI300X (gfx942), ROCm 7.1.1
+
+~80 paid minutes. The pod terminated before Phase F/G artifacts were synced
+home, so every number below is from the live logs; nothing else survived.
+
+### Proven (STOP-gates D and E cleared)
+
+- `turbo_backend_probe --list`: `amd cpu`; auto-detect -> `backend='amd'
+  device='hip' async=1 pool=5`.
+- **All four goldens PASSED** vs the cpu reference: det 16.4s, cls 17.3s,
+  rec 20.2s, layout 37.6s (times include first-compile warmup).
+- **backend_conformance PASSED** (18.9s).
+- **funsd_amd_tiny PASSED: F1 = 85.21%** against the provisional 85.0 floor
+  set blind on 2026-08-02. fp16 stayed ON; no accuracy fallback was needed.
+
+### NOT proven — round 2's entire job
+
+- **Throughput**: no valid number exists. (A 45.8 img/s tiny figure was
+  logged mid-session; it is contention-tainted — two benches plus goldens
+  shared the GPU — and its window was 1.1s where the runbook demands >=15s.
+  Do not cite it.) Reference bar: the same harness on a 5090 does 415.8 img/s.
+- **Phase G** (server + corrupt-input survival + soak): never completed.
+- **`--engine-mode onnx` on the GPU** (ORT 1.28.0 + MIGraphX EP): the ORT
+  build SUCCEEDED (recipe below) but the verification never ran.
+- The `.mxr` cache (~82 graphs) and the ORT build died with the pod.
+
+### Hardware-forced fixes (all in the tree, see git log)
+
+1. `MIGraphXEngine::load` no longer parses the model's DECLARED shapes —
+   MIGraphX materializes static shapes AT PARSE, and rec's placeholder width
+   fails its pooling ("POOLING: not enough padding"). I/O names now come from
+   a parse-only probe with `set_default_dim_value`, and nothing compiles at
+   load.
+2. `offload_copy=false` programs expose outputs as parameters
+   (`main:#output_N`) and `run_async` throws unless EVERY one is bound —
+   each variant now owns device output buffers.
+3. `.mxr` artifacts are validated against the requested input shapes on load
+   AND after compile — a stale pre-pinning artifact under a batched key
+   overran an 8-byte buffer (batch-64 cls key loading a batch-1 program).
+4. **Layout cannot run on MIGraphX at all** — its parser rejects the
+   PP-DocLayoutV3 export twice over (data-dependent post-NMS reshape;
+   an uninitialized-size_t op-builder bug at pinned dims). Layout now routes
+   through the shared host-ORT stage (`HostLayoutOnHip`, the Apple
+   `HostLayoutOnDevice` pattern) — goldens stay byte-comparable, and an
+   ORT+MIGraphX build can move it to GPU later inside the same design.
+5. `pdf_ppm.cpp`/`page_image_encoder.cpp` now build without libturbojpeg
+   (OpenCV JPEG fallback) — a missing optional dependency used to be a LINK
+   FAILURE, first hit on this pod.
+
+### Traps that burned paid time — round 2 must dodge every one
+
+- **Pick a pod image with ROCm >= 6.4 preinstalled.** The default image had
+  5.7; installing 7.1.1 via apt cost ~20 min.
+- **RunPod images put `/opt/cache/bin` (sccache) first in PATH** and it
+  serves STALE objects for rsynced, mtime-preserved sources — a "successful"
+  build with new symbols silently missing. `export SCCACHE_DISABLE=1
+  CCACHE_DISABLE=1` before every build, always.
+- **jammy binutils 2.38 cannot assemble ORT 1.28 MLAS** (AVX-NE-CONVERT).
+  Build ORT with `CC=amdclang CXX=amdclang++` and
+  `--compile_no_warning_as_error` (clang 20 trips -Werror in ORT's own
+  MIGraphX EP). Working invocation: `./build.sh --config Release
+  --build_shared_lib --parallel 96 --skip_tests --compile_no_warning_as_error
+  --use_migraphx --rocm_home /opt/rocm-X --migraphx_home /opt/rocm-X
+  --allow_running_as_root`.
+- **Prebuild ORT+MIGraphX and Drogon OFF-meter** (any x86 box with a ROCm
+  container) and ship binaries; both together cost ~45 paid minutes here.
+- **Sync artifacts home CONTINUOUSLY** (a 5-minute rsync loop), not at
+  teardown — this session lost its bench/soak evidence to a dead pod.
+- **Tar `~/.cache/turbo-ocr` home after warmup** — the .mxr set is per-gfx
+  reusable and is the single most expensive artifact on the box.
+- `--count 50` finishes in ~1s on an MI300X: size bench counts until the
+  measured window is >= 15s or the numbers are noise.
+- (round 2, same host) **`ssh.runpod.io` is a PTY-only proxy** — no exec, no
+  rsync/scp. Demand the "SSH over exposed TCP" connection (root@ip -p port)
+  before doing anything.
+- (round 2) **Ubuntu 22.04 pod images ship cmake 3.18 and g++ 11.** The tree
+  needs cmake >= 3.24 and `<format>` (= GCC 13 libstdc++). Fix in ~3 min:
+  `pip install cmake ninja` (conda bin precedes /usr/local in PATH) and
+  `add-apt-repository ppa:ubuntu-toolchain-r/test && apt install g++-13`,
+  then configure with `-DCMAKE_C_COMPILER=gcc-13 -DCMAKE_CXX_COMPILER=g++-13`.
+  (The 2026-08-02 prep container was Ubuntu 24.04, where GCC 13 is default —
+  that is why compile-verification never saw this.)
+- (round 2) When rsyncing the tree, `third_party/` must come along (clipper,
+  catch2, cli11, nlohmann, simdutf, wuffs are vendored SOURCES) — exclude only
+  `third_party/pdfium`, which `install_pdfium.sh` provisions pod-side.
+
+### Detail addenda from the session (for round 2 and upstream filing)
+
+- **Fix #1's failures were DISGUISED as plausible numbers**: with outputs
+  unbound, cls reported "97.27% agreement" (the stage defaulting to 0 deg on
+  mostly-upright pages) and rec a mean_abs_delta of 0.907 (CPU confidences vs
+  zeroes). Golden thresholds caught it; eyeballs would not have. Trust gates,
+  not vibes.
+- **FUNSD identity block** (for exact reproduction): F1 85.21 / P 84.60 /
+  R 85.93, 50 pages, threads=1 repeat=1, images_sha ab699c47004f1d4d,
+  det_tiny 193bab7a04fca699, rec_tiny 9ef676d6ed3c8825, keys c5cbe34ef40c29c4,
+  cls 5fcd13afa5bf4719. 5090 reference 85.37% — the 0.16pt delta is
+  consistent with fp16; no fp16-off A/B was needed. Worst pages: 39, 19, 15,
+  36, 21.
+- **det saw THREE canvases** this session (96x96, 992x768, 992x800): the
+  steady-state hot_path_compiles=0 check must cover the real canvas set, via
+  cache carry-over or a det warmup policy.
+- **File upstream at ROCm/AMDMIGraphX** (repros in hand): (1) Reshape with an
+  EMPTY target shape (legal ONNX rank-0, 1 element) computes "0 elements" —
+  a 98-byte single-node model passes onnx.checker and crashes
+  migraphx-driver read; layout.onnx has three such nodes (paddle2onnx
+  artifacts, Reshape.395/.398/.404). (2) At pinned dims, an
+  uninitialized-size_t "Inconsistent strides" in the conv op builder. Also
+  test MIGraphX 2.15 (has reshape shape-computation fixes, unverified).
+- **Engine invariants worth knowing when editing migraphx_engine.cpp**: the
+  probe parse ladder is {64,1} because no single default dim parses every
+  model (rec pooling needs >=64 spatial; batched-NMS heads only parse small),
+  and ShapeVariant::input_names exists because get_parameter_shapes().names()
+  is NOT graph order (layout.onnx declares im_shape before image) —
+  positional pinning mis-pins any multi-input model.
+- **Python-on-ROCm round-2 notes**: `pip install nanobind` first (the
+  BUILD_PYTHON block resolves it via the interpreter, no FetchContent); use
+  Python >=3.12 so the abi3 wheel shape is exercised (3.11 builds a
+  cpython-tagged .so — Development.SABIModule needs 3.12); conda pods need
+  `LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6` (conda libstdc++
+  lacks GLIBCXX_3.4.31, and the failure hides until first native use);
+  install opencv-python-headless + reportlab beyond the obvious deps. The
+  Python construct path compiles ~31 rec-bucket .mxr graphs the C++ chain
+  never touches (~5 min) — pre-warm or persist the cache before timing.
+- **Gate-harness gap found**: the goldens ctest phase ran without
+  --output-on-failure, and the conformance ctest after it OVERWRITES
+  Testing/Temporary/LastTest.log — a failing golden's stdout is
+  unrecoverable by design. Fix the phase script (and consider tee) before
+  round 2.
+

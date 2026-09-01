@@ -1,3 +1,4 @@
+#include "turbo_ocr/base/log/logger.h"
 #include "turbo_ocr/image/page_image_encoder.h"
 
 #include <atomic>
@@ -11,7 +12,15 @@
 #include <opencv2/imgproc.hpp>
 
 // libjpeg-turbo C API — faster than OpenCV's JPEG path for BGR images.
+// OPTIONAL: without it the JPEG branch below falls back to cv::imencode —
+// slower, never absent. This TU used to be compiled only when turbojpeg was
+// found, which left ppm/encode symbols UNDEFINED for every unconditional
+// caller and broke the link on any box without libturbojpeg-dev (first hit:
+// the ROCm bring-up pod). A missing optional dependency must cost speed,
+// never the build.
+#ifdef TURBO_HAVE_TURBOJPEG
 #include <turbojpeg.h>
+#endif
 
 namespace turbo_ocr::pdf {
 
@@ -31,9 +40,9 @@ bool device_jpeg_enabled() {
 void note_jpeg_path(bool on_device) {
   static std::atomic<bool> logged{false};
   if (logged.exchange(true)) return;
-  std::cerr << (on_device
-                    ? "[PageImage] JPEG encode running on the device\n"
-                    : "[PageImage] JPEG encode using the host (libjpeg-turbo)\n");
+  // Info: a pure path note on a successful encode.
+  TOCR_LOG_INFO("page image: JPEG encode path selected",
+                "where", on_device ? "device" : "host(libjpeg-turbo)");
 }
 } // namespace
 
@@ -129,6 +138,14 @@ std::vector<uint8_t> encode_page_image(const cv::Mat &bgr,
       if (!device_out.empty()) { note_jpeg_path(true); return device_out; }
     }
     note_jpeg_path(false);
+#ifndef TURBO_HAVE_TURBOJPEG
+    // No libjpeg-turbo at build time: OpenCV's JPEG encoder (always linked).
+    std::vector<uint8_t> cvbuf;
+    if (!cv::imencode(".jpg", src, cvbuf,
+                      {cv::IMWRITE_JPEG_QUALITY, opts.quality}))
+      return {};
+    return cvbuf;
+#else
     // libjpeg-turbo fast path: BGR → JPEG in one call, no intermediate copy.
     tjhandle tj = tjInitCompress();
     if (!tj) return {};
@@ -156,6 +173,7 @@ std::vector<uint8_t> encode_page_image(const cv::Mat &bgr,
     std::vector<uint8_t> result(out_buf, out_buf + out_size);
     tjFree(out_buf);
     return result;
+#endif  // TURBO_HAVE_TURBOJPEG
   }
 
   // PNG and WebP via OpenCV. (A SIMD PNG encoder like fpnge was evaluated and
