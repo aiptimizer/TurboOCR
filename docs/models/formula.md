@@ -89,13 +89,15 @@ a static KV buffer (`MAXLEN = 1056`, i.e. `MAXIT = 342` steps × 3 MTP slots =
 on-device argmax kernel; it syncs only every `CHECK` steps to test for EOS. This
 matches the fused reference's output while amortizing the loop overhead.
 
-!!! warning "Generating the `fast/` artifacts"
+!!! warning "The `fast/` artifacts"
 
-    The three `fast/` ONNX graphs are **locally generated, not part of the
-    committed model bundle**. Regenerate them with
-    `scratchpad/fastdec/batched_step.py` (which exports `encoder.onnx`,
-    `prep.onnx`, and `step_batched.onnx` next to the fused
-    `inference_trt.onnx`). The `fast/` graphs are **required** on GPU: if any is
+    The three `fast/` ONNX graphs ship as **release assets**
+    (`ppformulanet_s_fast_{encoder,prep,step_batched}.onnx`), and
+    `scripts/fetch_release_models.sh` downloads them to
+    `formula/ppformulanet_s/fast/` — nothing has to be generated to run the
+    shipped model. (An earlier revision of this section pointed at a
+    pre-release scratch script that was never published.) The `fast/` graphs
+    are **required** on GPU: if any is
     missing or fails to load, `load_model_dir` prints a `FATAL` and **aborts boot**
     — there is **no fused fallback**. The fast bundle must ship with the model.
 
