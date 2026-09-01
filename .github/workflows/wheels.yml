@@ -756,12 +756,20 @@ jobs:
           # would match BOTH majors and upload the other one's wheels under this
           # distribution's token — exactly the failure the comment above warns
           # about, and now reachable because two distributions share a prefix.
-          - dist: turboocr-engine-cuda12
-            artifacts: wheels-turboocr-engine-cuda12-*
-            environment: pypi-cuda12
-          - dist: turboocr-engine-cuda13
-            artifacts: wheels-turboocr-engine-cuda13-*
-            environment: pypi-cuda13
+          #
+          # cuda12/cuda13 are TEMPORARILY out of the publish matrix: PyPI's
+          # per-file limit still blocks their uploads (pypi/support#11962,
+          # #11963 pending), so the twine step would fail the job red on every
+          # tag. The wheels still BUILD and upload as run artifacts, and they
+          # ship to users from the GitHub release + package index meanwhile
+          # (see the README install section). Restore these two entries the
+          # day the size requests are approved:
+          #   - dist: turboocr-engine-cuda12
+          #     artifacts: wheels-turboocr-engine-cuda12-*
+          #     environment: pypi-cuda12
+          #   - dist: turboocr-engine-cuda13
+          #     artifacts: wheels-turboocr-engine-cuda13-*
+          #     environment: pypi-cuda13
           - dist: turboocr-engine-openvino
             artifacts: wheels-turboocr-engine-openvino-*
             environment: pypi-openvino
