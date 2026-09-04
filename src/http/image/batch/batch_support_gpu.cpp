@@ -19,6 +19,7 @@
 #include "turbo_ocr/decode/image_config.h"
 #include "turbo_ocr/decode/size_classify.h"
 #include "turbo_ocr/decode/nvjpeg_decoder.h"
+#include "turbo_ocr/decode/nvjpeg_decoder_pool.h"
 #include "turbo_ocr/common/env_utils.h"
 #include "turbo_ocr/server/error_codes.h"
 #include "turbo_ocr/validation/request_gate.h"
@@ -32,7 +33,7 @@ using turbo_ocr::decode::NvJpegDecoder;
 namespace turbo_ocr::routes::batchdetail {
 
 void batch_decode_images(const std::vector<std::string> &raw_bytes,
-                          bool nvjpeg_available,
+                          decode::NvJpegDecoderPool *nvjpeg,
                           const server::ImageDecoder &decode,
                           std::vector<cv::Mat> &imgs,
                           std::vector<std::string> &errors) {
@@ -40,8 +41,16 @@ void batch_decode_images(const std::vector<std::string> &raw_bytes,
   std::vector<size_t> jpeg_indices;
   std::vector<std::pair<const unsigned char *, size_t>> jpeg_buffers;
 
-  thread_local NvJpegDecoder tl_nvjpeg;
-  if (nvjpeg_available) {
+  // One lease for the whole batch (header sniff + batched decode); released
+  // before the per-image fallback below so that path can lease for itself.
+  // Pool exhausted past kNvJpegLeaseWait -> no batched GPU decode this time,
+  // every slot takes the per-image path (which itself falls back to CPU).
+  decode::NvJpegDecoderPool::Lease lease;
+  if (nvjpeg) {
+    if (auto l = nvjpeg->try_acquire_for(decode::kNvJpegLeaseWait); l && *l)
+      lease = std::move(*l);
+  }
+  if (lease) {
     for (size_t i = 0; i < n; ++i) {
       if (!errors[i].empty()) continue;
       const auto &raw = raw_bytes[i];
@@ -52,7 +61,7 @@ void batch_decode_images(const std::vector<std::string> &raw_bytes,
         // oversized JPEGs per-slot BEFORE batch_decode allocates a host Mat
         // from them (the pre-decode sniff is only 64KB-bounded).
         const auto *p = reinterpret_cast<const unsigned char *>(raw.data());
-        auto [jw, jh] = tl_nvjpeg.get_dimensions(p, raw.size());
+        auto [jw, jh] = lease->get_dimensions(p, raw.size());
         const auto v = decode::classify_image_size(jw, jh);
         if (v == decode::ImageSizeVerdict::kDimTooLarge) {
           errors[i] = "dimensions_too_large";
@@ -68,11 +77,12 @@ void batch_decode_images(const std::vector<std::string> &raw_bytes,
     }
   }
 
-  if (jpeg_buffers.size() >= 2) {
-    auto batch_mats = tl_nvjpeg.batch_decode(jpeg_buffers);
+  if (lease && jpeg_buffers.size() >= 2) {
+    auto batch_mats = lease->batch_decode(jpeg_buffers);
     for (size_t j = 0; j < jpeg_indices.size(); ++j)
       imgs[jpeg_indices[j]] = std::move(batch_mats[j]);
   }
+  lease.release();
 
   for (size_t i = 0; i < n; ++i) {
     if (!errors[i].empty()) continue;

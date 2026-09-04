@@ -135,6 +135,7 @@ the `*_ONNX` overrides below are only needed for a non-default location.
 |---|---|---|
 | `PIPELINE_POOL_SIZE` | auto | Concurrent GPU pipelines (~1.4 GB VRAM each). Unset → GPU auto-detects from VRAM, CPU uses 4. Bounds `[1, 4096]`. CLI: `--pool-size` (`0` = auto). |
 | `HTTP_THREADS` | `max(pool*32, 128)` | Work-pool threads for blocking inference (GPU consumer only). Bounds `[1, 4096]`. CLI: `--http-threads` (`0` = auto). |
+| `NVJPEG_DECODERS` | pool size | Shared nvJPEG decoder pool for the work-pool decode paths (`/ocr` base64, `/ocr/batch`, gRPC bytes). Decoders are created at startup and leased per decode, never created per thread: each one holds ~190 MB of device memory and ~50 MB of host memory until exit, so the old per-thread design cost up to `HTTP_THREADS × 190 MB` of VRAM. More decoders than replicas cannot raise throughput (inference is the bound). When every decoder is busy for 2 s the request decodes on the CPU instead of waiting. Bounds `[1, 256]`. CLI: `--nvjpeg-decoders` (`0` = auto). |
 | `PDF_DAEMONS` | `16` (CPU: `4`) | PDF render daemon processes. Bounds `[1, 1024]`. CLI: `--pdf-daemons`. |
 | `PDF_WORKERS` | `4` (CPU: `2`) | PDF render workers. Bounds `[1, 1024]`. Exceeding `PDF_DAEMONS` warns (excess idle). CLI: `--pdf-workers`. |
 | `GRPC_CQS` | `10` | gRPC completion-queue count. Bounds `[1, 1024]`. CLI: `--grpc-cqs`. |

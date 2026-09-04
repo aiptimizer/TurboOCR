@@ -298,6 +298,7 @@ add_executable(turbo_ocr_tests
     tests/table/test_html_reconstruct.cpp
     tests/formula/test_formula_tokenizer.cpp
     tests/decode/test_png_guards.cpp
+    tests/decode/test_lease_pool.cpp
     tests/pipeline/test_pipeline_detail.cpp
     tests/pdf/test_pdf_mode_strict.cpp
     tests/common/test_serialization_escape.cpp

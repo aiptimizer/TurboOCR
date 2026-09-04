@@ -48,10 +48,14 @@ void register_ocr_raw_route_gpu(server::WorkPool &pool,
                                 const server::ImageDecoder &decode,
                                 bool nvjpeg_available, bool layout_available,
                                 bool table_available, bool formula_available);
+// `nvjpeg` is the shared decoder pool (nullptr = nvJPEG unavailable, CPU
+// decode). The raw route takes only the availability bit: its JPEG fast path
+// decodes on the replica's own decoder (pipeline::decode_jpeg_and_run).
 void register_ocr_batch_route_gpu(server::WorkPool &pool,
                                   pipeline::PipelineDispatcher &dispatcher,
                                   const server::ImageDecoder &decode,
-                                  bool nvjpeg_available, bool layout_available,
+                                  decode::NvJpegDecoderPool *nvjpeg,
+                                  bool layout_available,
                                   bool table_available, bool formula_available,
                                   int max_batch_images);
 void register_ocr_pixels_route_gpu(server::WorkPool &pool,

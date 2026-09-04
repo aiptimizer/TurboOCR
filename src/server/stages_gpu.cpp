@@ -1,6 +1,7 @@
 #include "turbo_ocr/server/server_types.h"
 #include "turbo_ocr/server/bootstrap/stages_gpu.h"
 
+#include <algorithm>
 #include <climits>
 #include <cstdlib>
 #include <string>
@@ -14,18 +15,13 @@
 #include "turbo_ocr/common/log/logger.h"
 #include "turbo_ocr/decode/cpu_image_decode.h"
 #include "turbo_ocr/decode/nvjpeg_decoder.h"
+#include "turbo_ocr/decode/nvjpeg_decoder_pool.h"
 #include "turbo_ocr/engine/trt/onnx_to_trt.h"
 #include "turbo_ocr/pipeline/pool/pipeline_dispatcher.h"
 #include "turbo_ocr/server/bootstrap/pool_sizing.h"
 #include "turbo_ocr/server/bootstrap/server_bootstrap.h"
 
 namespace turbo_ocr::server {
-
-namespace {
-// Per-thread decoder state: nvJPEG handles are not thread-safe to share, and
-// the work-pool threads decode concurrently.
-thread_local decode::NvJpegDecoder tl_nvjpeg;
-} // namespace
 
 void validate_gpu_models(const ServerConfig &cfg) {
   // Validate model paths up front so a missing models/ tree fails fast with
@@ -110,24 +106,40 @@ GpuStages load_gpu_stages(const ServerConfig &cfg) {
   return s;
 }
 
-bool probe_nvjpeg() {
-  TOCR_LOG_INFO("Initializing nvJPEG decoders");
-  bool nvjpeg_available = tl_nvjpeg.available();
-  if (nvjpeg_available)
-    TOCR_LOG_INFO("nvJPEG GPU-accelerated JPEG decode enabled");
+std::shared_ptr<decode::NvJpegDecoderPool> open_nvjpeg_decoders(int capacity) {
+  const size_t cap = static_cast<size_t>(std::max(capacity, 1));
+  TOCR_LOG_INFO("Initializing nvJPEG decoder pool", "decoders", cap);
+  // nvJPEG handles are not thread-safe to share, and the work-pool threads
+  // decode concurrently — but a decoder per THREAD is the wrong bound: each
+  // one pins ~190 MB of VRAM until exit, so 128 work threads reached ~24 GB
+  // (GitHub #33). The pool bounds it at `cap` decoders, leased per decode.
+  std::shared_ptr<decode::NvJpegDecoderPool> pool =
+      decode::open_nvjpeg_decoder_pool(cap);
+  if (pool)
+    TOCR_LOG_INFO("nvJPEG GPU-accelerated JPEG decode enabled", "decoders", cap);
   else
     TOCR_LOG_WARN("nvJPEG not available, using OpenCV JPEG decode");
-  return nvjpeg_available;
+  return pool;
 }
 
-ImageDecoder make_gpu_image_decoder(bool nvjpeg_available) {
-  // JPEG via nvJPEG (GPU), PNG via Wuffs (fast path), every other format
-  // (WebP, BMP, TIFF, GIF, …) via cv::imdecode. OpenCV's imgcodecs is linked
-  // to libwebp/libtiff so cv::imdecode covers the rest.
-  return [nvjpeg_available](const unsigned char *data, size_t len) -> cv::Mat {
-    if (len >= 2 && data[0] == 0xFF && data[1] == 0xD8 && nvjpeg_available) {
-      cv::Mat img = tl_nvjpeg.decode(data, len);
-      if (!img.empty()) return img;
+ImageDecoder
+make_gpu_image_decoder(std::shared_ptr<decode::NvJpegDecoderPool> nvjpeg) {
+  // JPEG via a leased nvJPEG decoder (GPU), PNG via Wuffs (fast path), every
+  // other format (WebP, BMP, TIFF, GIF, …) via cv::imdecode. OpenCV's
+  // imgcodecs is linked to libwebp/libtiff so cv::imdecode covers the rest.
+  return [nvjpeg](const unsigned char *data, size_t len) -> cv::Mat {
+    if (nvjpeg && decode::NvJpegDecoder::is_jpeg(data, len)) {
+      if (auto lease = nvjpeg->try_acquire_for(decode::kNvJpegLeaseWait);
+          lease && *lease) {
+        cv::Mat img = (*lease)->decode(data, len);
+        if (!img.empty()) return img;
+      } else {
+        // Every decoder busy for kNvJpegLeaseWait: a slower CPU decode beats
+        // stalling the request. Rate-limited — under sustained overload this
+        // would otherwise fire per request.
+        TOCR_LOG_WARN_RL("nvJPEG decoder pool exhausted; decoding on CPU",
+                         "decoders", nvjpeg->capacity());
+      }
     }
     return decode::decode_cpu_fallback(data, len);
   };

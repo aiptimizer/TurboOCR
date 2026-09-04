@@ -21,6 +21,7 @@ const char* const kAllEnvVars[] = {
     "MAX_BODY_MEMORY_MB",
     "PIPELINE_POOL_SIZE",
     "HTTP_THREADS",
+    "NVJPEG_DECODERS",
     "PDF_DAEMONS",
     "PDF_WORKERS",
     "SHUTDOWN_GRACE_SECONDS",
@@ -82,6 +83,7 @@ TEST_CASE("from_env defaults are sane (GPU)", "[server_config]") {
   CHECK(c.warnings.empty());
   CHECK_FALSE(c.pipeline_pool_size.has_value());
   CHECK_FALSE(c.http_threads.has_value());
+  CHECK_FALSE(c.nvjpeg_decoders.has_value());
   CHECK(c.pdf_daemons == 16);
   CHECK(c.pdf_workers == 4);
   CHECK(c.shutdown_grace_seconds == 30);
@@ -481,4 +483,28 @@ TEST_CASE("BIND_HOST aliases the bind address; REQUEST_TIMEOUT_MS validates", "[
   reset_env();
   ::setenv("REQUEST_TIMEOUT_MS", "not_a_number", 1);
   CHECK_FALSE(ServerConfig::from_env(Profile::Gpu).errors.empty());
+}
+
+TEST_CASE("NVJPEG_DECODERS is optional, bounded, and CLI-overridable", "[server_config]") {
+  reset_env();
+  ::setenv("NVJPEG_DECODERS", "8", 1);
+  auto c = ServerConfig::from_env(Profile::Gpu);
+  CHECK(c.errors.empty());
+  REQUIRE(c.nvjpeg_decoders.has_value());
+  CHECK(*c.nvjpeg_decoders == 8);
+
+  // Out of range is a boot error, not a silent clamp.
+  ::setenv("NVJPEG_DECODERS", "0", 1);
+  auto bad = ServerConfig::from_env(Profile::Gpu);
+  CHECK_FALSE(bad.errors.empty());
+
+  // CLI wins over env; 0 on the CLI means "auto" (unset).
+  ::setenv("NVJPEG_DECODERS", "8", 1);
+  const char *argv_set[] = {"turboocr-server", "--nvjpeg-decoders", "3"};
+  auto cli = ServerConfig::from_env_and_cli(3, const_cast<char **>(argv_set), Profile::Gpu);
+  REQUIRE(cli.nvjpeg_decoders.has_value());
+  CHECK(*cli.nvjpeg_decoders == 3);
+  const char *argv_auto[] = {"turboocr-server", "--nvjpeg-decoders", "0"};
+  auto autoc = ServerConfig::from_env_and_cli(3, const_cast<char **>(argv_auto), Profile::Gpu);
+  CHECK_FALSE(autoc.nvjpeg_decoders.has_value());
 }

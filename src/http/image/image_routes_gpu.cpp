@@ -32,14 +32,14 @@ namespace turbo_ocr::routes {
 void register_image_routes(server::WorkPool &pool,
                            pipeline::PipelineDispatcher &dispatcher,
                            const server::ImageDecoder &decode,
-                           bool nvjpeg_available,
+                           decode::NvJpegDecoderPool *nvjpeg,
                            bool layout_available,
                            bool table_available,
                            bool formula_available,
                            int max_batch_images) {
-  register_ocr_raw_route_gpu(pool, dispatcher, decode, nvjpeg_available,
+  register_ocr_raw_route_gpu(pool, dispatcher, decode, nvjpeg != nullptr,
                              layout_available, table_available, formula_available);
-  register_ocr_batch_route_gpu(pool, dispatcher, decode, nvjpeg_available,
+  register_ocr_batch_route_gpu(pool, dispatcher, decode, nvjpeg,
                                layout_available, table_available, formula_available,
                                max_batch_images);
   register_ocr_pixels_route_gpu(pool, dispatcher, layout_available,

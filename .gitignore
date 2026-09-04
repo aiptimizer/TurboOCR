@@ -3,6 +3,10 @@
 /build-cpu/
 /build-coverage/
 /build-*/
+/build_*/
+/Testing/
+/.vscode/
+/.ocr-demo/
 /predeploy/
 __pycache__/
 .pytest_cache/

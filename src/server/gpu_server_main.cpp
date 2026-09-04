@@ -104,9 +104,15 @@ int main(int argc, char **argv) try {
   // below captures its request inputs BY VALUE (see the infer lambda).
   dispatcher->set_request_timeout_ms(cfg.request_timeout_ms);
 
-  const bool nvjpeg_available = turbo_ocr::server::probe_nvjpeg();
+  // Shared nvJPEG decoder pool for the work-pool decode paths (/ocr base64,
+  // /ocr/batch, gRPC bytes). Default: one decoder per pipeline replica —
+  // decode is bounded by inference, so more decoders than replicas only cost
+  // VRAM (~190 MB each). NVJPEG_DECODERS / --nvjpeg-decoders overrides.
+  const int nvjpeg_decoders = cfg.nvjpeg_decoders.value_or(pool_size);
+  std::shared_ptr<turbo_ocr::decode::NvJpegDecoderPool> nvjpeg =
+      turbo_ocr::server::open_nvjpeg_decoders(nvjpeg_decoders);
   turbo_ocr::server::ImageDecoder decode =
-      turbo_ocr::server::make_gpu_image_decoder(nvjpeg_available);
+      turbo_ocr::server::make_gpu_image_decoder(nvjpeg);
 
   // Inference function for shared routes (/ocr base64)
   const bool layout_available = !layout_model.empty();
@@ -146,7 +152,7 @@ int main(int argc, char **argv) try {
   turbo_ocr::routes::register_ocr_base64_route(work_pool, infer, decode,
                                                layout_available, table_avail,
                                                formula_avail);
-  turbo_ocr::routes::register_image_routes(work_pool, *dispatcher, decode, nvjpeg_available, layout_available,
+  turbo_ocr::routes::register_image_routes(work_pool, *dispatcher, decode, nvjpeg.get(), layout_available,
                                            table_avail, formula_avail, cfg.max_batch_images);
   turbo_ocr::routes::register_pdf_route(work_pool, *dispatcher, pdf_renderer, default_pdf_mode, layout_available,
                                         table_avail, formula_avail,
@@ -218,6 +224,7 @@ int main(int argc, char **argv) try {
 
   TOCR_LOG_INFO("HTTP server starting", "port", port, "io_threads", io_threads,
            "work_threads", work_threads, "pool_size", dispatcher->worker_count(),
+           "nvjpeg_decoders", nvjpeg ? nvjpeg_decoders : 0,
            "body_cap_mb_drogon", max_body_mb, "body_cap_mb_nginx", max_body_mb,
            "body_mem_mb", max_body_mem_mb);
 

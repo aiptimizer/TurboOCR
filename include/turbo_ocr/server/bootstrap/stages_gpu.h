@@ -1,8 +1,9 @@
 #pragma once
 
+#include <memory>
 #include <string>
 
-#include "turbo_ocr/server/bootstrap/server_config.h"
+#include "turbo_ocr/decode/nvjpeg_decoder_pool_fwd.h"
 #include "turbo_ocr/server/bootstrap/server_config.h"
 #include "turbo_ocr/server/service_fns.h"
 
@@ -38,12 +39,19 @@ void validate_gpu_models(const ServerConfig &cfg);
 // std::exit(2) when an explicitly configured CLS engine cannot be loaded.
 [[nodiscard]] GpuStages load_gpu_stages(const ServerConfig &cfg);
 
-// Probe nvJPEG availability on the calling thread (logs the outcome).
-[[nodiscard]] bool probe_nvjpeg();
+// Open the shared nvJPEG decoder pool (`capacity` decoders, leased per
+// decode by the work-pool routes) and probe availability on the calling
+// thread, logging the outcome. nullptr when nvJPEG is unavailable — every
+// consumer then decodes on the CPU. Decoders are pooled, never per-thread:
+// each holds ~190 MB of VRAM for the life of the process (GitHub #33).
+[[nodiscard]] std::shared_ptr<decode::NvJpegDecoderPool>
+open_nvjpeg_decoders(int capacity);
 
-// Image decoder: JPEG via nvJPEG (GPU) when available, PNG via Wuffs, every
-// other format via cv::imdecode — the CPU tail is decode::decode_cpu_fallback.
-[[nodiscard]] ImageDecoder make_gpu_image_decoder(bool nvjpeg_available);
+// Image decoder: JPEG via a leased nvJPEG decoder when the pool is non-null
+// (CPU fallback when every decoder is busy past kNvJpegLeaseWait), PNG via
+// Wuffs, every other format via cv::imdecode (decode::decode_cpu_fallback).
+[[nodiscard]] ImageDecoder
+make_gpu_image_decoder(std::shared_ptr<decode::NvJpegDecoderPool> nvjpeg);
 
 // The InferFunc for shared routes (/ocr base64): submit to the dispatcher
 // with by-value captures (timeout-safe), forward every degradation signal.

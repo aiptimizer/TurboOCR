@@ -1,5 +1,6 @@
 #pragma once
 
+#include "turbo_ocr/decode/nvjpeg_decoder_pool_fwd.h"
 #include "turbo_ocr/pipeline/pool/pipeline_dispatcher.h"
 #include "turbo_ocr/server/service_fns.h"
 #include "turbo_ocr/server/work_pool.h"
@@ -13,7 +14,7 @@ namespace turbo_ocr::routes {
 void register_image_routes(server::WorkPool &pool,
                            pipeline::PipelineDispatcher &dispatcher,
                            const server::ImageDecoder &decode,
-                           bool nvjpeg_available,
+                           decode::NvJpegDecoderPool *nvjpeg,
                            bool layout_available,
                            bool table_available,
                            bool formula_available,

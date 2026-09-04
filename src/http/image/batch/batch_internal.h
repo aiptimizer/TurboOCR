@@ -5,6 +5,7 @@
 
 #include <opencv2/core.hpp>
 
+#include "turbo_ocr/decode/nvjpeg_decoder_pool_fwd.h"
 #include "turbo_ocr/pipeline/pipeline_result.h"
 #ifndef USE_CPU_ONLY
 #include "turbo_ocr/pipeline/pool/pipeline_dispatcher.h"
@@ -32,8 +33,11 @@ void batch_check_dims_pre(const std::vector<std::string> &raw_bytes,
                            std::vector<std::string> &errors);
 
 #ifndef USE_CPU_ONLY
+// `nvjpeg`: shared decoder pool, leased once for the whole batch (nullptr =
+// nvJPEG unavailable). Slots the batched GPU decode does not cover fall
+// through to `decode` (which leases per image, then CPU).
 void batch_decode_images(const std::vector<std::string> &raw_bytes,
-                          bool nvjpeg_available,
+                          decode::NvJpegDecoderPool *nvjpeg,
                           const server::ImageDecoder &decode,
                           std::vector<cv::Mat> &imgs,
                           std::vector<std::string> &errors);

@@ -35,7 +35,7 @@ using namespace batchdetail;
 void register_ocr_batch_route_gpu(server::WorkPool &pool,
                                    pipeline::PipelineDispatcher &dispatcher,
                                    const server::ImageDecoder &decode,
-                                   bool nvjpeg_available,
+                                   decode::NvJpegDecoderPool *nvjpeg,
                                    bool layout_available,
                                    bool table_available,
                                    bool formula_available,
@@ -52,7 +52,7 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
   const bool formula_avail = formula_available;
   drogon::app().registerHandler(
       "/ocr/batch",
-      [&pool, &dispatcher, &decode, nvjpeg_available, layout_available,
+      [&pool, &dispatcher, &decode, nvjpeg, layout_available,
        valid_table, valid_formula, table_avail, formula_avail,
        max_batch_images](
           const drogon::HttpRequestPtr &req,
@@ -105,7 +105,7 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
     }
 
     server::submit_work(pool, std::move(callback),
-        [b64_strings, n, &dispatcher, &decode, nvjpeg_available, opts](server::DrogonCallback &cb) {
+        [b64_strings, n, &dispatcher, &decode, nvjpeg, opts](server::DrogonCallback &cb) {
       const bool want_layout = opts.want_layout;
       server::run_with_error_handling(cb, "/ocr/batch", [&] {
         // Per-slot error tags for the response. Empty string == success.
@@ -121,7 +121,7 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
         batch_check_dims_pre(raw_bytes, kMaxImageDim, errors);
 
         std::vector<cv::Mat> imgs(n);
-        batch_decode_images(raw_bytes, nvjpeg_available, decode, imgs, errors);
+        batch_decode_images(raw_bytes, nvjpeg, decode, imgs, errors);
         batch_check_dims_post(imgs, kMaxImageDim, errors);
 
         std::vector<cv::Mat> valid_imgs;
