@@ -133,6 +133,10 @@ make_gpu_image_decoder(std::shared_ptr<decode::NvJpegDecoderPool> nvjpeg) {
           lease && *lease) {
         cv::Mat img = (*lease)->decode(data, len);
         if (!img.empty()) return img;
+        // A failed GPU decode still answers the request, on the CPU; say so,
+        // because a silent fallback hides a broken decoder behind slightly
+        // different pixels and slower requests.
+        TOCR_LOG_WARN_RL("nvJPEG decode failed; decoded on CPU", "bytes", len);
       } else {
         // Every decoder busy for kNvJpegLeaseWait: a slower CPU decode beats
         // stalling the request. Rate-limited — under sustained overload this

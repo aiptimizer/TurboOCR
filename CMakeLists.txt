@@ -821,6 +821,15 @@ else()
             CUDA::nvjpeg
             ${OpenCV_LIBS}
         )
+        # Cross-thread decoder regression (NvJpegDecoderPool hands decoders
+        # between threads): see tools/test_nvjpeg_threads.cpp.
+        add_executable(test_nvjpeg_threads EXCLUDE_FROM_ALL tools/test_nvjpeg_threads.cpp)
+        target_include_directories(test_nvjpeg_threads PRIVATE include)
+        target_link_libraries(test_nvjpeg_threads PRIVATE
+            CUDA::cudart
+            CUDA::nvjpeg
+            ${OpenCV_LIBS}
+        )
     endif()
 endif()
 

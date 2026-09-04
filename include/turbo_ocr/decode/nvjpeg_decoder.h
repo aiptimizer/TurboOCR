@@ -49,6 +49,13 @@ public:
       return;
     }
 
+    // Remember the device so bind_calling_thread_() can attach any thread
+    // that later uses this decoder to the same context (see decode()).
+    if (cudaGetDevice(&device_) != cudaSuccess) {
+      (void)cudaGetLastError();
+      device_ = 0;
+    }
+
     // nvJPEG requires DEVICE output pointers. On HMM/ATS systems
     // (cudaDevAttrPageableMemoryAccess=1) any host pointer IS a valid device
     // address, so decoding straight into cv::Mat host memory is both legal
@@ -107,6 +114,7 @@ public:
   [[nodiscard]] cv::Mat decode(const unsigned char *data, size_t len, cudaStream_t stream = 0) {
     if (!handle_ || !is_jpeg(data, len))
       return {};  // Not JPEG -- caller should fall back to cv::imdecode
+    bind_calling_thread_();
 
     int nComponents;
     nvjpegChromaSubsampling_t subsampling;
@@ -168,6 +176,7 @@ public:
   [[nodiscard]] std::pair<int, int> get_dimensions(const unsigned char *data, size_t len) {
     if (!handle_ || !is_jpeg(data, len))
       return {0, 0};
+    bind_calling_thread_();
     int nComponents;
     nvjpegChromaSubsampling_t subsampling;
     int widths[NVJPEG_MAX_COMPONENT], heights[NVJPEG_MAX_COMPONENT];
@@ -192,6 +201,7 @@ public:
                                     cudaStream_t stream = 0) {
     if (!handle_ || !is_jpeg(data, len))
       return false;
+    bind_calling_thread_();
 
     nvjpegImage_t output;
     output.channel[0] = static_cast<unsigned char *>(d_output);
@@ -204,6 +214,8 @@ public:
     // Decode directly to GPU memory (interleaved BGR)
     nvjpegStatus_t st = nvjpegDecode(handle_, state_, data, len,
                                       NVJPEG_OUTPUT_BGRI, &output, stream);
+    if (st != NVJPEG_STATUS_SUCCESS)
+      std::cerr << "[NvJpeg] nvjpegDecode failed: status " << static_cast<int>(st) << '\n';
     return st == NVJPEG_STATUS_SUCCESS;
   }
 
@@ -219,6 +231,7 @@ public:
   [[nodiscard]] std::vector<cv::Mat> batch_decode(
       const std::vector<std::pair<const unsigned char *, size_t>> &jpeg_buffers,
       cudaStream_t stream = 0) {
+    bind_calling_thread_();
 
     size_t n = jpeg_buffers.size();
     std::vector<cv::Mat> results(n);
@@ -347,6 +360,22 @@ public:
   [[nodiscard]] bool available() const noexcept { return handle_ != nullptr; }
 
 private:
+  // nvJPEG allocates its per-decoder buffers lazily inside nvjpegDecode /
+  // nvjpegDecodeBatched, through an allocator that needs the CALLING thread
+  // bound to a CUDA context. A thread that has never made a CUDA runtime call
+  // is not bound, and the allocation fails with NVJPEG_STATUS_ALLOCATOR_FAILURE
+  // (no CUDA error is raised). The thread_local design never hit this because
+  // the constructor's runtime calls bound the constructing thread and every
+  // decode ran there; a decoder handed across threads by NvJpegDecoderPool
+  // does hit it. Bind once per thread, per device (a thread_local flag keyed
+  // on the device index) before any call that may allocate.
+  void bind_calling_thread_() const noexcept {
+    thread_local int bound_device = -1;
+    if (bound_device == device_) return;
+    if (cudaSetDevice(device_) == cudaSuccess) bound_device = device_;
+    else (void)cudaGetLastError();
+  }
+
   // Stream-ordered device scratch (cudaMallocAsync pools make per-request
   // allocation cheap). ptr == nullptr signals allocation failure.
   struct DeviceBuffer {
@@ -392,6 +421,7 @@ private:
   unsigned char *staging_ = nullptr;
   size_t staging_cap_ = 0;
   bool direct_host_output_ = false;
+  int device_ = 0;
 };
 
 } // namespace turbo_ocr::decode
