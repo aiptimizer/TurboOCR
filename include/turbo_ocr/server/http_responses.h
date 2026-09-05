@@ -71,6 +71,10 @@ void run_with_error_handling(DrogonCallback &cb, const char *route, F &&fn) {
     cb(error_response(drogon::k503ServiceUnavailable, "SERVER_BUSY", e.what()));
   } catch (const turbo_ocr::ImageTooLargeError &e) {
     cb(error_response(drogon::k400BadRequest, "DIMENSIONS_TOO_LARGE", e.what()));
+  } catch (const turbo_ocr::GpuDecodeError &e) {
+    // Server fault, retryable: the GPU decoder failed or none was free.
+    TOCR_LOG_ERROR_RL("GPU decode failed", "error", e.what());
+    cb(error_response(drogon::k503ServiceUnavailable, "GPU_DECODE_FAILED", e.what()));
   } catch (const turbo_ocr::ImageDecodeError &e) {
     cb(error_response(drogon::k400BadRequest, "IMAGE_DECODE_FAILED", e.what()));
   } catch (const std::exception &e) {

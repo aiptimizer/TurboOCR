@@ -10,6 +10,8 @@
 #include <nvjpeg.h>
 #include <opencv2/core.hpp>
 
+#include "turbo_ocr/decode/jpeg_codec.h"
+
 // GPU-accelerated JPEG decoder using nvJPEG.
 // Decodes JPEG bytes -> cv::Mat (BGR, on CPU) significantly faster than cv::imdecode.
 // Falls back to cv::imdecode for non-JPEG formats.
@@ -18,14 +20,43 @@ namespace turbo_ocr::decode {
 
 class NvJpegDecoder {
 public:
-  NvJpegDecoder() {
+  // Which nvJPEG backend to prefer. Hardware (the NVJPG engine) decodes
+  // baseline/extended-sequential JPEG fastest and off the SMs; Hybrid runs
+  // Huffman on the CPU or GPU and the rest on the GPU, and also decodes what
+  // the hardware path reports as unsupported (progressive, arithmetic).
+  // Replicas keep one of each: hardware first, hybrid for the rest, so a
+  // bitstream reaches the host codec only when neither GPU backend takes it.
+  enum class Backend { Hardware, Hybrid };
+
+  explicit NvJpegDecoder(Backend preferred = Backend::Hardware) : preferred_(preferred) {
+    // nvJPEG's internal scratch (the per-decoder device and pinned buffers it
+    // allocates on first use) comes through OUR allocators: device memory
+    // from the stream-ordered pool (cudaMallocAsync, whose release threshold
+    // the server sets) and pinned host memory from cudaHostAlloc. Decoder
+    // memory is then part of the same explicit budget as everything else
+    // instead of whatever cudaMalloc happened to grab.
+    static nvjpegDevAllocatorV2_t dev_alloc{&dev_malloc_v2_, &dev_free_v2_, nullptr};
+    static nvjpegPinnedAllocatorV2_t pinned_alloc{&pinned_malloc_v2_, &pinned_free_v2_, nullptr};
     // Try NVDEC hardware decoder first (offloads Huffman to dedicated HW)
-    nvjpegStatus_t st = nvjpegCreateEx(NVJPEG_BACKEND_HARDWARE, nullptr, nullptr, 0, &handle_);
+    nvjpegStatus_t st = NVJPEG_STATUS_NOT_INITIALIZED;
+    if (preferred_ == Backend::Hardware)
+      st = nvjpegCreateExV2(NVJPEG_BACKEND_HARDWARE, &dev_alloc, &pinned_alloc, 0, &handle_);
     if (st == NVJPEG_STATUS_SUCCESS) {
-      std::cerr << "[NvJpeg] Using HARDWARE (NVDEC) backend\n";
+      // The HARDWARE backend is accepted on every GPU, but only devices with
+      // an NVJPG engine (A100/H100/GB10 class) decode on it; elsewhere nvJPEG
+      // runs the same GPU kernels as the hybrid backend. Say which, so a log
+      // line never claims engine offload the card does not have.
+      unsigned engines = 0, cores = 0;
+      if (nvjpegGetHardwareDecoderInfo(handle_, &engines, &cores) != NVJPEG_STATUS_SUCCESS)
+        engines = 0;
+      if (engines > 0)
+        std::cerr << "[NvJpeg] Using HARDWARE backend: " << engines << " NVJPG engine(s), "
+                  << cores << " core(s) each\n";
+      else
+        std::cerr << "[NvJpeg] Using HARDWARE backend (no NVJPG engine on this GPU; decoding on GPU kernels)\n";
     } else {
       // Fallback to GPU_HYBRID (GPU-assisted Huffman, frees compute cores)
-      st = nvjpegCreateEx(NVJPEG_BACKEND_GPU_HYBRID, nullptr, nullptr, 0, &handle_);
+      st = nvjpegCreateExV2(NVJPEG_BACKEND_GPU_HYBRID, &dev_alloc, &pinned_alloc, 0, &handle_);
       if (st == NVJPEG_STATUS_SUCCESS) {
         std::cerr << "[NvJpeg] Using GPU_HYBRID backend\n";
       } else {
@@ -56,23 +87,14 @@ public:
       device_ = 0;
     }
 
-    // nvJPEG requires DEVICE output pointers. On HMM/ATS systems
-    // (cudaDevAttrPageableMemoryAccess=1) any host pointer IS a valid device
-    // address, so decoding straight into cv::Mat host memory is both legal
-    // and the fastest path (one PCIe traversal, no scratch). Everywhere else
-    // that same pointer faults from GPU kernels — the GitHub #22 crash — so
-    // those machines take the device-scratch + copy-back path.
-    // NVJPEG_DEVICE_COPY=1 forces the scratch path (ops escape hatch/tests).
-    int dev = 0, pageable = 0;
-    if (cudaGetDevice(&dev) == cudaSuccess &&
-        cudaDeviceGetAttribute(&pageable, cudaDevAttrPageableMemoryAccess, dev) ==
-            cudaSuccess) {
-      direct_host_output_ = pageable == 1;
-    } else {
-      (void)cudaGetLastError();
-    }
-    if (const char *env = std::getenv("NVJPEG_DEVICE_COPY"); env && env[0] == '1')
-      direct_host_output_ = false;
+    // Output always lands in a stream-ordered device scratch and is copied
+    // back through pinned staging. Decoding straight into pageable host
+    // memory on HMM/ATS systems (where a host pointer is a valid device
+    // address) was tried and removed: the GPU then writes, through page
+    // faults, into memory that a general-purpose allocator is purging and
+    // reusing underneath it, which is where multi-minute UVM stalls came
+    // from under jemalloc. The copy costs a memcpy; the fault storm cost the
+    // process.
   }
 
   ~NvJpegDecoder() noexcept {
@@ -103,7 +125,15 @@ public:
   NvJpegDecoder(NvJpegDecoder &&) = delete;
   NvJpegDecoder &operator=(NvJpegDecoder &&) = delete;
 
-  // Decode JPEG bytes to BGR cv::Mat. Returns empty Mat on failure.
+  // A host-side decode and how it went. `image` is empty unless status is Ok.
+  // `nvjpeg_status` is the raw nvjpegStatus_t for logs.
+  struct HostDecode {
+    cv::Mat image;
+    JpegDecodeStatus status = JpegDecodeStatus::Failed;
+    int nvjpeg_status = 0;
+  };
+
+  // Decode JPEG bytes to a BGR cv::Mat on the GPU.
   //
   // nvJPEG requires the nvjpegImage_t channel pointers to be DEVICE memory
   // (for nvjpegDecode as much as for nvjpegDecodeBatched), so the decode
@@ -111,9 +141,9 @@ public:
   // the host Mat on the same stream. Handing nvJPEG a host pointer is UB:
   // the batched path dereferences it from GPU kernels and poisons the CUDA
   // context with an illegal memory access (GitHub #22).
-  [[nodiscard]] cv::Mat decode(const unsigned char *data, size_t len, cudaStream_t stream = 0) {
-    if (!handle_ || !is_jpeg(data, len))
-      return {};  // Not JPEG -- caller should fall back to cv::imdecode
+  [[nodiscard]] HostDecode decode(const unsigned char *data, size_t len, cudaStream_t stream = 0) {
+    if (!handle_) return {{}, JpegDecodeStatus::Failed, nvjpeg_status::kSuccess};
+    if (!is_jpeg(data, len)) return {{}, JpegDecodeStatus::Unsupported, nvjpeg_status::kSuccess};
     bind_calling_thread_();
 
     int nComponents;
@@ -123,29 +153,19 @@ public:
                                             &nComponents, &subsampling,
                                             widths, heights);
     if (st != NVJPEG_STATUS_SUCCESS)
-      return {};
+      return {{}, classify_nvjpeg_status(static_cast<int>(st)), static_cast<int>(st)};
 
     const int w = widths[0], h = heights[0];
     const size_t bytes = static_cast<size_t>(h) * static_cast<size_t>(w) * 3;
     cv::Mat result(h, w, CV_8UC3);
 
-    if (direct_host_output_) {
-      // HMM: the Mat's host memory is a valid device address — decode into it.
-      if (!decode_to_gpu(data, len, result.data, static_cast<size_t>(w) * 3, w, h, stream))
-        return {};
-      if (cudaStreamSynchronize(stream) != cudaSuccess) {
-        (void)cudaGetLastError();
-        return {};
-      }
-      return result;
-    }
-
     DeviceBuffer dbuf(bytes, stream);
     if (!dbuf.ptr)
-      return {};
+      return {{}, JpegDecodeStatus::Failed, nvjpeg_status::kSuccess};
 
-    if (!decode_to_gpu(data, len, dbuf.ptr, static_cast<size_t>(w) * 3, w, h, stream))
-      return {};
+    const JpegDecodeStatus ds =
+        decode_to_gpu(data, len, dbuf.ptr, static_cast<size_t>(w) * 3, w, h, stream);
+    if (ds != JpegDecodeStatus::Ok) return {{}, ds, last_nvjpeg_status_};
 
     // Copy back via pinned staging when available (full-bandwidth D2H),
     // falling back to a direct pageable copy.
@@ -153,17 +173,17 @@ public:
     if (cudaMemcpyAsync(stage ? stage : result.data, dbuf.ptr, bytes,
                         cudaMemcpyDeviceToHost, stream) != cudaSuccess) {
       (void)cudaGetLastError();
-      return {};
+      return {{}, JpegDecodeStatus::Failed, nvjpeg_status::kSuccess};
     }
     // Sync before returning so the host copy is materialized and safe to hand
     // to other threads, and so the scratch free below is stream-ordered
     // behind the copy.
     if (cudaStreamSynchronize(stream) != cudaSuccess) {
       (void)cudaGetLastError();
-      return {};
+      return {{}, JpegDecodeStatus::Failed, nvjpeg_status::kSuccess};
     }
     if (stage) std::memcpy(result.data, stage, bytes);
-    return result;
+    return {std::move(result), JpegDecodeStatus::Ok, nvjpeg_status::kSuccess};
   }
 
   // Check if data is a JPEG (starts with FF D8).
@@ -191,16 +211,17 @@ public:
   // Decode JPEG bytes directly to a GPU buffer (device memory).
   // The caller provides a pre-allocated device buffer with the given pitch.
   // The buffer must be large enough for h * pitch bytes (pitch >= w * 3).
-  // Returns true on success. The decode is async on the given stream;
-  // the caller must synchronize the stream before reading the output.
-  // w/h describe the caller's buffer-size contract (see above); nvjpeg infers
-  // the actual decode dimensions, so they are unused inside this method.
-  [[nodiscard]] bool decode_to_gpu(const unsigned char *data, size_t len,
-                                    void *d_output, size_t pitch,
-                                    int /*w*/, int /*h*/,
-                                    cudaStream_t stream = 0) {
-    if (!handle_ || !is_jpeg(data, len))
-      return false;
+  // The decode is async on the given stream; the caller must synchronize the
+  // stream before reading the output. w/h describe the caller's buffer-size
+  // contract (see above); nvjpeg infers the actual decode dimensions, so they
+  // are unused inside this method. The raw nvjpegStatus_t of the last call is
+  // kept in last_nvjpeg_status() for error messages.
+  [[nodiscard]] JpegDecodeStatus decode_to_gpu(const unsigned char *data, size_t len,
+                                                void *d_output, size_t pitch,
+                                                int /*w*/, int /*h*/,
+                                                cudaStream_t stream = 0) {
+    if (!handle_) return JpegDecodeStatus::Failed;
+    if (!is_jpeg(data, len)) return JpegDecodeStatus::Unsupported;
     bind_calling_thread_();
 
     nvjpegImage_t output;
@@ -214,27 +235,30 @@ public:
     // Decode directly to GPU memory (interleaved BGR)
     nvjpegStatus_t st = nvjpegDecode(handle_, state_, data, len,
                                       NVJPEG_OUTPUT_BGRI, &output, stream);
-    if (st != NVJPEG_STATUS_SUCCESS)
-      std::cerr << "[NvJpeg] nvjpegDecode failed: status " << static_cast<int>(st) << '\n';
-    return st == NVJPEG_STATUS_SUCCESS;
+    last_nvjpeg_status_ = static_cast<int>(st);
+    return classify_nvjpeg_status(last_nvjpeg_status_);
   }
+
+  [[nodiscard]] int last_nvjpeg_status() const noexcept { return last_nvjpeg_status_; }
 
   // Batch decode multiple JPEG images in one nvjpegDecodeBatched call.
   // Input: vector of (data, length) pairs — must all be valid JPEGs.
-  // Returns: vector of cv::Mat (BGR). Failed images get empty Mat.
-  // Non-JPEG images should be filtered out by the caller and decoded separately.
+  // Returns one HostDecode per input, in order. When the batched call cannot
+  // serve the set as a whole (an unsupported member, batch init failure,
+  // scratch exhaustion) every image is decoded singly so each carries its own
+  // status; a device fault therefore never masquerades as an unsupported image.
   //
   // All batch outputs decode into ONE stream-ordered device allocation
   // (per-image 256B-aligned slices) and are copied back to host afterwards:
   // nvjpegDecodeBatched writes through the channel pointers from GPU kernels,
   // so host Mats here caused sticky illegal-memory-access faults (GitHub #22).
-  [[nodiscard]] std::vector<cv::Mat> batch_decode(
+  [[nodiscard]] std::vector<HostDecode> batch_decode(
       const std::vector<std::pair<const unsigned char *, size_t>> &jpeg_buffers,
       cudaStream_t stream = 0) {
     bind_calling_thread_();
 
     size_t n = jpeg_buffers.size();
-    std::vector<cv::Mat> results(n);
+    std::vector<HostDecode> results(n);
 
     if (!handle_ || n == 0)
       return results;
@@ -268,8 +292,8 @@ public:
       total += (dims[i].bytes + 255) & ~size_t{255};
     }
 
-    DeviceBuffer dbuf(direct_host_output_ ? size_t{0} : total, stream);
-    if (!direct_host_output_ && !dbuf.ptr) {
+    DeviceBuffer dbuf(total, stream);
+    if (!dbuf.ptr) {
       std::cerr << std::format("[NvJpeg] Batch scratch alloc failed ({} bytes), "
                                "falling back to single decode", total) << '\n';
       return fallback_single();
@@ -289,13 +313,7 @@ public:
     std::vector<const unsigned char *> data_ptrs(n);
     std::vector<size_t> lengths(n);
     for (size_t i = 0; i < n; ++i) {
-      if (direct_host_output_) {
-        // HMM: Mat host memory is a valid device address (see ctor comment).
-        results[i] = cv::Mat(dims[i].h, dims[i].w, CV_8UC3);
-        outputs[i].channel[0] = results[i].data;
-      } else {
-        outputs[i].channel[0] = static_cast<unsigned char *>(dbuf.ptr) + dims[i].offset;
-      }
+      outputs[i].channel[0] = static_cast<unsigned char *>(dbuf.ptr) + dims[i].offset;
       outputs[i].pitch[0] = static_cast<unsigned int>(dims[i].w * 3);
       for (int c = 1; c < NVJPEG_MAX_COMPONENT; c++) {
         outputs[i].channel[c] = nullptr;
@@ -320,19 +338,16 @@ public:
     // then host memcpys into the Mats. Direct mode decoded into the Mats
     // already and only needs the sync below.
     bool copies_ok = true;
-    unsigned char *stage = nullptr;
-    if (!direct_host_output_) {
-      stage = ensure_staging(total);
-      if (stage) {
-        copies_ok = cudaMemcpyAsync(stage, dbuf.ptr, total,
-                                    cudaMemcpyDeviceToHost, stream) == cudaSuccess;
-      } else {
-        for (size_t i = 0; i < n && copies_ok; ++i) {
-          results[i] = cv::Mat(dims[i].h, dims[i].w, CV_8UC3);
-          copies_ok = cudaMemcpyAsync(results[i].data, outputs[i].channel[0],
-                                      dims[i].bytes, cudaMemcpyDeviceToHost,
-                                      stream) == cudaSuccess;
-        }
+    unsigned char *stage = ensure_staging(total);
+    if (stage) {
+      copies_ok = cudaMemcpyAsync(stage, dbuf.ptr, total,
+                                  cudaMemcpyDeviceToHost, stream) == cudaSuccess;
+    } else {
+      for (size_t i = 0; i < n && copies_ok; ++i) {
+        results[i].image = cv::Mat(dims[i].h, dims[i].w, CV_8UC3);
+        copies_ok = cudaMemcpyAsync(results[i].image.data, outputs[i].channel[0],
+                                    dims[i].bytes, cudaMemcpyDeviceToHost,
+                                    stream) == cudaSuccess;
       }
     }
 
@@ -340,35 +355,56 @@ public:
     // ~DeviceBuffer, stream-ordered behind the copies) can never race the
     // decode/copy work.
     if (cudaStreamSynchronize(stream) != cudaSuccess || !copies_ok) {
-      cudaError_t err = cudaGetLastError();
-      std::cerr << std::format("[NvJpeg] Batch copy-back failed: {}",
-                               cudaGetErrorString(err)) << '\n';
-      for (auto &m : results) m.release();  // never hand out unmaterialized Mats
+      (void)cudaGetLastError();
+      for (auto &r : results) r = {{}, JpegDecodeStatus::Failed, nvjpeg_status::kSuccess};
       return results;
     }
-
-    if (stage) {
-      for (size_t i = 0; i < n; ++i) {
-        results[i] = cv::Mat(dims[i].h, dims[i].w, CV_8UC3);
-        std::memcpy(results[i].data, stage + dims[i].offset, dims[i].bytes);
+    for (size_t i = 0; i < n; ++i) {
+      if (stage) {
+        results[i].image = cv::Mat(dims[i].h, dims[i].w, CV_8UC3);
+        std::memcpy(results[i].image.data, stage + dims[i].offset, dims[i].bytes);
       }
+      results[i].status = JpegDecodeStatus::Ok;
+      results[i].nvjpeg_status = nvjpeg_status::kSuccess;
     }
-
     return results;
   }
 
   [[nodiscard]] bool available() const noexcept { return handle_ != nullptr; }
+  [[nodiscard]] Backend preferred_backend() const noexcept { return preferred_; }
 
 private:
   // nvJPEG allocates its per-decoder buffers lazily inside nvjpegDecode /
   // nvjpegDecodeBatched, through an allocator that needs the CALLING thread
   // bound to a CUDA context. A thread that has never made a CUDA runtime call
   // is not bound, and the allocation fails with NVJPEG_STATUS_ALLOCATOR_FAILURE
-  // (no CUDA error is raised). The thread_local design never hit this because
-  // the constructor's runtime calls bound the constructing thread and every
-  // decode ran there; a decoder handed across threads by NvJpegDecoderPool
-  // does hit it. Bind once per thread, per device (a thread_local flag keyed
-  // on the device index) before any call that may allocate.
+  // (no CUDA error is raised). A decoder used only by the thread that built
+  // it never hits this, because the constructor's runtime calls bound that
+  // thread; a decoder used from any other thread does. Each replica owns its
+  // decoder and uses it on its own thread, so this is defence in depth: bind
+  // once per thread, per device (a thread_local flag keyed on the device
+  // index) before any call that may allocate, and no future caller can
+  // reintroduce the silent failure by moving a decoder across threads.
+  // nvJPEG allocator callbacks (V2 = stream-ordered). Return 0 on success.
+  static int dev_malloc_v2_(void *, void **ptr, size_t size, cudaStream_t stream) noexcept {
+    if (cudaMallocAsync(ptr, size, stream) == cudaSuccess) return 0;
+    (void)cudaGetLastError();
+    return 1;
+  }
+  static int dev_free_v2_(void *, void *ptr, size_t, cudaStream_t stream) noexcept {
+    if (ptr && cudaFreeAsync(ptr, stream) != cudaSuccess) { (void)cudaGetLastError(); return 1; }
+    return 0;
+  }
+  static int pinned_malloc_v2_(void *, void **ptr, size_t size, cudaStream_t) noexcept {
+    if (cudaHostAlloc(ptr, size, cudaHostAllocPortable) == cudaSuccess) return 0;
+    (void)cudaGetLastError();
+    return 1;
+  }
+  static int pinned_free_v2_(void *, void *ptr, size_t, cudaStream_t) noexcept {
+    if (ptr && cudaFreeHost(ptr) != cudaSuccess) { (void)cudaGetLastError(); return 1; }
+    return 0;
+  }
+
   void bind_calling_thread_() const noexcept {
     thread_local int bound_device = -1;
     if (bound_device == device_) return;
@@ -420,8 +456,9 @@ private:
   nvjpegJpegState_t state_ = nullptr;
   unsigned char *staging_ = nullptr;
   size_t staging_cap_ = 0;
-  bool direct_host_output_ = false;
   int device_ = 0;
+  int last_nvjpeg_status_ = 0;
+  Backend preferred_ = Backend::Hardware;
 };
 
 } // namespace turbo_ocr::decode

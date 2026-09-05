@@ -118,6 +118,10 @@ struct GpuPipelineEntry {
   // Lazily constructed on the worker thread so the nvJPEG handle binds to
   // the same primary context that owns `stream` and `pipeline`.
   std::unique_ptr<decode::NvJpegDecoder> nvjpeg;
+  // Second decoder on the hybrid backend, created only when a bitstream the
+  // hardware path reports as unsupported (progressive, arithmetic) arrives,
+  // so those still decode on the GPU instead of the host codec.
+  std::unique_ptr<decode::NvJpegDecoder> nvjpeg_hybrid;
 
   GpuPipelineEntry() = default;
 
@@ -125,6 +129,7 @@ struct GpuPipelineEntry {
       : pipeline(std::move(p)), stream(s) {}
 
   ~GpuPipelineEntry() noexcept {
+    nvjpeg_hybrid.reset();
     nvjpeg.reset();
     if (stream)
       cudaStreamDestroy(stream);
@@ -133,6 +138,12 @@ struct GpuPipelineEntry {
   decode::NvJpegDecoder &get_nvjpeg() {
     if (!nvjpeg) nvjpeg = std::make_unique<decode::NvJpegDecoder>();
     return *nvjpeg;
+  }
+  decode::NvJpegDecoder &get_nvjpeg_hybrid() {
+    if (!nvjpeg_hybrid)
+      nvjpeg_hybrid = std::make_unique<decode::NvJpegDecoder>(
+          decode::NvJpegDecoder::Backend::Hybrid);
+    return *nvjpeg_hybrid;
   }
 
   // Rebuild a wedged entry in place: tear down the old pipeline, stream, and
@@ -144,6 +155,7 @@ struct GpuPipelineEntry {
   // stream may refuse cudaStreamDestroy with a sticky error — that's tolerated
   // here (the GPU context itself is poisoned by then, handled separately).
   void recycle(const PipelineBuildSpec &spec) {
+    nvjpeg_hybrid.reset();
     nvjpeg.reset();
     pipeline.reset();
     if (stream) {

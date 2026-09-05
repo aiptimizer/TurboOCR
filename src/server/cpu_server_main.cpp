@@ -15,6 +15,7 @@
 #include "turbo_ocr/server/bootstrap/stages_cpu.h"
 #include "turbo_ocr/grpc/grpc_service.h"
 #include "turbo_ocr/server/metrics.h"
+#include "turbo_ocr/server/bootstrap/host_allocator.h"
 #include "turbo_ocr/server/bootstrap/server_bootstrap.h"
 #include "turbo_ocr/server/bootstrap/server_config.h"
 #include "turbo_ocr/server/server_types.h"
@@ -82,6 +83,9 @@ int main(int argc, char **argv) try {
 
   // Work pool for offloading blocking inference from the Drogon event loop.
   server::WorkPool work_pool(std::max(pool_size * 32, 128));
+  server::bootstrap::install_host_image_pool(std::max(pool_size * 32, 128) + pool_size,
+                                             cfg.max_image_pixels_bytes(),
+                                             decode::HostImagePool::heap_memory());
   server::Metrics::instance().set_pool_size(pool_size);
   server::register_observability_middleware();
   server::register_metrics_route(&work_pool);

@@ -5,7 +5,6 @@
 
 #include <opencv2/core.hpp>
 
-#include "turbo_ocr/decode/nvjpeg_decoder_pool_fwd.h"
 #include "turbo_ocr/pipeline/pipeline_result.h"
 #ifndef USE_CPU_ONLY
 #include "turbo_ocr/pipeline/pool/pipeline_dispatcher.h"
@@ -33,11 +32,12 @@ void batch_check_dims_pre(const std::vector<std::string> &raw_bytes,
                            std::vector<std::string> &errors);
 
 #ifndef USE_CPU_ONLY
-// `nvjpeg`: shared decoder pool, leased once for the whole batch (nullptr =
-// nvJPEG unavailable). Slots the batched GPU decode does not cover fall
-// through to `decode` (which leases per image, then CPU).
+// Host decode of the NON-JPEG slots on the work thread (PNG via Wuffs, the
+// rest via cv::imdecode). With nvJPEG available, JPEG slots are left empty
+// here and decoded on the replica inside batch_run_pipeline; without it they
+// are host formats like the rest.
 void batch_decode_images(const std::vector<std::string> &raw_bytes,
-                          decode::NvJpegDecoderPool *nvjpeg,
+                          bool nvjpeg_available,
                           const server::ImageDecoder &decode,
                           std::vector<cv::Mat> &imgs,
                           std::vector<std::string> &errors);
@@ -49,9 +49,19 @@ void batch_check_dims_post(std::vector<cv::Mat> &imgs,
                             std::vector<std::string> &errors);
 
 #ifndef USE_CPU_ONLY
+// One dispatcher task for the whole batch: JPEG slots (empty `imgs[i]` with a
+// JPEG in `raw_bytes[i]`) are decoded on the replica with its own decoder and
+// size-checked there, then everything runs through the chunked batch
+// inference. Slots already tagged in `errors` are skipped. The task owns
+// `raw_bytes` and `imgs` (moved in) so an abandoned-on-timeout run never
+// touches the caller's frame. Per-slot failures land in `errors`
+// (`gpu_decode_failed`, `decode_failed`, `dimensions_too_large`,
+// `pixels_too_large`, `inference_failed`); pool exhaustion and the request
+// deadline propagate.
 void batch_run_pipeline(pipeline::PipelineDispatcher &dispatcher,
-                         std::vector<cv::Mat> valid_imgs,
-                         const std::vector<size_t> &valid_indices,
+                         std::vector<std::string> raw_bytes,
+                         std::vector<cv::Mat> imgs,
+                         bool nvjpeg_available,
                          bool want_layout,
                          const server::InferOptions &opts,
                          std::vector<BatchItem> &all_items,

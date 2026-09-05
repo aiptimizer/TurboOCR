@@ -79,7 +79,7 @@ void register_common_routes(server::WorkPool &pool,
   // on a condition variable (unbounded for the CPU pool) when all pipelines
   // are busy; running it inline would wedge a Drogon IO thread under load.
   register_health_route(std::move(readiness_check), &pool);
-  register_ocr_base64_route(pool, infer, decode, layout_available,
+  register_ocr_base64_route(pool, infer, server::JpegInferFunc{}, decode, layout_available,
                             table_available, formula_available);
   register_ocr_raw_route(pool, infer, decode, layout_available,
                          table_available, formula_available);

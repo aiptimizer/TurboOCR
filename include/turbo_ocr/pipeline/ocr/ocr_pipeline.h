@@ -208,6 +208,10 @@ public:
   // layout model, in which case this method is a no-op and still safe).
   [[nodiscard]] OcrPipelineResult run_layout_only(const cv::Mat &img,
                                                    cudaStream_t stream);
+  // Same, for an image already on the device (the JPEG paths decode straight
+  // into the pipeline's buffer): no upload, no host copy of the pixels.
+  [[nodiscard]] OcrPipelineResult run_layout_only(GpuImage gpu_img,
+                                                   cudaStream_t stream);
 
   // Layout + table/formula recognition WITHOUT detection/recognition. Used by
   // /ocr/pdf mode=geometric/auto when the client asked for structure: the page

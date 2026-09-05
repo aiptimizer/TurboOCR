@@ -56,15 +56,16 @@ struct ServerConfig {
   int max_body_mem_mb = 1024;    // MAX_BODY_MEMORY_MB / --max-body-memory-mb
 
   // ---- Pipeline / threading ----
-  // `pipeline_pool_size`, `http_threads` and `nvjpeg_decoders` are deliberately
-  // `std::optional`: `nullopt` means "operator did not set this; caller
-  // chooses the default." GPU main.cpp picks via VRAM auto-detect when pool
-  // size is unset; CPU cpu_main.cpp uses a hard-coded 4. http_threads defaults
-  // to `max(pool_size*32, 128)` on GPU and isn't read on CPU. nvjpeg_decoders
-  // defaults to the pool size (one shared decoder per replica) on GPU.
+  // `pipeline_pool_size` and `http_threads` are deliberately `std::optional`:
+  // `nullopt` means "operator did not set this; caller chooses the default."
+  // GPU main.cpp picks via VRAM auto-detect when pool size is unset; CPU
+  // cpu_main.cpp uses a hard-coded 4. http_threads defaults to
+  // compute_work_threads(pool_size) on GPU and isn't read on CPU.
+  // Largest host image the server accepts, in bytes of BGR pixels
+  // (MAX_IMAGE_PIXELS_MP × 3): the per-buffer cap of the host image pool.
+  [[nodiscard]] size_t max_image_pixels_bytes() const;
   std::optional<int> pipeline_pool_size;  // PIPELINE_POOL_SIZE / --pool-size
   std::optional<int> http_threads;        // HTTP_THREADS / --http-threads (GPU only consumer)
-  std::optional<int> nvjpeg_decoders;     // NVJPEG_DECODERS / --nvjpeg-decoders (GPU only consumer)
   int pdf_daemons            = 16;        // PDF_DAEMONS / --pdf-daemons
   int pdf_workers            = 4;         // PDF_WORKERS / --pdf-workers
   int shutdown_grace_seconds = 30;        // SHUTDOWN_GRACE_SECONDS / --shutdown-grace

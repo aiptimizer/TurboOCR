@@ -1,6 +1,7 @@
 // ServerConfig implementation (cold path: startup-only parsing, validation,
 // and diagnostics). Declarations in turbo_ocr/server/bootstrap/server_config.h.
 #include "turbo_ocr/server/bootstrap/server_config.h"
+#include "turbo_ocr/decode/image_config.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,10 @@
 #include "turbo_ocr/common/log/logger.h"
 
 namespace turbo_ocr::server {
+
+size_t ServerConfig::max_image_pixels_bytes() const {
+  return static_cast<size_t>(decode::max_image_pixels()) * 3;
+}
 
 using namespace env; // env_* parsers (was re-exported by the deleted server/env_utils.h shim)
 
@@ -78,7 +83,6 @@ std::string ServerConfig::to_json() const {
   j += ",\"max_body_mem_mb\":"   + std::to_string(max_body_mem_mb);
   j += ",\"pipeline_pool_size\":" + opt_json(pipeline_pool_size);
   j += ",\"http_threads\":"      + opt_json(http_threads);
-  j += ",\"nvjpeg_decoders\":"   + opt_json(nvjpeg_decoders);
   j += ",\"pdf_daemons\":"       + std::to_string(pdf_daemons);
   j += ",\"pdf_workers\":"       + std::to_string(pdf_workers);
   j += ",\"shutdown_grace_seconds\":" + std::to_string(shutdown_grace_seconds);
@@ -164,8 +168,12 @@ ServerConfig ServerConfig::from_env_and_cli(int argc, char **argv,
     c.pipeline_pool_size = env_int_strict("PIPELINE_POOL_SIZE", 1, 1, 4096, c.errors);
   if (env_present("HTTP_THREADS"))
     c.http_threads = env_int_strict("HTTP_THREADS", 1, 1, 4096, c.errors);
+  // Retired in 3.5.3: JPEG decodes on each replica's own decoder, so there
+  // is no shared pool to size. Warn instead of erroring so a 3.5.2 deployment
+  // still boots; the value is ignored.
   if (env_present("NVJPEG_DECODERS"))
-    c.nvjpeg_decoders = env_int_strict("NVJPEG_DECODERS", 1, 1, 256, c.errors);
+    c.warnings.push_back("NVJPEG_DECODERS is no longer used (JPEG decodes on the "
+                         "replica that runs inference); ignoring it");
   c.pdf_daemons = env_int_strict("PDF_DAEMONS", is_gpu ? 16 : 4, 1, 1024, c.errors);
   c.pdf_workers = env_int_strict("PDF_WORKERS", is_gpu ? 4  : 2, 1, 1024, c.errors);
   c.shutdown_grace_seconds = env_int_strict("SHUTDOWN_GRACE_SECONDS", 30, 0, 600, c.errors);
@@ -309,13 +317,15 @@ ServerConfig ServerConfig::from_env_and_cli(int argc, char **argv,
 
     int pool_size_cli = c.pipeline_pool_size.value_or(0);
     int http_threads_cli = c.http_threads.value_or(0);
-    int nvjpeg_decoders_cli = c.nvjpeg_decoders.value_or(0);
     auto *opt_pool = app.add_option("--pool-size", pool_size_cli,
         "Pipeline pool size (0 = auto from VRAM on GPU / 4 on CPU)")->check(CLI::Range(0, 4096));
     auto *opt_http = app.add_option("--http-threads", http_threads_cli,
         "HTTP work pool threads (0 = auto from pool size)")->check(CLI::Range(0, 4096));
-    auto *opt_nvjpeg = app.add_option("--nvjpeg-decoders", nvjpeg_decoders_cli,
-        "Shared nvJPEG decoder pool size (0 = auto: one per pipeline replica)")->check(CLI::Range(0, 256));
+    // Retired in 3.5.3 (see NVJPEG_DECODERS above): still accepted so a 3.5.2
+    // command line keeps booting; the value is ignored with a warning.
+    int nvjpeg_decoders_retired = 0;
+    auto *opt_nvjpeg = app.add_option("--nvjpeg-decoders", nvjpeg_decoders_retired,
+        "Retired (no longer used): JPEG decodes on the replica that runs inference")->check(CLI::Range(0, 256));
     app.add_option("--pdf-daemons",  c.pdf_daemons,  "PDF render daemons")->capture_default_str()->check(CLI::Range(1, 1024));
     app.add_option("--pdf-workers",  c.pdf_workers,  "PDF render workers")->capture_default_str()->check(CLI::Range(1, 1024));
     app.add_option("--shutdown-grace", c.shutdown_grace_seconds, "Graceful drain seconds before exit")->capture_default_str()->check(CLI::Range(0, 600));
@@ -371,7 +381,8 @@ ServerConfig ServerConfig::from_env_and_cli(int argc, char **argv,
     if (opt_http->count() > 0)
       c.http_threads = http_threads_cli > 0 ? std::optional<int>(http_threads_cli) : std::nullopt;
     if (opt_nvjpeg->count() > 0)
-      c.nvjpeg_decoders = nvjpeg_decoders_cli > 0 ? std::optional<int>(nvjpeg_decoders_cli) : std::nullopt;
+      c.warnings.push_back("--nvjpeg-decoders is no longer used (JPEG decodes on the "
+                           "replica that runs inference); ignoring it");
     if (opt_layout_trt->count() > 0)
       c.layout_trt = layout_trt_cli.empty() ? std::nullopt : std::optional<std::string>(layout_trt_cli);
     c.grpc_response_mode = (grpc_mode_cli == "structured")

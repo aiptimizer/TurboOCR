@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 
 #include "turbo_ocr/common/log/logger.h"
@@ -48,6 +49,17 @@ namespace turbo_ocr::server {
   }
   TOCR_LOG_INFO("Auto-detected pipeline pool size", "pool_size", pool_size, "vram_gb", vram_gb);
   return pool_size;
+}
+
+// Work-pool threads in front of the replica pool: they decode, parse and
+// serialise while the replicas infer, so a few per replica keep the GPU fed
+// and more only add idle threads. Measured flat from 20 to 48 threads on an
+// RTX 5090 (pool 5); the previous max(pool*32, 128) put 128-160 threads on a
+// 20-core box. Every extra thread is one more per-thread scratch set and one
+// more allocator arena holding its own high-water mark of freed request
+// buffers, which is host RSS that never comes back. HTTP_THREADS overrides.
+[[nodiscard]] constexpr int compute_work_threads(int pool_size) noexcept {
+  return std::clamp(pool_size * 4, 16, 64);
 }
 
 } // namespace turbo_ocr::server

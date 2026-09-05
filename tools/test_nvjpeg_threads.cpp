@@ -4,10 +4,10 @@
 //
 // nvJPEG allocates lazily inside nvjpegDecode through an allocator that needs
 // the calling thread bound to a CUDA context; an unbound thread gets
-// NVJPEG_STATUS_ALLOCATOR_FAILURE and no CUDA error. The per-thread decoders
-// of v3.5.0 never crossed threads; the shared NvJpegDecoderPool (v3.5.2) does,
-// and NvJpegDecoder::bind_calling_thread_() is what makes that safe. Without
-// it the server silently fell back to CPU decode on the base64 routes.
+// NVJPEG_STATUS_ALLOCATOR_FAILURE and no CUDA error. v3.5.2 shared decoders
+// across threads and hit this; the server then silently fell back to CPU
+// decode on the base64 routes. Each replica now owns its decoder, and
+// NvJpegDecoder::bind_calling_thread_() keeps cross-thread use safe anyway.
 //
 // Exit 0 when every case decodes, 1 otherwise.
 //
@@ -38,9 +38,10 @@ int failures = 0;
 
 void expect_decode(const char *tag, NvJpegDecoder &d,
                    const std::vector<unsigned char> &jpg) {
-  cv::Mat m = d.decode(jpg.data(), jpg.size());
-  const bool ok = !m.empty();
-  std::cout << (ok ? "ok   " : "FAIL ") << tag << " (" << m.cols << "x" << m.rows << ")\n";
+  auto r = d.decode(jpg.data(), jpg.size());
+  const bool ok = r.status == turbo_ocr::decode::JpegDecodeStatus::Ok && !r.image.empty();
+  std::cout << (ok ? "ok   " : "FAIL ") << tag << " (" << r.image.cols << "x" << r.image.rows
+            << ", status " << turbo_ocr::decode::to_string(r.status) << "/" << r.nvjpeg_status << ")\n";
   if (!ok) ++failures;
 }
 
@@ -80,10 +81,26 @@ int main(int argc, char **argv) {
       std::vector<std::pair<const unsigned char *, size_t>> in{
           {small.data(), small.size()}, {large.data(), large.size()}};
       auto out = d.batch_decode(in);
-      const bool ok = out.size() == 2 && !out[0].empty() && !out[1].empty();
+      const bool ok = out.size() == 2 &&
+                      out[0].status == turbo_ocr::decode::JpegDecodeStatus::Ok && !out[0].image.empty() &&
+                      out[1].status == turbo_ocr::decode::JpegDecodeStatus::Ok && !out[1].image.empty();
       std::cout << (ok ? "ok   " : "FAIL ") << "main-constructed, batch_decode on T1\n";
       if (!ok) ++failures;
     }).join();
+  }
+  // Optional third argument: a progressive JPEG. The hardware backend must
+  // report it Unsupported (not Failed) and the hybrid backend must decode it.
+  if (argc >= 4) {
+    const auto prog = load(argv[3]);
+    NvJpegDecoder hw(NvJpegDecoder::Backend::Hardware);
+    NvJpegDecoder hy(NvJpegDecoder::Backend::Hybrid);
+    auto a = hw.decode(prog.data(), prog.size());
+    auto b = hy.decode(prog.data(), prog.size());
+    const bool ok = a.status != turbo_ocr::decode::JpegDecodeStatus::Failed &&
+                    b.status == turbo_ocr::decode::JpegDecodeStatus::Ok && !b.image.empty();
+    std::cout << (ok ? "ok   " : "FAIL ") << "progressive: hardware=" << turbo_ocr::decode::to_string(a.status)
+              << " hybrid=" << turbo_ocr::decode::to_string(b.status) << " (" << b.image.cols << "x" << b.image.rows << ")\n";
+    if (!ok) ++failures;
   }
   std::cout << (failures ? "FAILED" : "PASSED") << " (" << failures << " failures)\n";
   return failures ? 1 : 0;

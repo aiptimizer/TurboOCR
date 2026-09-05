@@ -82,10 +82,10 @@ void register_ocr_raw_route_gpu(server::WorkPool &pool,
         if (reject_if_too_large_pre(data, len, cb)) return;
 
         // JPEG with nvJPEG: submit GPU-direct decode + infer as one work item
-        // (pipeline::decode_jpeg_and_run — shared with the gRPC JPEG path).
-        // Layout-only requests (?text=0) skip this fast path — the generic
-        // branch below dispatches them to run_layout_only.
-        if (opts.want_text && nvjpeg_available && NvJpegDecoder::is_jpeg(data, len)) {
+        // (pipeline::decode_jpeg_and_run — shared with every JPEG path).
+        // Layout-only requests (?text=0) take it too: run_layout_only has a
+        // device-image overload, so no host copy of the pixels is ever made.
+        if (nvjpeg_available && NvJpegDecoder::is_jpeg(data, len)) {
           pipeline::JpegRunOpts run_opts{
               .want_layout = opts.want_layout,
               .want_reading_order = opts.want_reading_order,
@@ -96,8 +96,7 @@ void register_ocr_raw_route_gpu(server::WorkPool &pool,
               // non-blocking on the GPU worker, awaited later in
               // finalize_deferred() off the worker. Local backends ignore it.
               .defer_external = true,
-              .layout_only = false,
-              .log_fastpath_errors = true,
+              .layout_only = !opts.want_text,
           };
           // C4: capture `req` by value so the JPEG bytes (data/len point into
           // req->body()) stay alive if the future is abandoned on timeout and

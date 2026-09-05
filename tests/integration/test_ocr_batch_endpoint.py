@@ -179,3 +179,24 @@ class TestOcrBatchEndpoint:
         assert len(data["batch_results"]) == 2
         assert data.get("errors", [None, None])[1] is not None
         assert data["batch_results"][0]["results"], "valid slot lost its text"
+
+
+def test_batch_jpeg_matches_raw(server_url, hello_image):
+    """A JPEG in /ocr/batch is decoded on the replica like /ocr/raw: identical text.
+
+    Mixed with a PNG so both decode paths (replica for JPEG, host for PNG)
+    run in the same batch and land in the right slots.
+    """
+    import base64 as _b64
+    import requests as _rq
+    from conftest import pil_to_jpeg_bytes as _jpg, pil_to_png_bytes as _png
+    jpg, png = _jpg(hello_image), _png(hello_image)
+    raw_jpg = _rq.post(f"{server_url}/ocr/raw", data=jpg, headers={"Content-Type": "image/jpeg"}, timeout=10)
+    raw_png = _rq.post(f"{server_url}/ocr/raw", data=png, headers={"Content-Type": "image/png"}, timeout=10)
+    batch = _rq.post(f"{server_url}/ocr/batch", json={"images": [_b64.b64encode(jpg).decode("ascii"), _b64.b64encode(png).decode("ascii")]}, timeout=30)
+    assert raw_jpg.status_code == 200 and raw_png.status_code == 200 and batch.status_code == 200
+    slots = batch.json()["batch_results"]
+    assert len(slots) == 2
+    texts = lambda results: [item["text"] for item in results]
+    assert texts(slots[0]["results"]) == texts(raw_jpg.json()["results"])
+    assert texts(slots[1]["results"]) == texts(raw_png.json()["results"])

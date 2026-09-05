@@ -146,6 +146,7 @@ identifiers regardless of transport (`proto/ocr.proto:5-22`).
 | `PDF_TOO_LARGE` | 400 | PDF page count exceeds `MAX_PDF_PAGES`. |
 | `PDF_RENDER_FAILED` | 500 | PDFium failed to render a page. |
 | `SERVER_BUSY` | 503 | Pipeline pool exhausted; retry after `Retry-After`. |
+| `GPU_DECODE_FAILED` | 503 | The GPU JPEG decoder faulted (nvJPEG allocator, execution or context error). Retry. JPEG is never decoded on the CPU to cover this. A bitstream the hardware decoder does not support (progressive, arithmetic) is decoded by the replica's hybrid GPU backend; only what neither GPU backend decodes (12-bit, CMYK) takes the host codec, by specification. gRPC: `UNAVAILABLE`; in batch responses the slot carries the tag `gpu_decode_failed`. |
 | `NOT_READY` | 503 | Pipeline not yet ready (e.g. TensorRT engines still building). |
 | `INFERENCE_ERROR` | 500 | An error occurred during pipeline inference. |
 

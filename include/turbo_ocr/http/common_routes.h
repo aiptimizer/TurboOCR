@@ -83,8 +83,11 @@ void register_health_route(std::function<bool()> readiness_check = nullptr,
 // actually loaded (GPU: routing-derived; CPU: env-derived) so the fail-loud 400
 // matches reality — passing the routing-name set here would silently diverge on
 // the CPU build. See check_structure_backends.
+/// `jpeg_infer` (may be empty) runs JPEG bytes through the GPU-direct decode
+/// + inference path on the replica; when empty, JPEG is decoded by `decode`.
 void register_ocr_base64_route(server::WorkPool &pool,
                                 const server::InferFunc &infer,
+                                const server::JpegInferFunc &jpeg_infer,
                                 const server::ImageDecoder &decode,
                                 bool layout_available,
                                 bool table_available,

@@ -152,7 +152,6 @@ grpc_jpeg_decode_and_infer(pipeline::PipelineDispatcher &dispatcher,
       .routing = routing,
       .defer_external = false,
       .layout_only = layout_only,
-      .log_fastpath_errors = false,
   };
   return dispatcher.submit(
       [owned = std::move(owned), run_opts](auto &e) {

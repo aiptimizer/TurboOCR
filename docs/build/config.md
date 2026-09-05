@@ -134,8 +134,7 @@ the `*_ONNX` overrides below are only needed for a non-default location.
 | Variable | Default | Description |
 |---|---|---|
 | `PIPELINE_POOL_SIZE` | auto | Concurrent GPU pipelines (~1.4 GB VRAM each). Unset → GPU auto-detects from VRAM, CPU uses 4. Bounds `[1, 4096]`. CLI: `--pool-size` (`0` = auto). |
-| `HTTP_THREADS` | `max(pool*32, 128)` | Work-pool threads for blocking inference (GPU consumer only). Bounds `[1, 4096]`. CLI: `--http-threads` (`0` = auto). |
-| `NVJPEG_DECODERS` | pool size | Shared nvJPEG decoder pool for the work-pool decode paths (`/ocr` base64, `/ocr/batch`, gRPC bytes). Decoders are created at startup and leased per decode, never created per thread: each one holds ~190 MB of device memory and ~50 MB of host memory until exit, so the old per-thread design cost up to `HTTP_THREADS × 190 MB` of VRAM. More decoders than replicas cannot raise throughput (inference is the bound). When every decoder is busy for 2 s the request decodes on the CPU instead of waiting. Bounds `[1, 256]`. CLI: `--nvjpeg-decoders` (`0` = auto). |
+| `HTTP_THREADS` | `clamp(pool*4, 16, 64)` | Work-pool threads in front of the GPU replica pool (decode, JSON, PDF joins). Four per replica, 16 to 64: throughput is flat from 20 to 48 threads on an RTX 5090, and every extra thread carries its own scratch buffers and an allocator arena's high-water mark of freed request buffers (host RSS that never returns). Bounds `[1, 4096]`. CLI: `--http-threads` (`0` = auto). |
 | `PDF_DAEMONS` | `16` (CPU: `4`) | PDF render daemon processes. Bounds `[1, 1024]`. CLI: `--pdf-daemons`. |
 | `PDF_WORKERS` | `4` (CPU: `2`) | PDF render workers. Bounds `[1, 1024]`. Exceeding `PDF_DAEMONS` warns (excess idle). CLI: `--pdf-workers`. |
 | `GRPC_CQS` | `10` | gRPC completion-queue count. Bounds `[1, 1024]`. CLI: `--grpc-cqs`. |
@@ -252,13 +251,17 @@ measured reason.
 | `FINALIZE_DEFERRED_TIMEOUT_MS` | request timeout | Await budget for deferred (async VLM) structure results. |
 | `PDF_RENDER_REPLY_TIMEOUT_MS` | `120000` | Cap on waiting for a PDF daemon reply. |
 | `FASTPDF2PNG_PATH` | bundled | Path to the fastpdf2png daemon binary. |
-| `NVJPEG_DEVICE_COPY` | `1` | nvJPEG page-image encode keeps data device-side. |
 | `LAYOUT_KEEP_NESTED_CHILDREN` | `0` | Keep child layout blocks nested inside their parents. |
 | `TURBO_LAYOUT_DEBUG` | `0` | Verbose layout-stage debug output. |
 | `TURBO_OCR_STRICT_QUERY_PARAMS` | `0` | Opt-in: set `1` to reject with 400 any unknown parameter AND any known parameter the endpoint does not support. Default tolerates both (v3.4-compatible) — DEPRECATED: tolerated requests get an `X-Ignored-Params` + `X-Deprecation` response header and v4 rejects them with 400. Routing overrides, `text=0`, and `embed=0` on endpoints that cannot honor them are ALWAYS a 400 — ignoring those would falsify the response. |
-| `TURBO_OCR_DISABLE_MALLOC_REAPER` | `0` | Disable the periodic malloc_trim reaper thread. |
+| `TURBO_OCR_DISABLE_HOST_IMAGE_POOL` | `0` | Troubleshooting only: leave OpenCV's default allocator in place instead of the pinned host image pool (see *Host memory on long-running jobs*). |
+| `TURBO_OCR_DISABLE_MALLOC_REAPER` | `0` | Disable the idle-memory reaper: every 5 s the server asks the host allocator to return already-freed memory (`malloc_trim` on glibc, `arena.<all>.decay` on jemalloc, detected at run time so an `LD_PRELOAD`ed jemalloc counts). It never touches live memory. See *Host memory on long-running jobs* below. |
 | `ENABLE_TIMING` / `PROFILE_STAGES` | `0` | Per-stage timing output / CPU-path stage profiler. |
 | `TOCR_LOG_RATELIMIT` | `10:1000` | Per-call-site log rate limit `N[:WINDOW_MS]`; `0` disables. |
+
+### Host memory on long-running jobs
+
+Request handling allocates large, short-lived host buffers (a decoded page is tens to hundreds of MB; the base64 routes also hold the encoded text). Allocators keep freed memory in per-thread arenas and return it on their own schedule, so RSS plateaus at the sum of the arenas' peaks and can stay there between bursts. The server keeps that bounded from its side: page-sized host images (PNG and other host formats, PDF pages, the replica's host decodes) live in a fixed pool of reusable pinned buffers installed as OpenCV's allocator, so image memory is a budget chosen at startup (`slots × MAX_IMAGE_PIXELS_MP × 3 bytes`, slots = work threads + 2 × replicas + PDF workers, printed at startup) rather than allocator behaviour, and the GPU reads pinned memory by DMA instead of page-faulting through pageable heap; JPEG never becomes a host pixel buffer (each replica decodes it on the GPU with its own decoder, so the decoder footprint is one per replica and `NVJPEG_DECODERS` from 3.5.2 is retired and ignored), `HTTP_THREADS` defaults to a small pool so few arenas are touched, and the idle-memory reaper releases freed pages every 5 s. With jemalloc preloaded, `MALLOC_CONF=background_thread:true,narenas:4` additionally lets jemalloc purge idle arenas itself and caps the number of arenas that can hold a peak; both are safe with the reaper. If RSS still ratchets across batches after that, the memory is live and worth a heap profile rather than more allocator tuning.
 
 !!! info "See also"
     - [Build → Docker](docker.md) — image env vars and the nginx front

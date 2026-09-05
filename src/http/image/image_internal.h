@@ -54,7 +54,7 @@ void register_ocr_raw_route_gpu(server::WorkPool &pool,
 void register_ocr_batch_route_gpu(server::WorkPool &pool,
                                   pipeline::PipelineDispatcher &dispatcher,
                                   const server::ImageDecoder &decode,
-                                  decode::NvJpegDecoderPool *nvjpeg,
+                                  bool nvjpeg_available,
                                   bool layout_available,
                                   bool table_available, bool formula_available,
                                   int max_batch_images);
@@ -62,14 +62,18 @@ void register_ocr_pixels_route_gpu(server::WorkPool &pool,
                                    pipeline::PipelineDispatcher &dispatcher,
                                    bool layout_available, bool table_available,
                                    bool formula_available);
+// `nvjpeg_available`: JPEG bodies are decoded on the replica
+// (decode_jpeg_and_run); other formats through `decode` on the work thread.
 void register_ocr_markdown_route_gpu(server::WorkPool &pool,
                                      pipeline::PipelineDispatcher &dispatcher,
                                      const server::ImageDecoder &decode,
+                                     bool nvjpeg_available,
                                      bool layout_available,
                                      bool table_available,
                                      bool formula_available);
 void register_infer_route_gpu(server::WorkPool &pool,
                               pipeline::PipelineDispatcher &dispatcher,
-                              const server::ImageDecoder &decode);
+                              const server::ImageDecoder &decode,
+                              bool nvjpeg_available);
 
 } // namespace turbo_ocr::routes

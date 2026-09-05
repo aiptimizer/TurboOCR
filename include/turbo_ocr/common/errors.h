@@ -40,6 +40,15 @@ class ImageDecodeError : public OcrError {
   using OcrError::OcrError;
 };
 
+// The GPU JPEG decoder faulted (nvJPEG allocator/execution/context error) or
+// none was free within its lease wait. A server-side, retryable condition:
+// routes map it to 503 GPU_DECODE_FAILED / gRPC UNAVAILABLE. Distinct from
+// ImageDecodeError (the CLIENT's bytes are undecodable, 400) on purpose:
+// a JPEG that nvJPEG cannot decode is never retried on the CPU to hide this.
+class GpuDecodeError : public OcrError {
+  using OcrError::OcrError;
+};
+
 // Decoded/declared image dimensions exceed MAX_IMAGE_DIM. Distinct from
 // ImageDecodeError so the routes can map it to the stable DIMENSIONS_TOO_LARGE
 // code (same as the pre/post-decode sniffs) instead of IMAGE_DECODE_FAILED.

@@ -51,6 +51,11 @@ struct PendingExternal {
 /// back-compat serializer emits a byte-identical response on text-only
 /// pages.
 struct OcrPipelineResult {
+  // Decoded image size in pixels, filled by the paths that decode on the
+  // replica (decode_jpeg_and_run) so routes need no host copy of the pixels
+  // to report it. 0 when the caller decoded the image itself.
+  int                                    image_cols = 0;
+  int                                    image_rows = 0;
   std::vector<OCRResultItem>             results;
   std::vector<layout::LayoutBox>         layout;
   std::vector<int>                       reading_order;

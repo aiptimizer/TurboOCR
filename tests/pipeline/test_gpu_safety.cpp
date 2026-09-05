@@ -85,15 +85,17 @@ TEST_CASE("NvJpeg: batch_decode of 2+ JPEGs matches single decode and leaves "
     auto batch = dec.batch_decode(buffers);
     REQUIRE(batch.size() == 3);
     for (size_t i = 0; i < batch.size(); ++i) {
-      REQUIRE_FALSE(batch[i].empty());
-      CHECK(batch[i].rows == originals[i].rows);
-      CHECK(batch[i].cols == originals[i].cols);
+      REQUIRE(batch[i].status == turbo_ocr::decode::JpegDecodeStatus::Ok);
+      REQUIRE_FALSE(batch[i].image.empty());
+      CHECK(batch[i].image.rows == originals[i].rows);
+      CHECK(batch[i].image.cols == originals[i].cols);
       // Batched output must match the per-image nvJPEG decode of the same
       // bytes (same library; <=1 LSB tolerance in case a backend pairs
       // different IDCT kernels for the two entry points).
-      cv::Mat single = dec.decode(buffers[i].first, buffers[i].second);
-      REQUIRE_FALSE(single.empty());
-      CHECK(cv::norm(batch[i], single, cv::NORM_INF) <= 1);
+      auto single = dec.decode(buffers[i].first, buffers[i].second);
+      REQUIRE(single.status == turbo_ocr::decode::JpegDecodeStatus::Ok);
+      REQUIRE_FALSE(single.image.empty());
+      CHECK(cv::norm(batch[i].image, single.image, cv::NORM_INF) <= 1);
     }
     // The context must be healthy afterwards: the old host-pointer bug left a
     // sticky illegal-memory-access that any later CUDA call would surface.

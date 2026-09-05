@@ -243,6 +243,7 @@ add_library(turbo_ocr_common STATIC
     src/formula/latex_extract.cpp
     src/recognition/ctc_decode.cpp
     src/decode/fast_png_decoder.cpp
+        src/decode/host_image_pool.cpp
     src/layout/order/reading_order.cpp
     src/layout/order/xy_cut.cpp
     src/layout/blocks/match_unsorted.cpp
@@ -294,11 +295,16 @@ add_executable(turbo_ocr_tests
     tests/validation/test_request_validation.cpp
     tests/server/test_pool_sizing.cpp
     src/server/server_config.cpp
+    src/server/host_allocator.cpp
+    tests/server/test_host_allocator.cpp
     tests/common/test_env_utils.cpp
     tests/table/test_html_reconstruct.cpp
     tests/formula/test_formula_tokenizer.cpp
     tests/decode/test_png_guards.cpp
-    tests/decode/test_lease_pool.cpp
+    tests/decode/test_jpeg_codec.cpp
+    tests/decode/test_json_image_field.cpp
+    tests/decode/test_host_image_pool.cpp
+    src/decode/host_image_pool.cpp
     tests/pipeline/test_pipeline_detail.cpp
     tests/pdf/test_pdf_mode_strict.cpp
     tests/common/test_serialization_escape.cpp
@@ -314,7 +320,9 @@ add_executable(turbo_ocr_tests
 # Host-logic suites above resolve their symbols from turbo_ocr_cpu on the CPU
 # build and from turbo_ocr_gpu on the GPU build (linked below).
 if(USE_CPU_ONLY)
-    target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_cpu)
+    target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_cpu
+    ${CMAKE_DL_LIBS}
+)
 endif()
 target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_common)
 target_include_directories(turbo_ocr_tests PRIVATE
@@ -461,6 +469,7 @@ if(USE_CPU_ONLY)
     add_executable(turboocr-cpu-server
         src/server/cpu_server_main.cpp
         src/server/server_config.cpp
+        src/server/host_allocator.cpp
         src/server/stages_cpu.cpp
         ${TURBO_HTTP_COMMON_SRCS}
         ${TURBO_HTTP_CPU_SRCS}
@@ -722,6 +731,7 @@ else()
     # GPU HTTP + gRPC server (shared pipeline pool)
     add_executable(turboocr-server
         src/server/gpu_server_main.cpp
+        src/server/host_allocator.cpp
         src/server/server_config.cpp
         src/server/readiness_gpu.cpp
         src/server/stages_gpu.cpp
@@ -744,7 +754,8 @@ else()
         Drogon::Drogon
         ${GRPC_LIBRARIES}
         protobuf::libprotobuf
-    )
+    ${CMAKE_DL_LIBS}
+)
     # Bake the TensorRT lib dir into the binary's RPATH so a bare `cmake && make`
     # (with -DTENSORRT_DIR) runs with no LD_LIBRARY_PATH. nvinfer dlopen()s
     # libnvinfer_builder_resource_sm*.so by bare name at first engine build;
@@ -821,8 +832,11 @@ else()
             CUDA::nvjpeg
             ${OpenCV_LIBS}
         )
-        # Cross-thread decoder regression (NvJpegDecoderPool hands decoders
-        # between threads): see tools/test_nvjpeg_threads.cpp.
+        # Cross-thread decoder regression (a decoder must decode on threads
+        # other than the one that built it): see tools/test_nvjpeg_threads.cpp.
+        add_executable(bench_nvjpeg_decode EXCLUDE_FROM_ALL tools/bench_nvjpeg_decode.cpp)
+        target_include_directories(bench_nvjpeg_decode PRIVATE include)
+        target_link_libraries(bench_nvjpeg_decode PRIVATE CUDA::cudart CUDA::nvjpeg ${OpenCV_LIBS})
         add_executable(test_nvjpeg_threads EXCLUDE_FROM_ALL tools/test_nvjpeg_threads.cpp)
         target_include_directories(test_nvjpeg_threads PRIVATE include)
         target_link_libraries(test_nvjpeg_threads PRIVATE

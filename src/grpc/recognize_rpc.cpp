@@ -139,6 +139,9 @@ grpc::Status OCRServiceImpl::Recognize(grpc::ServerContext *ctx,
       } catch (const turbo_ocr::ImageTooLargeError &e) {
         return grpc_error(ctx, grpc::StatusCode::INVALID_ARGUMENT,
                           "DIMENSIONS_TOO_LARGE", e.what());
+      } catch (const turbo_ocr::GpuDecodeError &e) {
+        return grpc_error(ctx, grpc::StatusCode::UNAVAILABLE,
+                          "GPU_DECODE_FAILED", e.what());
       } catch (const turbo_ocr::ImageDecodeError &) {
         return grpc_error(ctx, grpc::StatusCode::INVALID_ARGUMENT,
                           "IMAGE_DECODE_FAILED", "Decode failed");

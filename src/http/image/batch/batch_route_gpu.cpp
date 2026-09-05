@@ -35,7 +35,7 @@ using namespace batchdetail;
 void register_ocr_batch_route_gpu(server::WorkPool &pool,
                                    pipeline::PipelineDispatcher &dispatcher,
                                    const server::ImageDecoder &decode,
-                                   decode::NvJpegDecoderPool *nvjpeg,
+                                   bool nvjpeg_available,
                                    bool layout_available,
                                    bool table_available,
                                    bool formula_available,
@@ -52,7 +52,7 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
   const bool formula_avail = formula_available;
   drogon::app().registerHandler(
       "/ocr/batch",
-      [&pool, &dispatcher, &decode, nvjpeg, layout_available,
+      [&pool, &dispatcher, &decode, nvjpeg_available, layout_available,
        valid_table, valid_formula, table_avail, formula_avail,
        max_batch_images](
           const drogon::HttpRequestPtr &req,
@@ -105,7 +105,7 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
     }
 
     server::submit_work(pool, std::move(callback),
-        [b64_strings, n, &dispatcher, &decode, nvjpeg, opts](server::DrogonCallback &cb) {
+        [b64_strings, n, &dispatcher, &decode, nvjpeg_available, opts](server::DrogonCallback &cb) {
       const bool want_layout = opts.want_layout;
       server::run_with_error_handling(cb, "/ocr/batch", [&] {
         // Per-slot error tags for the response. Empty string == success.
@@ -120,28 +120,19 @@ void register_ocr_batch_route_gpu(server::WorkPool &pool,
         const int kMaxImageDim = decode::max_image_dim();
         batch_check_dims_pre(raw_bytes, kMaxImageDim, errors);
 
+        // Host formats decode here; JPEG slots stay empty and are decoded on
+        // the replica inside batch_run_pipeline (their size check runs there
+        // on the decoded dimensions).
         std::vector<cv::Mat> imgs(n);
-        batch_decode_images(raw_bytes, nvjpeg, decode, imgs, errors);
+        batch_decode_images(raw_bytes, nvjpeg_available, decode, imgs, errors);
         batch_check_dims_post(imgs, kMaxImageDim, errors);
 
-        std::vector<cv::Mat> valid_imgs;
-        std::vector<size_t> valid_indices;
-        valid_imgs.reserve(n);
-        valid_indices.reserve(n);
-        for (size_t i = 0; i < n; ++i) {
-          if (errors[i].empty() && !imgs[i].empty()) {
-            valid_imgs.push_back(std::move(imgs[i]));
-            valid_indices.push_back(i);
-          }
-        }
-
         std::vector<BatchItem> all_items(n);
-        // C4: hand ownership of the decoded images to the submitted task so an
-        // abandoned-on-timeout run never touches this frame's vectors.
+        // C4: hand ownership of the bytes and decoded images to the submitted
+        // task so an abandoned-on-timeout run never touches this frame's vectors.
         try {
-          batch_run_pipeline(dispatcher, std::move(valid_imgs),
-                              std::move(valid_indices),
-                              want_layout, opts, all_items, errors);
+          batch_run_pipeline(dispatcher, std::move(raw_bytes), std::move(imgs),
+                              nvjpeg_available, want_layout, opts, all_items, errors);
         } catch (const turbo_ocr::TimeoutError &) {
           cb(timeout_response());
           return;

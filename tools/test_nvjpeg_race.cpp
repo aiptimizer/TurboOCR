@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
   int produced = 0;
   for (int i = 0; i < iters; ++i) {
     cv::Mat img = dec.decode(
-        reinterpret_cast<const unsigned char *>(jpeg.data()), jpeg.size());
+        reinterpret_cast<const unsigned char *>(jpeg.data()), jpeg.size()).image;
     if (img.empty()) {
       std::cerr << "FAIL: decode returned empty at iter " << i << "\n";
       done.store(true);

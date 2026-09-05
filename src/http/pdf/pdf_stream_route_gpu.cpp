@@ -9,6 +9,9 @@
 
 #ifndef USE_CPU_ONLY
 #include "turbo_ocr/pipeline/pool/pipeline_dispatcher.h"
+#include "turbo_ocr/common/errors.h"
+#include "turbo_ocr/decode/jpeg_codec.h"
+#include "turbo_ocr/pipeline/jpeg_infer.h"
 #endif
 
 #include <opencv2/core.hpp>
@@ -105,6 +108,7 @@ void register_ocr_stream_route_gpu(server::WorkPool &pool,
                                    pipeline::PipelineDispatcher &dispatcher,
                                    render::PdfRenderer &pdf_renderer,
                                    const server::ImageDecoder &decode,
+                                   bool nvjpeg_available,
                                    pdf::PdfMode default_pdf_mode,
                                    bool layout_available,
                                    bool table_available,
@@ -116,7 +120,7 @@ void register_ocr_stream_route_gpu(server::WorkPool &pool,
   const bool formula_avail = formula_available;
   drogon::app().registerHandler(
       "/ocr/stream",
-      [&pool, &dispatcher, &pdf_renderer, &decode, default_pdf_mode,
+      [&pool, &dispatcher, &pdf_renderer, &decode, nvjpeg_available, default_pdf_mode,
        layout_available, table_avail, formula_avail, default_dpi,
        max_pdf_pages, doc_ori_available](
           const drogon::HttpRequestPtr &req,
@@ -330,17 +334,59 @@ void register_ocr_stream_route_gpu(server::WorkPool &pool,
     auto state = std::make_shared<NdjsonStream>();
     const server::InferOptions opts_v = opts;
     auto resp = drogon::HttpResponse::newAsyncStreamResponse(
-        [state, &pool, &dispatcher, &decode, body, opts_v](
+        [state, &pool, &dispatcher, &decode, nvjpeg_available, body, opts_v](
             drogon::ResponseStreamPtr stream) {
       {
         std::lock_guard<std::mutex> lk(state->mu);
         state->stream = std::move(stream);
       }
       try {
-        pool.submit([state, &dispatcher, &decode, body, opts_v] {
+        pool.submit([state, &dispatcher, &decode, nvjpeg_available, body, opts_v] {
           state->send_line("{\"event\":\"meta\",\"kind\":\"image\",\"pages\":1}");
-          cv::Mat img = decode(
-              reinterpret_cast<const unsigned char *>(body->data()), body->size());
+          const auto *bytes = reinterpret_cast<const unsigned char *>(body->data());
+          if (nvjpeg_available && decode::looks_like_jpeg(bytes, body->size())) {
+            // JPEG: decoded on the replica, GPU-direct; the page event takes
+            // its dimensions from the result instead of a host copy.
+            try {
+              pipeline::JpegRunOpts run_opts{
+                  .want_layout = opts_v.want_layout,
+                  .want_reading_order = opts_v.want_reading_order,
+                  .want_tables = opts_v.want_tables,
+                  .want_formulas = opts_v.want_formulas,
+                  .routing = opts_v.routing_override,
+                  .defer_external = true,
+                  .layout_only = !opts_v.want_text,
+              };
+              auto out = dispatcher.submit_for_default([body, run_opts](auto &e) {
+                return pipeline::decode_jpeg_and_run(
+                    e, reinterpret_cast<const unsigned char *>(body->data()),
+                    body->size(), run_opts);
+              });
+              pipeline::finalize_deferred(out);
+              std::string inner = emit_pipeline_result_json(out, opts_v.want_blocks);
+              std::string line = std::format(
+                  "{{\"event\":\"page\",\"page\":1,\"page_index\":0,"
+                  "\"width\":{},\"height\":{},", out.image_cols, out.image_rows);
+              line.append(inner.data() + 1, inner.size() - 1);
+              state->send_line(std::move(line));
+              state->send_line("{\"event\":\"end\",\"pages\":1,\"failed\":0}");
+            } catch (const turbo_ocr::TimeoutError &) {
+              state->send_line("{\"event\":\"error\",\"code\":\"INFERENCE_TIMEOUT\"}");
+            } catch (const turbo_ocr::ImageTooLargeError &) {
+              state->send_line("{\"event\":\"error\",\"code\":\"DIMENSIONS_TOO_LARGE\"}");
+            } catch (const turbo_ocr::ImageDecodeError &) {
+              state->send_line("{\"event\":\"error\",\"code\":\"IMAGE_DECODE_FAILED\"}");
+            } catch (const turbo_ocr::GpuDecodeError &e) {
+              TOCR_LOG_ERROR_RL("/ocr/stream GPU decode failed", "error", e.what());
+              state->send_line("{\"event\":\"error\",\"code\":\"GPU_DECODE_FAILED\"}");
+            } catch (const std::exception &e) {
+              TOCR_LOG_ERROR_RL("/ocr/stream image error", "error", e.what());
+              state->send_line("{\"event\":\"error\",\"code\":\"INFERENCE_ERROR\"}");
+            }
+            state->finish();
+            return;
+          }
+          cv::Mat img = decode(bytes, body->size());
           const int kMaxImageDim = decode::max_image_dim();
           if (img.empty() || img.cols > kMaxImageDim || img.rows > kMaxImageDim ||
               decode::exceeds_pixel_cap(img.cols, img.rows)) {

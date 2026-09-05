@@ -232,6 +232,11 @@ grpc::Status OCRServiceImpl::RecognizeBatch(grpc::ServerContext *ctx,
         // tag — two timed-out slots in one batch reporting different codes
         // would misattribute the timeout to an inference fault.
         mark_empty_slot(entries[i], "INFERENCE_TIMEOUT");
+      } catch (const turbo_ocr::GpuDecodeError &e) {
+        // The device decoder faulted on this slot: tagged with its own
+        // (retryable) code, never re-decoded on the CPU.
+        TOCR_LOG_ERROR_RL("gRPC batch GPU decode failed", "index", i, "error", e.what());
+        mark_empty_slot(entries[i], "GPU_DECODE_FAILED");
       } catch (const std::exception &e) {
         TOCR_LOG_ERROR_RL("gRPC batch image error", "index", i, "error", e.what());
         mark_empty_slot(entries[i], "INFERENCE_ERROR");

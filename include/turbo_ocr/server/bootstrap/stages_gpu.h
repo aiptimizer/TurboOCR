@@ -3,7 +3,7 @@
 #include <memory>
 #include <string>
 
-#include "turbo_ocr/decode/nvjpeg_decoder_pool_fwd.h"
+#include "turbo_ocr/decode/host_image_pool.h"
 #include "turbo_ocr/server/bootstrap/server_config.h"
 #include "turbo_ocr/server/service_fns.h"
 
@@ -39,19 +39,33 @@ void validate_gpu_models(const ServerConfig &cfg);
 // std::exit(2) when an explicitly configured CLS engine cannot be loaded.
 [[nodiscard]] GpuStages load_gpu_stages(const ServerConfig &cfg);
 
-// Open the shared nvJPEG decoder pool (`capacity` decoders, leased per
-// decode by the work-pool routes) and probe availability on the calling
-// thread, logging the outcome. nullptr when nvJPEG is unavailable — every
-// consumer then decodes on the CPU. Decoders are pooled, never per-thread:
-// each holds ~190 MB of VRAM for the life of the process (GitHub #33).
-[[nodiscard]] std::shared_ptr<decode::NvJpegDecoderPool>
-open_nvjpeg_decoders(int capacity);
+// Pinned host memory (cudaHostAlloc, portable) for the host image pool.
+[[nodiscard]] decode::BlockMemory cuda_pinned_block_memory() noexcept;
 
-// Image decoder: JPEG via a leased nvJPEG decoder when the pool is non-null
-// (CPU fallback when every decoder is busy past kNvJpegLeaseWait), PNG via
-// Wuffs, every other format via cv::imdecode (decode::decode_cpu_fallback).
-[[nodiscard]] ImageDecoder
-make_gpu_image_decoder(std::shared_ptr<decode::NvJpegDecoderPool> nvjpeg);
+// Give the device's stream-ordered memory pool (cudaMallocAsync, used for the
+// decoders' scratch) an explicit release threshold, so device memory kept
+// between requests is a fixed number rather than "whatever the pool grew to".
+void configure_device_memory_pool();
+
+// Probe nvJPEG once at startup (constructs and discards a decoder; logs the
+// outcome). JPEG is decoded by each replica's own decoder, created lazily on
+// the replica thread (GpuPipelineEntry::get_nvjpeg): one per replica, so the
+// decoder footprint is bounded by the pool size and nothing is shared or
+// leased. The v3.5.1 work-pool decoders and the v3.5.2 shared pool are gone.
+[[nodiscard]] bool probe_nvjpeg();
+
+// Host image decoder for the non-JPEG formats: PNG via Wuffs, every other
+// format via cv::imdecode (decode::decode_cpu_fallback). Every route decodes
+// JPEG on the replica; with a GPU decoder present this decoder refuses JPEG
+// loudly rather than decoding it on the CPU with different pixels, so a route
+// that bypasses the replica path fails in tests instead of degrading quietly.
+// Without nvJPEG (nvjpeg_available=false) JPEG is a host format like the rest.
+[[nodiscard]] ImageDecoder make_gpu_image_decoder(bool nvjpeg_available);
+
+// JPEG-bytes inference for the transport-neutral routes (/ocr base64):
+// GPU-direct decode + inference on the replica, identical to /ocr/raw.
+[[nodiscard]] JpegInferFunc
+make_gpu_jpeg_infer_func(pipeline::PipelineDispatcher &dispatcher);
 
 // The InferFunc for shared routes (/ocr base64): submit to the dispatcher
 // with by-value captures (timeout-safe), forward every degradation signal.

@@ -239,6 +239,34 @@ OcrPipelineResult OcrPipeline::run_layout_only(const cv::Mat &img,
   return out;
 }
 
+OcrPipelineResult OcrPipeline::run_layout_only(GpuImage gpu_img,
+                                                cudaStream_t stream) {
+  UseGuard _ug{in_use_, "run_layout_only(GpuImage)"};
+  OcrPipelineResult out;
+  if (!use_layout_ || !layout_) return out;
+
+  PipelineTimer timer;
+  timer.init(stream);
+  timer.reset();
+
+  // Caller-owned device image (see run_with_layout(GpuImage)): make sure no
+  // earlier consumer is still reading the buffer before layout does.
+  wait_prior_readers_();
+  CUDA_CHECK(cudaEventRecord(det_only_event_, stream));
+  CUDA_CHECK(cudaStreamWaitEvent(layout_stream_, det_only_event_, 0));
+
+  timer.gpu_start("layout_only");
+  if (layout_->enqueue(gpu_img, gpu_img.rows, gpu_img.cols, layout_stream_))
+    out.layout = layout_->collect();
+  timer.gpu_stop();
+
+  // Same event bookkeeping as the host overload.
+  CUDA_CHECK(cudaEventRecord(rec_event_, rec_stream_));
+
+  timer.print_total();
+  return out;
+}
+
 OcrPipelineResult OcrPipeline::run_layout_and_structure(
     const cv::Mat &img, cudaStream_t stream,
     std::vector<OCRResultItem> text_results, bool want_tables,

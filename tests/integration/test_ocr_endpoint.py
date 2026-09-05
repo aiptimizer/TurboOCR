@@ -30,6 +30,31 @@ class TestOcrEndpoint:
         data = r.json()
         assert "results" in data
 
+    def test_jpeg_base64_matches_raw(self, server_url, hello_image):
+        """/ocr and /ocr/raw decode JPEG on the same GPU path: identical output.
+
+        Guards against a route quietly decoding on the CPU (different pixels,
+        slightly different boxes), which is how v3.5.1 masked a broken decoder.
+        """
+        jpg = pil_to_jpeg_bytes(hello_image)
+        raw = requests.post(f"{server_url}/ocr/raw", data=jpg,
+                            headers={"Content-Type": "image/jpeg"}, timeout=10)
+        b64 = requests.post(f"{server_url}/ocr",
+                            json={"image": base64.b64encode(jpg).decode("ascii")}, timeout=10)
+        assert raw.status_code == 200 and b64.status_code == 200
+        texts = lambda r: [item["text"] for item in r.json()["results"]]
+        assert texts(raw) == texts(b64)
+
+    def test_progressive_jpeg_via_base64(self, server_url, hello_image):
+        """Progressive JPEG is outside nvJPEG's hardware path; the host codec
+        decodes it by specification, and the request still succeeds."""
+        buf = io.BytesIO()
+        hello_image.save(buf, format="JPEG", quality=90, progressive=True)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        r = requests.post(f"{server_url}/ocr", json={"image": b64}, timeout=10)
+        assert r.status_code == 200
+        assert "results" in r.json()
+
     def test_detects_known_text(self, server_url):
         """OCR should detect text that we rendered on the image."""
         img = make_text_image("HELLO", width=400, height=100, font_size=50)

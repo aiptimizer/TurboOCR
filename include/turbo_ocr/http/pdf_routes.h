@@ -27,10 +27,13 @@ void register_pdf_route(server::WorkPool &pool,
 /// dims, dpi, mode, results, layout, ...) AS EACH PAGE COMPLETES — out of
 /// order — bracketed by a meta line and an end line. Built for streaming
 /// consumers (e.g. RAG ingest that embeds page k while pages k+1..N still OCR).
+// `nvjpeg_available`: JPEG image bodies are decoded on the replica
+// (decode_jpeg_and_run); other formats through `decode` on the work thread.
 void register_ocr_stream_route_gpu(server::WorkPool &pool,
                                    pipeline::PipelineDispatcher &dispatcher,
                                    render::PdfRenderer &pdf_renderer,
                                    const server::ImageDecoder &decode,
+                                   bool nvjpeg_available,
                                    pdf::PdfMode default_pdf_mode,
                                    bool layout_available,
                                    bool table_available,

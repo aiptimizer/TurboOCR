@@ -18,6 +18,8 @@
 #include "turbo_ocr/decode/image_dims.h"
 #include "turbo_ocr/decode/image_config.h"
 #include "turbo_ocr/decode/nvjpeg_decoder.h"
+#include "turbo_ocr/decode/size_classify.h"
+#include "turbo_ocr/pipeline/jpeg_infer.h"
 #include "turbo_ocr/common/env_utils.h"
 #include "turbo_ocr/server/error_codes.h"
 #include "turbo_ocr/validation/request_gate.h"
@@ -32,12 +34,13 @@ namespace turbo_ocr::routes {
 void register_ocr_markdown_route_gpu(server::WorkPool &pool,
                                      pipeline::PipelineDispatcher &dispatcher,
                                      const server::ImageDecoder &decode,
+                                     bool nvjpeg_available,
                                      bool layout_available,
                                      bool table_available,
                                      bool formula_available) {
   drogon::app().registerHandler(
       "/ocr/markdown",
-      [&pool, &dispatcher, &decode, layout_available, table_available,
+      [&pool, &dispatcher, &decode, nvjpeg_available, layout_available, table_available,
        formula_available](
           const drogon::HttpRequestPtr &req,
           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
@@ -88,13 +91,41 @@ void register_ocr_markdown_route_gpu(server::WorkPool &pool,
         const bool md_want_tables = table_available;
         const bool md_want_formulas = formula_available;
         server::submit_work(pool, std::move(callback),
-            [req, &dispatcher, &decode, embed, md_want_tables,
+            [req, &dispatcher, &decode, nvjpeg_available, embed, md_want_tables,
              md_want_formulas](server::DrogonCallback &cb) {
           server::run_with_error_handling(cb, "/ocr/markdown", [&] {
             const auto *data =
                 reinterpret_cast<const unsigned char *>(req->body().data());
             size_t len = req->body().size();
-            cv::Mat img = decode(data, len);
+            // The markdown renderer needs the pixels afterwards (figure
+            // crops), so JPEG is decoded on the replica to a host image rather
+            // than GPU-direct: still the replica's decoder, still no CPU detour.
+            cv::Mat img;
+            pipeline::OcrPipelineResult out;
+            if (nvjpeg_available && NvJpegDecoder::is_jpeg(data, len)) {
+              struct Decoded {
+                pipeline::OcrPipelineResult out;
+                cv::Mat img;
+              };
+              try {
+                Decoded d = dispatcher.submit_for_default(
+                    [req, data, len, md_want_tables, md_want_formulas](auto &e) {
+                      cv::Mat img = pipeline::decode_jpeg_on_replica(e, data, len);
+                      decode::throw_if_image_too_large(img.cols, img.rows);
+                      auto out = e.pipeline->run_with_layout(
+                          img, e.stream, /*want_layout=*/true,
+                          /*want_reading_order=*/true, /*routing=*/{},
+                          /*defer_external=*/true, md_want_tables, md_want_formulas);
+                      return Decoded{std::move(out), std::move(img)};
+                    });
+                out = std::move(d.out);
+                img = std::move(d.img);
+              } catch (const turbo_ocr::TimeoutError &) {
+                cb(timeout_response());
+                return;
+              }
+            } else {
+            img = decode(data, len);
             if (img.empty()) {
               cb(server::error_response(drogon::k400BadRequest,
                   "IMAGE_DECODE_FAILED", "Failed to decode image"));
@@ -112,7 +143,6 @@ void register_ocr_markdown_route_gpu(server::WorkPool &pool,
               return;
             }
 
-            pipeline::OcrPipelineResult out;
             try {
               out = dispatcher.submit_for_default(
                   [img, md_want_tables, md_want_formulas](auto &e) {
@@ -125,6 +155,7 @@ void register_ocr_markdown_route_gpu(server::WorkPool &pool,
             } catch (const turbo_ocr::TimeoutError &) {
               cb(timeout_response());
               return;
+            }
             }
             pipeline::finalize_deferred(out);
 

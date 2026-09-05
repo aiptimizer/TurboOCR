@@ -26,6 +26,8 @@
 #include "turbo_ocr/server/language_paths.h"
 #include "turbo_ocr/server/metrics.h"
 #include "readiness_gpu.h"
+#include "turbo_ocr/server/bootstrap/host_allocator.h"
+#include "turbo_ocr/server/bootstrap/pool_sizing.h"
 #include "turbo_ocr/server/bootstrap/server_bootstrap.h"
 #include "turbo_ocr/server/bootstrap/server_config.h"
 #include "turbo_ocr/server/server_types.h"
@@ -49,7 +51,7 @@ int main(int argc, char **argv) try {
   // per-op thread pool on top of that just oversubscribes cores under load.
   cv::setNumThreads(0);
 
-  bootstrap::tune_glibc_arenas();
+  bootstrap::tune_host_allocator();
 
   if (!cfg.selected_model_name.empty())
     TOCR_LOG_INFO("OCR model selected",
@@ -104,15 +106,17 @@ int main(int argc, char **argv) try {
   // below captures its request inputs BY VALUE (see the infer lambda).
   dispatcher->set_request_timeout_ms(cfg.request_timeout_ms);
 
-  // Shared nvJPEG decoder pool for the work-pool decode paths (/ocr base64,
-  // /ocr/batch, gRPC bytes). Default: one decoder per pipeline replica —
-  // decode is bounded by inference, so more decoders than replicas only cost
-  // VRAM (~190 MB each). NVJPEG_DECODERS / --nvjpeg-decoders overrides.
-  const int nvjpeg_decoders = cfg.nvjpeg_decoders.value_or(pool_size);
-  std::shared_ptr<turbo_ocr::decode::NvJpegDecoderPool> nvjpeg =
-      turbo_ocr::server::open_nvjpeg_decoders(nvjpeg_decoders);
+  // JPEG decodes on the replica that runs inference (its own decoder, one per
+  // replica). The probe only reports availability; without nvJPEG every route
+  // decodes JPEG on the host.
+  const bool nvjpeg_available = turbo_ocr::server::probe_nvjpeg();
   turbo_ocr::server::ImageDecoder decode =
-      turbo_ocr::server::make_gpu_image_decoder(nvjpeg);
+      turbo_ocr::server::make_gpu_image_decoder(nvjpeg_available);
+  // /ocr (base64) decodes JPEG on the replica exactly like /ocr/raw; without
+  // nvJPEG the hook stays empty and the route decodes on the host.
+  turbo_ocr::server::JpegInferFunc jpeg_infer;
+  if (nvjpeg_available)
+    jpeg_infer = turbo_ocr::server::make_gpu_jpeg_infer_func(*dispatcher);
 
   // Inference function for shared routes (/ocr base64)
   const bool layout_available = !layout_model.empty();
@@ -120,9 +124,13 @@ int main(int argc, char **argv) try {
       turbo_ocr::server::make_gpu_infer_func(*dispatcher);
 
   // Work pool for offloading blocking inference from Drogon event loop
-  int work_threads = std::max(pool_size * 32, 128);
+  int work_threads = turbo_ocr::server::compute_work_threads(pool_size);
   if (cfg.http_threads) work_threads = *cfg.http_threads;
   turbo_ocr::server::WorkPool work_pool(work_threads);
+  turbo_ocr::server::bootstrap::install_host_image_pool(
+      work_threads + 2 * pool_size + pdf_workers, cfg.max_image_pixels_bytes(),
+      turbo_ocr::server::cuda_pinned_block_memory());
+  turbo_ocr::server::configure_device_memory_pool();
 
   // --- Register all routes ---
   turbo_ocr::server::Metrics::instance().set_pool_size(pool_size);
@@ -149,17 +157,17 @@ int main(int argc, char **argv) try {
   }).get();
   const bool table_avail   = struct_avail.first;
   const bool formula_avail = struct_avail.second;
-  turbo_ocr::routes::register_ocr_base64_route(work_pool, infer, decode,
+  turbo_ocr::routes::register_ocr_base64_route(work_pool, infer, jpeg_infer, decode,
                                                layout_available, table_avail,
                                                formula_avail);
-  turbo_ocr::routes::register_image_routes(work_pool, *dispatcher, decode, nvjpeg.get(), layout_available,
+  turbo_ocr::routes::register_image_routes(work_pool, *dispatcher, decode, nvjpeg_available, layout_available,
                                            table_avail, formula_avail, cfg.max_batch_images);
   turbo_ocr::routes::register_pdf_route(work_pool, *dispatcher, pdf_renderer, default_pdf_mode, layout_available,
                                         table_avail, formula_avail,
                                         /*default_dpi=*/100,
                                         cfg.max_pdf_pages,
                                         /*doc_ori_available=*/!doc_ori_model.empty());
-  turbo_ocr::routes::register_ocr_stream_route_gpu(work_pool, *dispatcher, pdf_renderer, decode,
+  turbo_ocr::routes::register_ocr_stream_route_gpu(work_pool, *dispatcher, pdf_renderer, decode, nvjpeg_available,
                                                    default_pdf_mode, layout_available,
                                                    table_avail, formula_avail,
                                                    /*default_dpi=*/100,
@@ -224,7 +232,6 @@ int main(int argc, char **argv) try {
 
   TOCR_LOG_INFO("HTTP server starting", "port", port, "io_threads", io_threads,
            "work_threads", work_threads, "pool_size", dispatcher->worker_count(),
-           "nvjpeg_decoders", nvjpeg ? nvjpeg_decoders : 0,
            "body_cap_mb_drogon", max_body_mb, "body_cap_mb_nginx", max_body_mb,
            "body_mem_mb", max_body_mem_mb);
 

@@ -145,7 +145,7 @@ everything else uses `cv::imdecode`.
 }
 ```
 
-Error codes: `EMPTY_BODY`, `IMAGE_DECODE_FAILED`, `DIMENSIONS_TOO_LARGE`,
+Error codes: `EMPTY_BODY`, `IMAGE_DECODE_FAILED`, `GPU_DECODE_FAILED`, `DIMENSIONS_TOO_LARGE`,
 `INVALID_PARAMETER`, `LAYOUT_DISABLED`, `INFERENCE_ERROR`, `SERVER_BUSY`.
 
 ---
@@ -530,7 +530,7 @@ counterpart of PP-StructureV3 `save_to_markdown`. See
 curl --data-binary @page.png http://localhost:8000/ocr/markdown > page.md
 ```
 
-Error codes: `EMPTY_BODY`, `LAYOUT_DISABLED`, `IMAGE_DECODE_FAILED`,
+Error codes: `EMPTY_BODY`, `LAYOUT_DISABLED`, `IMAGE_DECODE_FAILED`, `GPU_DECODE_FAILED`,
 `DIMENSIONS_TOO_LARGE`, plus the shared inference set.
 
 ---
