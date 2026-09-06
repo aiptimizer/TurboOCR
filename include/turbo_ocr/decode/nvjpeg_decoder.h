@@ -1,8 +1,6 @@
 #pragma once
 
 #include <cstring>
-#include <format>
-#include <iostream>
 #include <utility>
 #include <vector>
 
@@ -10,6 +8,7 @@
 #include <nvjpeg.h>
 #include <opencv2/core.hpp>
 
+#include "turbo_ocr/common/log/logger.h"
 #include "turbo_ocr/decode/jpeg_codec.h"
 
 // GPU-accelerated JPEG decoder using nvJPEG.
@@ -50,31 +49,30 @@ public:
       if (nvjpegGetHardwareDecoderInfo(handle_, &engines, &cores) != NVJPEG_STATUS_SUCCESS)
         engines = 0;
       if (engines > 0)
-        std::cerr << "[NvJpeg] Using HARDWARE backend: " << engines << " NVJPG engine(s), "
-                  << cores << " core(s) each\n";
+        TOCR_LOG_INFO("nvJPEG hardware backend", "nvjpg_engines", engines, "cores_per_engine", cores);
       else
-        std::cerr << "[NvJpeg] Using HARDWARE backend (no NVJPG engine on this GPU; decoding on GPU kernels)\n";
+        TOCR_LOG_INFO("nvJPEG hardware backend without an NVJPG engine on this GPU; decoding on GPU kernels");
     } else {
       // Fallback to GPU_HYBRID (GPU-assisted Huffman, frees compute cores)
       st = nvjpegCreateExV2(NVJPEG_BACKEND_GPU_HYBRID, &dev_alloc, &pinned_alloc, 0, &handle_);
       if (st == NVJPEG_STATUS_SUCCESS) {
-        std::cerr << "[NvJpeg] Using GPU_HYBRID backend\n";
+        TOCR_LOG_INFO("nvJPEG GPU-hybrid backend");
       } else {
         // Final fallback to simple (default hybrid CPU+GPU)
         st = nvjpegCreateSimple(&handle_);
         if (st == NVJPEG_STATUS_SUCCESS) {
-          std::cerr << "[NvJpeg] Using default (simple) backend\n";
+          TOCR_LOG_INFO("nvJPEG default backend");
         }
       }
     }
     if (st != NVJPEG_STATUS_SUCCESS) {
-      std::cerr << std::format("[NvJpeg] Failed to create handle: {}", static_cast<int>(st)) << '\n';
+      TOCR_LOG_ERROR("nvJPEG handle creation failed", "status", static_cast<int>(st));
       handle_ = nullptr;
       return;
     }
     st = nvjpegJpegStateCreate(handle_, &state_);
     if (st != NVJPEG_STATUS_SUCCESS) {
-      std::cerr << std::format("[NvJpeg] Failed to create state: {}", static_cast<int>(st)) << '\n';
+      TOCR_LOG_ERROR("nvJPEG state creation failed", "status", static_cast<int>(st));
       nvjpegDestroy(handle_);
       handle_ = nullptr;
       return;
@@ -294,8 +292,8 @@ public:
 
     DeviceBuffer dbuf(total, stream);
     if (!dbuf.ptr) {
-      std::cerr << std::format("[NvJpeg] Batch scratch alloc failed ({} bytes), "
-                               "falling back to single decode", total) << '\n';
+      TOCR_LOG_WARN_RL("nvJPEG batch scratch allocation failed; decoding the images one by one on the GPU",
+                       "bytes", total);
       return fallback_single();
     }
 
@@ -304,8 +302,8 @@ public:
         handle_, state_, static_cast<int>(n), 1 /*max_cpu_threads*/,
         NVJPEG_OUTPUT_BGRI);
     if (st != NVJPEG_STATUS_SUCCESS) {
-      std::cerr << std::format("[NvJpeg] Batch init failed: {}, falling back to single decode",
-                               static_cast<int>(st)) << '\n';
+      TOCR_LOG_INFO_RL("nvJPEG batched decode not initialised for this batch; decoding the images one by one on the GPU",
+                       "status", static_cast<int>(st));
       return fallback_single();
     }
 
@@ -328,8 +326,8 @@ public:
                               data_ptrs.data(), lengths.data(),
                               outputs.data(), stream);
     if (st != NVJPEG_STATUS_SUCCESS) {
-      std::cerr << std::format("[NvJpeg] Batch decode failed: {}, falling back to single decode",
-                               static_cast<int>(st)) << '\n';
+      TOCR_LOG_INFO_RL("nvJPEG batched decode refused this batch; decoding the images one by one on the GPU",
+                       "status", static_cast<int>(st));
       return fallback_single();
     }
 

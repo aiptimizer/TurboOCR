@@ -278,7 +278,7 @@ docker run --gpus all -p 8000:8000 -p 50051:50051 \
   -v trt-cache:/home/ocr/.cache/turbo-ocr turboocr
 
 # Native (PP-OCRv6 models auto-fetched into ./models/ on first build)
-cmake -B build -DTENSORRT_DIR=/usr/local/tensorrt
+cmake -B build            # finds CUDA and TensorRT itself; -DTENSORRT_DIR=<dir> to point at an unpacked tarball
 cmake --build build -j$(nproc)
 LD_LIBRARY_PATH=/usr/local/tensorrt/lib ./build/turboocr-server
 ```

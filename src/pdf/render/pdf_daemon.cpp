@@ -11,8 +11,10 @@
 #include <filesystem>
 #include <format>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -21,6 +23,7 @@
 #include <unistd.h>
 
 #include "pdf_renderer_internal.h"
+#include "turbo_ocr/common/elf_machine.h"
 #include "turbo_ocr/common/env_utils.h"
 #include "turbo_ocr/common/errors.h"
 
@@ -28,25 +31,82 @@ using namespace turbo_ocr::render;
 
 namespace {
 
+// Why a candidate that exists cannot be used — spelled out for the operator.
+// A binary built for the wrong CPU fails exec() with ENOEXEC, which from the
+// outside looks exactly like a missing file; naming the architecture is the
+// difference between a five-second fix and an afternoon.
+struct RejectedCandidate {
+  std::string path;
+  std::string reason;
+};
+
+// Returns the path when it can be exec'd on this machine; otherwise records
+// why not (or nothing at all when the path simply does not exist).
+std::optional<std::string> usable_binary(const std::string &path,
+                                         std::vector<RejectedCandidate> &rejected) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  if (!fs::exists(path, ec)) return std::nullopt;
+  if (fs::is_directory(path, ec)) {
+    rejected.push_back({path, "is a directory"});
+    return std::nullopt;
+  }
+  if (auto h = turbo_ocr::elf::read_header(path);
+      h && h->is_elf && h->machine != turbo_ocr::elf::host_machine()) {
+    rejected.push_back({path, std::format("is built for {}; this machine is {}",
+                                          turbo_ocr::elf::to_string(h->machine),
+                                          turbo_ocr::elf::to_string(turbo_ocr::elf::host_machine()))});
+    return std::nullopt;
+  }
+  if (::access(path.c_str(), X_OK) != 0) {
+    rejected.push_back({path, "is not executable"});
+    return std::nullopt;
+  }
+  return path;
+}
+
+// Directory of the running server executable, so a build tree that is not
+// called `build/` (or a relocated install) still finds the renderer that was
+// built next to it. Empty when /proc/self/exe cannot be resolved.
+std::string own_executable_dir() {
+  std::error_code ec;
+  auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+  if (ec) return {};
+  return exe.parent_path().string();
+}
+
 std::string find_binary() {
+  std::vector<RejectedCandidate> rejected;
+
   // Explicit override — used by tests and by deployments that put the binary
-  // in a non-standard location. Fails fast if the configured path is missing
+  // in a non-standard location. Fails fast if the configured path is unusable
   // rather than falling back to the default search (surprises hurt in prod).
   if (const char *env = std::getenv("FASTPDF2PNG_PATH"); env && *env) {  // pre-commit-allow-getenv
-    if (std::filesystem::exists(env)) return env;
+    if (auto p = usable_binary(env, rejected)) return *p;
+    if (rejected.empty())
+      throw turbo_ocr::PdfRenderError(std::format("FASTPDF2PNG_PATH does not exist: {}", env));
     throw turbo_ocr::PdfRenderError(
-        std::format("FASTPDF2PNG_PATH does not exist: {}", env));
+        std::format("FASTPDF2PNG_PATH {} {}", rejected.front().path, rejected.front().reason));
   }
-  static constexpr const char *paths[] = {
-    "/app/bin/fastpdf2png",
-    "/usr/local/bin/fastpdf2png",
-    "./build/fastpdf2png",
-    "./bin/fastpdf2png",
-  };
-  for (const char *p : paths) {
-    if (std::filesystem::exists(p)) return p;
+
+  std::vector<std::string> candidates;
+  if (const std::string dir = own_executable_dir(); !dir.empty())
+    candidates.push_back(dir + "/fastpdf2png");
+  for (const char *p : {"/app/bin/fastpdf2png", "/usr/local/bin/fastpdf2png",
+                        "./build/fastpdf2png", "./bin/fastpdf2png"})
+    candidates.emplace_back(p);
+
+  for (const auto &c : candidates) {
+    if (auto p = usable_binary(c, rejected)) return *p;
   }
-  throw turbo_ocr::PdfRenderError("fastpdf2png binary not found");
+
+  std::string msg = "fastpdf2png binary not found (searched:";
+  for (const auto &c : candidates) msg += " " + c;
+  msg += ").";
+  for (const auto &r : rejected) msg += std::format(" {} {}.", r.path, r.reason);
+  msg += " Build it with the server (cmake -DTURBO_BUILD_FASTPDF2PNG=ON, the default), run "
+         "scripts/install_fastpdf2png.sh, or point FASTPDF2PNG_PATH at a binary for this machine.";
+  throw turbo_ocr::PdfRenderError(msg);
 }
 
 // Block SIGPIPE on the calling thread for the lifetime of the guard, draining

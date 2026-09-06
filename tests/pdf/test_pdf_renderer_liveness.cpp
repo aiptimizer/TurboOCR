@@ -65,3 +65,31 @@ TEST_CASE("PdfRenderer ctor throws when the binary exits immediately (execl succ
 
   ::unlink(stub.c_str());
 }
+
+// A binary built for another CPU fails exec() with ENOEXEC and, before this
+// check existed, surfaced as "fastpdf2png binary not found" although the file
+// was right there. The probe must name the architecture instead.
+TEST_CASE("PdfRenderer ctor names a wrong-architecture binary", "[pdf_renderer][liveness][elf]") {
+  // 20-byte ELF header for the architecture this test was NOT built for.
+#if defined(__x86_64__)
+  const unsigned char e_machine[2] = {0xb7, 0x00};  // EM_AARCH64
+  const char *expected = "built for aarch64; this machine is x86-64";
+#else
+  const unsigned char e_machine[2] = {0x3e, 0x00};  // EM_X86_64
+  const char *expected = "built for x86-64; this machine is aarch64";
+#endif
+  std::string path = "/tmp/turbo_ocr_pdf_wrong_arch_" + std::to_string(::getpid());
+  {
+    unsigned char hdr[20] = {0x7f, 'E', 'L', 'F', 2, 1, 1};
+    hdr[16] = 2; hdr[17] = 0;
+    hdr[18] = e_machine[0]; hdr[19] = e_machine[1];
+    std::ofstream o(path, std::ios::binary);
+    o.write(reinterpret_cast<const char *>(hdr), sizeof hdr);
+  }
+  REQUIRE(chmod(path.c_str(), 0755) == 0);
+  EnvScope scope{"FASTPDF2PNG_PATH", path.c_str()};
+
+  REQUIRE_THROWS_WITH(PdfRenderer(1, 1), Catch::Matchers::ContainsSubstring(expected));
+
+  ::unlink(path.c_str());
+}

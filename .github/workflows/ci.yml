@@ -30,6 +30,32 @@ jobs:
       - name: Run unit tests
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
+  # The same gate on aarch64 (GitHub's arm64 runners), through the CMake route
+  # for the PDF pieces: the vendored PDFium is x86-64, so cmake/TurboPdfium.cmake
+  # must fetch the arm64 SDK, and cmake/TurboFastpdf2png.cmake must build the
+  # renderer for this CPU. Catches the "x86-64 binaries committed" class of
+  # breakage that only ARM users would otherwise find.
+  build-and-test-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-cpp-deps
+        with:
+          pdf-renderer: cmake
+      - name: Configure (CPU, portable baseline)
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DNATIVE_ARCH=OFF -DUSE_CPU_ONLY=ON \
+            | tee configure.log
+          grep -q "PDFium: .*fetched chromium" configure.log
+      - name: Build unit tests + renderer
+        run: cmake --build build --target turbo_ocr_tests fastpdf2png_bin -j"$(nproc)"
+      - name: Run unit tests
+        run: ctest --test-dir build --output-on-failure --no-tests=error
+      - name: Renderer built for this CPU
+        run: |
+          file build/fastpdf2png | grep -q "ARM aarch64"
+          test "$(build/fastpdf2png --info tests/fixtures/pdf/academic_paper.pdf)" = "15"
+
   # CPU server smoke: boot turboocr-cpu-server and curl the endpoint matrix.
   # Requires the model bundle, so it is gated on MODELS_RELEASE_URL being set.
   cpu-smoke:

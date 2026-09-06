@@ -103,7 +103,8 @@ message(STATUS "Turbo OCR arch flags: ${_turbo_arch_flag} (NATIVE_ARCH=${NATIVE_
 # --- Target architecture detection (x86_64 / aarch64) ----------------------
 # The binaries vendored in third_party/ (ONNX Runtime, PDFium) and bin/
 # (fastpdf2png) are x86_64. On aarch64 the build fetches the matching
-# ONNX Runtime release and PDFium build instead of linking the x86 copies.
+# ONNX Runtime release and PDFium build instead of linking the x86 copies,
+# and builds fastpdf2png from source (cmake/TurboFastpdf2png.cmake).
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _turbo_proc)
 if(_turbo_proc MATCHES "aarch64|arm64")
   set(TURBO_ARCH "aarch64")
@@ -114,12 +115,10 @@ else()
 endif()
 message(STATUS "Turbo OCR target arch: ${CMAKE_SYSTEM_PROCESSOR} -> ${TURBO_ARCH}")
 
-# PDFium location. x86_64 uses the vendored copy; aarch64 expects an arm64
-# PDFium unpacked to third_party/pdfium by scripts/install_pdfium.sh (which
-# pulls pdfium-linux-arm64 from bblanchon/pdfium-binaries). Both layouts are
-# {include/, lib/libpdfium.so}, so only the root differs.
-set(TURBO_PDFIUM_DIR "${CMAKE_SOURCE_DIR}/third_party/pdfium"
-    CACHE PATH "Root of the PDFium SDK (include/ + lib/)")
+# PDFium SDK for the target architecture: the vendored x86-64 copy when it
+# matches, otherwise the pinned bblanchon release is fetched and verified.
+# Sets TURBO_PDFIUM_DIR ({include/, lib/libpdfium.so}); see the module.
+include(cmake/TurboPdfium.cmake)
 
 # Profile-Guided Optimization. Two-pass build on the SAME build dir:
 #   1. cmake -DPGO_MODE=generate && build  →  run a representative workload
@@ -195,7 +194,11 @@ if(ENABLE_TSAN)
     add_link_options(-fsanitize=thread)
 endif()
 
-find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+# OpenCV 4 or 5. OpenCV 5 split the contour/2-D transform helpers out of
+# imgproc into the geometry module (include/turbo_ocr/common/cv_geometry.h
+# picks the header); the component is optional so OpenCV 4 configures unchanged.
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs OPTIONAL_COMPONENTS geometry)
+message(STATUS "OpenCV ${OpenCV_VERSION}: ${OpenCV_LIBS}")
 find_package(Drogon CONFIG REQUIRED)
 
 # c-ares is a transitive dependency of gRPC's cmake config.  The apt
@@ -298,6 +301,7 @@ add_executable(turbo_ocr_tests
     src/server/host_allocator.cpp
     tests/server/test_host_allocator.cpp
     tests/common/test_env_utils.cpp
+    tests/common/test_elf_machine.cpp
     tests/table/test_html_reconstruct.cpp
     tests/formula/test_formula_tokenizer.cpp
     tests/decode/test_png_guards.cpp
@@ -367,16 +371,17 @@ if(USE_CPU_ONLY)
     if(NOT ONNXRUNTIME_LIB OR NOT ONNXRUNTIME_INCLUDE_DIR)
         include(FetchContent)
         set(ORT_VERSION "1.22.0" CACHE STRING "ONNX Runtime version to fetch")
-        # SHA256 of onnxruntime-linux-<arch>-${ORT_VERSION}.tgz. The x64 hash is
-        # pinned; the aarch64 tarball has a different hash per release. We do not
-        # ship a verified default aarch64 hash, so the aarch64 build/CI must pass
-        # -DORT_SHA256=... to pin it. An empty hash is a hard error rather than a
-        # silent unverified download — set ALLOW_UNVERIFIED_ORT=ON to override.
+        # SHA256 of onnxruntime-linux-<arch>-${ORT_VERSION}.tgz, per architecture
+        # (the same values docker/Dockerfile.cpu pins). Bumping ORT_VERSION means
+        # passing -DORT_SHA256=... for the new tarball; an empty hash is a hard
+        # error rather than a silent unverified download — set
+        # ALLOW_UNVERIFIED_ORT=ON to override.
         if(TURBO_ARCH STREQUAL "x64")
             set(ORT_SHA256 "8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3"
                 CACHE STRING "ONNX Runtime tarball SHA256")
         else()
-            set(ORT_SHA256 "" CACHE STRING "ONNX Runtime aarch64 tarball SHA256 (set in CI)")
+            set(ORT_SHA256 "bb76395092d150b52c7092dc6b8f2fe4d80f0f3bf0416d2f269193e347e24702"
+                CACHE STRING "ONNX Runtime aarch64 tarball SHA256")
         endif()
         set(_ort_url "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-${TURBO_ORT_URL_ARCH}-${ORT_VERSION}.tgz")
         message(STATUS "ONNX Runtime not found; fetching v${ORT_VERSION} (${TURBO_ORT_URL_ARCH})")
@@ -494,9 +499,66 @@ if(USE_CPU_ONLY)
 else()
     message(STATUS "Building GPU mode (CUDA + TensorRT)")
 
+    # --- CUDA toolkit: find it where distributions put it before CMake asks
+    # for the compiler. CMake's own lookup knows only $CUDACXX and `nvcc` on
+    # PATH; NVIDIA's packages install under /usr/local/cuda-<ver> (often
+    # without the /usr/local/cuda symlink), Arch uses /opt/cuda, and many
+    # shells export CUDA_HOME instead. An explicit -DCMAKE_CUDA_COMPILER or
+    # $CUDACXX always wins.
+    if(NOT CMAKE_CUDA_COMPILER AND "$ENV{CUDACXX}" STREQUAL "")
+        find_program(_turbo_nvcc_on_path nvcc)
+        if(NOT _turbo_nvcc_on_path)
+            set(_turbo_cuda_roots "")
+            foreach(_root IN ITEMS "${CUDAToolkit_ROOT}" "$ENV{CUDAToolkit_ROOT}" "$ENV{CUDA_HOME}" "$ENV{CUDA_PATH}")
+                if(_root)
+                    list(APPEND _turbo_cuda_roots "${_root}")
+                endif()
+            endforeach()
+            file(GLOB _turbo_cuda_versioned LIST_DIRECTORIES true "/usr/local/cuda-*")
+            list(SORT _turbo_cuda_versioned COMPARE NATURAL ORDER DESCENDING)
+            list(APPEND _turbo_cuda_roots /usr/local/cuda ${_turbo_cuda_versioned} /opt/cuda)
+            foreach(_root IN LISTS _turbo_cuda_roots)
+                if(EXISTS "${_root}/bin/nvcc")
+                    set(CMAKE_CUDA_COMPILER "${_root}/bin/nvcc" CACHE FILEPATH "CUDA compiler")
+                    set(CUDAToolkit_ROOT "${_root}" CACHE PATH "CUDA toolkit root")
+                    message(STATUS "CUDA toolkit: ${_root} (nvcc is not on PATH)")
+                    break()
+                endif()
+            endforeach()
+            if(NOT CMAKE_CUDA_COMPILER)
+                message(FATAL_ERROR
+                    "No CUDA toolkit found: nvcc is not on PATH and none of "
+                    "CUDAToolkit_ROOT, CUDA_HOME, CUDA_PATH, /usr/local/cuda, "
+                    "/usr/local/cuda-<version>, /opt/cuda holds bin/nvcc. Install the "
+                    "toolkit or pass -DCMAKE_CUDA_COMPILER=<toolkit>/bin/nvcc.")
+            endif()
+        endif()
+    endif()
     find_package(CUDAToolkit REQUIRED)
 
-    set(TENSORRT_DIR "/usr/local/tensorrt" CACHE PATH "Path to TensorRT")
+    # --- TensorRT: the tarball layout (<dir>/include + <dir>/lib, which the
+    # installer links as /usr/local/tensorrt) or the distribution packages
+    # (headers in the system include directory, libraries in the multiarch
+    # library directory). TENSORRT_DIR is an optional hint — a tarball root
+    # or a library directory — and the two directories found are what the
+    # targets use.
+    set(TENSORRT_DIR "" CACHE PATH "TensorRT location hint: tarball root (include/ + lib/) or the library directory")
+    find_path(TENSORRT_INCLUDE_DIR NvInfer.h
+        HINTS "${TENSORRT_DIR}/include" "${TENSORRT_DIR}" /usr/local/tensorrt/include
+        PATHS "/usr/include/${CMAKE_LIBRARY_ARCHITECTURE}" /usr/include)
+    find_library(TENSORRT_NVINFER_LIBRARY nvinfer
+        HINTS "${TENSORRT_DIR}/lib" "${TENSORRT_DIR}" /usr/local/tensorrt/lib
+        PATHS "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}" /usr/lib64 /usr/lib)
+    if(NOT TENSORRT_INCLUDE_DIR OR NOT TENSORRT_NVINFER_LIBRARY)
+        message(FATAL_ERROR
+            "TensorRT not found: looked for NvInfer.h and libnvinfer.so under "
+            "TENSORRT_DIR='${TENSORRT_DIR}', /usr/local/tensorrt, "
+            "/usr/include/${CMAKE_LIBRARY_ARCHITECTURE} + /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}. "
+            "Install TensorRT (tarball: scripts/install_native.sh links it as "
+            "/usr/local/tensorrt; packages: tensorrt-dev) or pass -DTENSORRT_DIR=<root or lib dir>.")
+    endif()
+    get_filename_component(TENSORRT_LIB_DIR "${TENSORRT_NVINFER_LIBRARY}" DIRECTORY)
+    message(STATUS "TensorRT: headers ${TENSORRT_INCLUDE_DIR}, libraries ${TENSORRT_LIB_DIR}")
 
     # Protobuf + gRPC discovery + proto codegen (shared with the CPU arm).
     turbo_setup_grpc_codegen()
@@ -563,10 +625,15 @@ else()
             "/usr/local). The GPU build needs a CUDA-enabled ONNX Runtime "
             "(libonnxruntime.so + libonnxruntime_providers_cuda.so + headers); "
             "the plain onnxruntime-linux-<arch>-<ver>.tgz release asset is "
-            "CPU-only and will NOT work. Microsoft publishes no GPU aarch64 "
-            "tarball — install a CUDA-enabled ORT into "
-            "third_party/onnxruntime/{include,lib} or /usr/local, matching "
-            "your CUDA major version.")
+            "CPU-only and will NOT work. Microsoft publishes no CUDA-enabled "
+            "aarch64 tarball, so on aarch64 build it once from source:\n"
+            "  git clone --depth 1 -b v${ORT_GPU_VERSION} https://github.com/microsoft/onnxruntime\n"
+            "  cd onnxruntime && ./build.sh --config Release --build_shared_lib --parallel --skip_tests \\\n"
+            "      --use_cuda --cuda_home ${CUDAToolkit_ROOT} --cudnn_home /usr\n"
+            "then copy include/onnxruntime/core/session/*.h into third_party/onnxruntime/include/ "
+            "and build/Linux/Release/libonnxruntime.so* + libonnxruntime_providers_*.so into "
+            "third_party/onnxruntime/lib/ (or the same layout under /usr/local). "
+            "docs/build/native.md, section aarch64, has the details.")
     endif()
     get_filename_component(ONNXRUNTIME_LIB_DIR "${ONNXRUNTIME_LIB}" DIRECTORY)
     find_library(ONNXRUNTIME_CUDA_EP onnxruntime_providers_cuda
@@ -665,12 +732,12 @@ else()
         COMPILE_OPTIONS "-ffast-math;-fopenmp-simd")
     target_include_directories(turbo_ocr_gpu PUBLIC
         ${CUDAToolkit_INCLUDE_DIRS}
-        ${TENSORRT_DIR}/include
+        ${TENSORRT_INCLUDE_DIR}
         ${PROTO_GEN_DIR}
         ${TURBO_PDFIUM_DIR}/include
         ${ONNXRUNTIME_INCLUDE_DIR}   # ort_session.cpp: formula encoder+prep+step via ORT-CUDA
     )
-    target_link_directories(turbo_ocr_gpu PUBLIC ${TENSORRT_DIR}/lib)
+    target_link_directories(turbo_ocr_gpu PUBLIC ${TENSORRT_LIB_DIR})
     # Link libpdfium.so directly for in-process text-layer extraction.
     # The shared lib is vendored in third_party/pdfium/lib and also placed
     # in bin/ by scripts/install_fastpdf2png.sh (so native dev + Docker
@@ -713,7 +780,7 @@ else()
     target_link_libraries(turbo_ocr_tests PRIVATE turbo_ocr_gpu CUDA::cudart)
     target_include_directories(turbo_ocr_tests PRIVATE
         ${CUDAToolkit_INCLUDE_DIRS}
-        ${TENSORRT_DIR}/include
+        ${TENSORRT_INCLUDE_DIR}
     )
     # These suites need symbols that exist only in turbo_ocr_gpu (CUDA/TRT or
     # GPU-list-only TUs), so they build in the GPU configuration only.
@@ -757,7 +824,7 @@ else()
     ${CMAKE_DL_LIBS}
 )
     # Bake the TensorRT lib dir into the binary's RPATH so a bare `cmake && make`
-    # (with -DTENSORRT_DIR) runs with no LD_LIBRARY_PATH. nvinfer dlopen()s
+    # (TensorRT found at configure time) runs with no LD_LIBRARY_PATH. nvinfer dlopen()s
     # libnvinfer_builder_resource_sm*.so by bare name at first engine build;
     # without this it aborts cryptically. (onnxruntime's dir is auto-added to the
     # rpath because it's linked by absolute path; TRT is linked via
@@ -768,8 +835,8 @@ else()
     # library (libnvinfer) dlopen()s another lib by bare name, so the resource
     # lib would not be found; DT_RPATH IS searched transitively for such loads.
     set_target_properties(turboocr-server PROPERTIES
-        BUILD_RPATH "${TENSORRT_DIR}/lib"
-        INSTALL_RPATH "${TENSORRT_DIR}/lib;${ONNXRUNTIME_LIB_DIR}")
+        BUILD_RPATH "${TENSORRT_LIB_DIR}"
+        INSTALL_RPATH "${TENSORRT_LIB_DIR};${ONNXRUNTIME_LIB_DIR}")
     target_link_options(turboocr-server PRIVATE "-Wl,--disable-new-dtags")
 
     # Dev/CI-only drivers — EXCLUDE_FROM_ALL so the default `make` (and the Docker image build)
@@ -902,3 +969,7 @@ if(FETCH_MODELS)
         add_dependencies(turboocr-server fetch_models)
     endif()
 endif()
+
+# --- fastpdf2png PDF renderer, built from its pinned source for the target ---
+include(cmake/TurboFastpdf2png.cmake)
+turbo_add_fastpdf2png(turboocr-server turboocr-cpu-server)

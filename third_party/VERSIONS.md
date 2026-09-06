@@ -13,7 +13,8 @@ exact version/commit you pulled.
 | Clipper | `clipper/clipper.{hpp,cpp}` | 6.4.2 | https://sourceforge.net/projects/polyclipping/ |
 | Wuffs | `wuffs/wuffs-v0.4.c` (single file) | 0.4.0-alpha.9+3837.20240914 (rev `a14745aa458fd2b2785034efa04eab3c7b5b91e0`, 2024-09-14) | https://github.com/google/wuffs |
 | simdutf | `simdutf/simdutf.{h,cpp}` (amalgamated) | 6.4.0 | https://github.com/simdutf/simdutf/releases/tag/v6.4.0 |
-| PDFium (bblanchon binaries) | installed into `pdfium/` by `scripts/install_pdfium.sh` | `chromium/7857` (pinned in install_pdfium.sh; SHA256-verified per arch — x64 `2ad1fd42…b80541`, arm64 `0e24373e…068e35`) | https://github.com/bblanchon/pdfium-binaries |
+| PDFium (bblanchon binaries) | vendored x86-64 SDK in `pdfium/`; CMake (`cmake/TurboPdfium.cmake`) fetches the target's build into `build/_deps/` when the vendored one is another architecture; `scripts/install_pdfium.sh` does the same in place for Docker | `chromium/7857` (pinned in both; SHA256-verified per arch — x64 `2ad1fd42…b80541`, arm64 `0e24373e…068e35`) | https://github.com/bblanchon/pdfium-binaries |
+| fastpdf2png (PDF page renderer) | built from source by CMake (`cmake/TurboFastpdf2png.cmake`) into `build/fastpdf2png`; `scripts/install_fastpdf2png.sh` builds it into `bin/` for Docker; the x86-64 copies committed in `bin/` are a fallback for x86-64 only | v2.0.10, commit `8358bdc1` (pinned in both) | https://github.com/aiptimizer/fastpdf2png |
 
 ## ONNX Runtime checksum pinning
 

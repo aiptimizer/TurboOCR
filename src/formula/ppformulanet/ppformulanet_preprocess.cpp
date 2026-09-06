@@ -1,6 +1,7 @@
 #include "turbo_ocr/formula/ppformulanet/ppformulanet_preprocess.h"
 
 #include <opencv2/opencv.hpp>
+#include "turbo_ocr/common/cv_geometry.h"
 
 #include <algorithm>
 #include <array>

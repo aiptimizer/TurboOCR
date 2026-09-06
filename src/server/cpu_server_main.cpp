@@ -58,6 +58,11 @@ int main(int argc, char **argv) try {
     TOCR_LOG_INFO("Angle classification disabled via DISABLE_ANGLE_CLS=1");
   }
 
+  // Same idle-memory reaper as the GPU server: freed request buffers must
+  // go back to the OS on glibc and jemalloc alike, or a long-running CPU
+  // server ratchets upward one arena at a time.
+  server::bootstrap::tune_host_allocator();
+
   // Build the PdfRenderer FIRST, before the ORT pipeline pool below. The
   // renderer fork()s a pool of fastpdf2png daemons; forking is safest done
   // before the inference backend spins up its own worker threads / runtime

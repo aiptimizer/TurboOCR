@@ -11,7 +11,7 @@
 #include <iostream>
 #include <ranges>
 
-#include <opencv2/imgproc.hpp>
+#include "turbo_ocr/common/cv_geometry.h"
 
 using turbo_ocr::engine::TrtEngine;
 

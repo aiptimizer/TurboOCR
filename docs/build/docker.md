@@ -61,11 +61,15 @@ manifest:
 4. ONNX Runtime 1.22.0 — pinned SHA256 verified before extraction.
 5. Source COPY (`CMakeLists.txt proto/ include/ src/ tools/
    third_party/ tests/`).
-6. `install_fastpdf2png.sh` for the PDFium-backed PDF renderer.
+6. `install_pdfium.sh` then `install_fastpdf2png.sh` for the PDFium-backed PDF
+   renderer, both keyed on `TARGETARCH` (on arm64 they replace the vendored
+   x86-64 PDFium and rebuild the renderer; both check the ELF architecture of
+   what is already installed).
 7. ```bash
-   cmake .. -DTENSORRT_DIR=/usr/lib/x86_64-linux-gnu -DFETCH_MODELS=OFF
+   cmake .. -DTENSORRT_DIR=/usr/lib/x86_64-linux-gnu -DFETCH_MODELS=OFF -DTURBO_BUILD_FASTPDF2PNG=OFF
    make -j$(nproc)
    ```
+   (`TURBO_BUILD_FASTPDF2PNG=OFF` because step 6 already produced `bin/fastpdf2png`.)
 8. Runtime-only layers (`docker/` configs, `scripts/entrypoint.sh`,
    model fetcher).
 9. `useradd ocr`, symlink `/app/models/rec → /home/ocr/.cache/turbo-ocr/

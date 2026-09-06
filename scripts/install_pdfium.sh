@@ -28,20 +28,26 @@ case "$ARCH" in
   *) echo "install_pdfium: unsupported arch '$ARCH'" >&2; exit 1 ;;
 esac
 
-# Idempotent: if the installed PDFium already matches the target arch, do
-# nothing. Falls back to "x64 vendored copy is fine" when `file` is unavailable.
-if [ -f "$PDFIUM_DIR/lib/libpdfium.so" ]; then
-  if command -v file >/dev/null 2>&1; then
-    cur="$(file -b "$PDFIUM_DIR/lib/libpdfium.so" 2>/dev/null || echo '')"
-    case "$PDFIUM_ARCH" in
-      x64)   echo "$cur" | grep -q "x86-64"  && { echo "install_pdfium: third_party/pdfium already x86_64"; exit 0; } ;;
-      arm64) echo "$cur" | grep -q "aarch64" && { echo "install_pdfium: third_party/pdfium already aarch64"; exit 0; } ;;
-    esac
-  elif [ "$PDFIUM_ARCH" = "x64" ]; then
-    echo "install_pdfium: x86_64 — using vendored third_party/pdfium"
-    exit 0
-  fi
+# Architecture an ELF file was built for, read from bytes 18-19 of its header
+# (e_machine, little-endian): "x64", "arm64", "other" or "" when missing. Uses
+# od so a minimal container without `file` gets the same answer.
+elf_arch() {
+  [ -f "$1" ] || { echo ""; return; }
+  case "$(od -An -tx1 -j18 -N2 "$1" 2>/dev/null | tr -d ' \n')" in
+    3e00) echo "x64" ;;
+    b700) echo "arm64" ;;
+    *)    echo "other" ;;
+  esac
+}
+
+# Idempotent: if the installed PDFium is already built for the target arch, do
+# nothing. Any other answer (wrong arch, missing, unreadable) means install.
+cur="$(elf_arch "$PDFIUM_DIR/lib/libpdfium.so")"
+if [ "$cur" = "$PDFIUM_ARCH" ]; then
+  echo "install_pdfium: third_party/pdfium already ${PDFIUM_ARCH}"
+  exit 0
 fi
+[ -n "$cur" ] && echo "install_pdfium: third_party/pdfium is ${cur}, target is ${PDFIUM_ARCH}; replacing it"
 
 # Pinned to a concrete bblanchon tag (not the moving `latest`) so a clean-room
 # build is reproducible and the SHA256 below stays valid. Override PDFIUM_RELEASE

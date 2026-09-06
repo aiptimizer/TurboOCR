@@ -19,12 +19,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 BUILD=build-coverage
-# Reuse the existing build's TensorRT location unless overridden.
+# TensorRT is discovered by CMake (tarball root, /usr/local/tensorrt, or the
+# distribution packages); pass the hint through only when one is given, or
+# reuse the existing build's.
 TRT_DIR="${TENSORRT_DIR:-$(sed -n 's/^TENSORRT_DIR:PATH=//p' build/CMakeCache.txt 2>/dev/null)}"
-if [[ -z "$TRT_DIR" ]]; then
-  echo "TENSORRT_DIR not set and no build/CMakeCache.txt to read it from" >&2
-  exit 1
-fi
+TRT_FLAG=()
+[[ -n "$TRT_DIR" ]] && TRT_FLAG=(-DTENSORRT_DIR="$TRT_DIR")
 CUDA_ARCH="${CUDA_ARCH:-75}"
 GCOVR=(python3 -m gcovr)
 
@@ -32,7 +32,7 @@ if [[ "${1:-}" != "--no-build" ]]; then
   cmake -S . -B "$BUILD" \
     -DCMAKE_BUILD_TYPE=Debug \
     -DTURBO_COVERAGE=ON \
-    -DTENSORRT_DIR="$TRT_DIR" \
+    "${TRT_FLAG[@]}" \
     -DCMAKE_CUDA_ARCHITECTURES="$CUDA_ARCH" \
     -DTURBO_PDFIUM_DIR="$ROOT/third_party/pdfium"
   cmake --build "$BUILD" --target turbo_ocr_tests -j"$(nproc)"

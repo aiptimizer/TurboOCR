@@ -121,7 +121,7 @@ RUN TARGETARCH=${TARGETARCH} bash scripts/install_fastpdf2png.sh && \
 # triplet, which differs per architecture.
 RUN mkdir -p build && cd build && \
     case "${TARGETARCH:-amd64}" in arm64) TRT_DIR=/usr/lib/aarch64-linux-gnu ;; *) TRT_DIR=/usr/lib/x86_64-linux-gnu ;; esac && \
-    cmake .. -DTENSORRT_DIR=${TRT_DIR} -DFETCH_MODELS=OFF && \
+    cmake .. -DTENSORRT_DIR=${TRT_DIR} -DFETCH_MODELS=OFF -DTURBO_BUILD_FASTPDF2PNG=OFF && \
     make -j$(nproc)
 
 # Runtime-only layers — edits here do not trigger a rebuild.

@@ -116,7 +116,7 @@ RUN TARGETARCH=${TARGETARCH} bash scripts/install_pdfium.sh && \
 
 # Build CPU-only mode
 RUN mkdir -p build_cpu && cd build_cpu && \
-    cmake .. -DUSE_CPU_ONLY=ON -DFETCH_MODELS=OFF && \
+    cmake .. -DUSE_CPU_ONLY=ON -DFETCH_MODELS=OFF -DTURBO_BUILD_FASTPDF2PNG=OFF && \
     make -j$(nproc)
 
 # Runtime-only layers — edits here do not trigger a rebuild.

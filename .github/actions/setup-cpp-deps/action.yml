@@ -1,13 +1,36 @@
 name: "Set up C++ build deps"
 description: >-
-  Install the native CPU build dependencies on an Ubuntu runner: apt packages,
-  Drogon (built from source — not packaged) and the ONNX Runtime C++ SDK into a
-  dedicated, cacheable prefix, plus vendored PDFium. Mirrors docker/Dockerfile.cpu
-  so CI and the image agree.
+  Install the native CPU build dependencies on an Ubuntu runner (x64 or arm64):
+  apt packages, Drogon (built from source — not packaged) and the ONNX Runtime
+  C++ SDK for the runner's architecture into a dedicated, cacheable prefix, plus
+  PDFium and the fastpdf2png renderer. Mirrors docker/Dockerfile.cpu so CI and
+  the image agree.
+
+inputs:
+  pdf-renderer:
+    description: >-
+      "scripts" installs PDFium + fastpdf2png into third_party/ and bin/ with the
+      Docker-route scripts (the server then needs -DTURBO_BUILD_FASTPDF2PNG=OFF);
+      "cmake" leaves both to the CMake build (cmake/TurboPdfium.cmake fetches the
+      SDK for this architecture, cmake/TurboFastpdf2png.cmake builds the renderer).
+    required: false
+    default: "scripts"
 
 runs:
   using: "composite"
   steps:
+    # One vocabulary for the architecture: ORT tarball name, Docker TARGETARCH.
+    - name: Detect architecture
+      shell: bash
+      run: |
+        case "${{ runner.arch }}" in
+          X64)   echo "ORT_ARCH=x64"     >> "$GITHUB_ENV"; echo "TARGETARCH=amd64" >> "$GITHUB_ENV"
+                 echo "ORT_SHA256=8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3" >> "$GITHUB_ENV" ;;
+          ARM64) echo "ORT_ARCH=aarch64" >> "$GITHUB_ENV"; echo "TARGETARCH=arm64" >> "$GITHUB_ENV"
+                 echo "ORT_SHA256=bb76395092d150b52c7092dc6b8f2fe4d80f0f3bf0416d2f269193e347e24702" >> "$GITHUB_ENV" ;;
+          *)     echo "unsupported runner architecture: ${{ runner.arch }}" >&2; exit 1 ;;
+        esac
+
     - name: APT packages
       shell: bash
       run: |
@@ -46,18 +69,18 @@ runs:
         make -j"$(nproc)"
         make install
 
-    - name: Install ONNX Runtime 1.22.0 x64 (into prefix)
+    - name: Install ONNX Runtime 1.22.0 (into prefix, this runner's architecture)
       if: steps.deps-cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
         PREFIX="${{ github.workspace }}/.cpp-deps"
         mkdir -p "$PREFIX/include" "$PREFIX/lib"
         cd /tmp
-        wget -q "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz" -O ort.tgz
-        echo "8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3  ort.tgz" | sha256sum -c -
+        wget -q "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-${ORT_ARCH}-1.22.0.tgz" -O ort.tgz
+        echo "${ORT_SHA256}  ort.tgz" | sha256sum -c -
         tar xzf ort.tgz
-        cp -r onnxruntime-linux-x64-1.22.0/include/* "$PREFIX/include/"
-        cp onnxruntime-linux-x64-1.22.0/lib/libonnxruntime.so* "$PREFIX/lib/"
+        cp -r onnxruntime-linux-${ORT_ARCH}-1.22.0/include/* "$PREFIX/include/"
+        cp onnxruntime-linux-${ORT_ARCH}-1.22.0/lib/libonnxruntime.so* "$PREFIX/lib/"
 
     # Publish the prefix so every later step in the job (and cmake) finds it.
     - name: Export prefix to environment
@@ -67,13 +90,15 @@ runs:
         echo "CMAKE_PREFIX_PATH=$PREFIX${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}" >> "$GITHUB_ENV"
         echo "LD_LIBRARY_PATH=$PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
 
-    # PDFium (vendored in third_party/) + fastpdf2png for the pdf_renderer TU.
-    # Vendored copy on amd64 — no network, fast — so run every time (not cached).
-    - name: Install PDFium + fastpdf2png
+    # PDFium + fastpdf2png the Docker way (scripts into third_party/ and bin/).
+    # On amd64 the vendored SDK is used as is; on arm64 the scripts fetch the
+    # arm64 SDK and rebuild the renderer. A failure here is a real failure —
+    # the server's renderer liveness probe would only surface it at startup.
+    - name: Install PDFium + fastpdf2png (scripts)
+      if: inputs.pdf-renderer == 'scripts'
       shell: bash
       run: |
-        TARGETARCH=amd64 bash scripts/install_pdfium.sh
+        bash scripts/install_pdfium.sh
         sudo cp third_party/pdfium/lib/libpdfium.so /usr/lib/
-        TARGETARCH=amd64 bash scripts/install_fastpdf2png.sh || true
-        sudo cp bin/libpdfium.so /usr/lib/ 2>/dev/null || true
+        bash scripts/install_fastpdf2png.sh
         sudo ldconfig

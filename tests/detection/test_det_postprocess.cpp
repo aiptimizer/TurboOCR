@@ -1,6 +1,6 @@
 #include <catch_amalgamated.hpp>
 #include <cstdlib>
-#include <opencv2/imgproc.hpp>
+#include "turbo_ocr/common/cv_geometry.h"
 
 #include "turbo_ocr/detection/det_config.h"
 #include "turbo_ocr/detection/det_postprocess.h"
