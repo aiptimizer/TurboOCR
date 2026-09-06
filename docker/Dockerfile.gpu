@@ -103,6 +103,7 @@ WORKDIR /app
 # Layered COPY so runtime edits (entrypoint.sh, download_models.sh, docker/
 # configs, models/, README) don't invalidate the expensive C++ build layers.
 COPY CMakeLists.txt ./
+COPY cmake/ cmake/
 COPY proto/ proto/
 COPY include/ include/
 COPY src/ src/

@@ -95,6 +95,7 @@ WORKDIR /app
 # Layered COPY so runtime edits (entrypoint.sh, docker/ configs, models/)
 # don't bust the C++ build layer.
 COPY CMakeLists.txt ./
+COPY cmake/ cmake/
 COPY proto/ proto/
 COPY include/ include/
 COPY src/ src/
